@@ -103,7 +103,7 @@ pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<St
             // mununu#1086 — `cone_inputs` reports NAMED cells only (its other reader, the
             // verify-auto seeder, seeds by name); the symbol-less next-less states the cone
             // reaches are collected here under their synthesized names.
-            out.extend(anonymous_free_states_in_cone_of(file, nid, &free));
+            out.extend(anonymous_free_states_in_cone_of(file, nid, &free, false));
         }
     }
     out.into_iter().collect()
@@ -143,12 +143,8 @@ fn free_states(file: &Btor2File) -> HashMap<Nid, (Nid, String)> {
                     None => {
                         let name = format!("state_{}", l.nid);
                         if taken.contains(&name) {
-                            tracing::warn!(
-                                nid = l.nid,
-                                "a symbol-less state with no `next` cannot be sampled: the \
-                                 design already names another cell `{name}`; an atom reading \
-                                 it is read per step (mununu#1086)"
-                            );
+                            // A collision is not sampleable; the cone walk reports it and the
+                            // exact engine refuses an atom reaching it (never read per step).
                             return None;
                         }
                         name
@@ -164,18 +160,30 @@ fn free_states(file: &Btor2File) -> HashMap<Nid, (Nid, String)> {
 /// mununu#1086 — the symbol-less next-less states (under their synthesized names) in the
 /// combinational cone of `start`, stopping at every register as
 /// [`crate::adapter::btor2::parser::cone_inputs`] does. What the exact engine's fan-in guard
-/// adds to `cone_inputs` when the lift is opted out, so such an atom is refused rather than
-/// read per step. Sorted and deduplicated; empty after the lift (the cell has a `next` then).
+/// adds to `cone_inputs`, so such an atom is refused rather than read per step: when the lift
+/// is opted out every such cell is listed; with the lift on, only a cell the lift could NOT
+/// sample is — one whose synthesized name the design already gives another cell, listed as
+/// `state_<nid> (not sampled: the design names another cell `state_<nid>`)`. Sorted and
+/// deduplicated; empty after a lift that sampled every cell (each has a `next` then).
 pub(crate) fn anonymous_free_states_in_cone(file: &Btor2File, start: Nid) -> Vec<String> {
-    anonymous_free_states_in_cone_of(file, start, &free_states(file))
+    anonymous_free_states_in_cone_of(file, start, &free_states(file), true)
 }
 
 fn anonymous_free_states_in_cone_of(
     file: &Btor2File,
     start: Nid,
     free: &HashMap<Nid, (Nid, String)>,
+    with_collisions: bool,
 ) -> Vec<String> {
     let symbols = collect_symbols(file);
+    let has_next: HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
     let mut seen: HashSet<Nid> = HashSet::new();
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut work: Vec<Nid> = vec![start];
@@ -188,10 +196,19 @@ fn anonymous_free_states_in_cone_of(
         };
         match &line.node {
             Node::State { .. } => {
-                if !symbols.contains_key(&nid)
-                    && let Some((_, name)) = free.get(&nid)
-                {
-                    out.insert(name.clone());
+                if !symbols.contains_key(&nid) && !has_next.contains(&nid) {
+                    match free.get(&nid) {
+                        Some((_, name)) => {
+                            out.insert(name.clone());
+                        }
+                        None if with_collisions => {
+                            out.insert(format!(
+                                "state_{nid} (not sampled: the design names another cell \
+                                 `state_{nid}`)"
+                            ));
+                        }
+                        None => {}
+                    }
                 }
             }
             Node::Input { .. } | Node::Const { .. } | Node::Sort { .. } => {}
@@ -491,7 +508,9 @@ mod tests {
         );
         assert!(cone_inputs(&lift.file, 9).is_empty());
         assert!(anonymous_free_states_in_cone(&lift.file, 9).is_empty());
-        // A design that already names another cell `state_3` keeps the anonymous cell as is.
+        // A design that already names another cell `state_3` cannot sample the anonymous cell:
+        // the lift leaves it, and the cone walk names the collision so the engine refuses the
+        // atom (never reads the cell per step).
         const COLLISION: &str = "1 sort bitvec 1\n2 input 1 state_3\n3 state 1\n\
 4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
 11 next 1 4 9\n";
@@ -501,7 +520,16 @@ mod tests {
             vec!["state_3"],
             "the input, not the cell"
         );
-        assert!(anonymous_free_states_in_cone(&file, 9).is_empty());
+        let lift = lift_atom_inputs(&file, &regs).expect("lifts the input");
+        assert_eq!(
+            anonymous_free_states_in_cone(&lift.file, 9),
+            vec!["state_3 (not sampled: the design names another cell `state_3`)"]
+        );
+        // The collision is reported before the lift as well (the opt-out guard's view).
+        assert_eq!(
+            anonymous_free_states_in_cone(&file, 9),
+            vec!["state_3 (not sampled: the design names another cell `state_3`)"]
+        );
     }
 
     #[test]

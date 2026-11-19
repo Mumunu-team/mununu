@@ -13163,6 +13163,26 @@ mod tests {
         assert_eq!(abstention_kind(&err), AbstentionKind::RefusedInputAtom);
     }
 
+    /// mununu#1086 — a design that already names another cell `state_3` cannot sample the
+    /// anonymous cut net under that name; the atom reaching it is then REFUSED, naming the
+    /// collision — never read once in the atom and again in the step.
+    #[test]
+    fn x1086_a_name_collision_refuses_the_atom_instead_of_reading_the_cell_per_step() {
+        const COLLISION: &str = "1 sort bitvec 1\n2 input 1 state_3\n3 state 1\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+        let presented =
+            crate::mu_calculus::parser::parse("nu Y.(((accept == 0) || [] (v == 1)) && [] Y)")
+                .expect("parse");
+        let err = exact_symbolic_verdict(COLLISION, &presented)
+            .expect_err("the unsampleable anonymous cut net refuses the atom");
+        assert!(
+            err.contains("not sampled: the design names another cell `state_3`"),
+            "{err}"
+        );
+        assert_eq!(abstention_kind(&err), AbstentionKind::RefusedInputAtom);
+    }
+
     #[test]
     fn state_without_next_is_free_each_step_not_a_held_register() {
         // `f` has no `next` line ⇒ free. `st` starts 0 and becomes 1 whenever f=1.
