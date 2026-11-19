@@ -3372,6 +3372,11 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
                 adapter = s.adapter,
                 automaton = s.automaton.as_deref().unwrap_or("(unresolved)"),
             );
+            // mununu#1106 item 3 — what the adapter did less than asked, beside the source
+            // it translated (the JSON report carries the same under `sources[].warnings`).
+            for w in &s.warnings {
+                println!("      warning: {w}");
+            }
             // R4W-3 — clustered cone-of-influence comparison (BTOR2 /
             // `sv-yosys` route with declared properties). Present only
             // when the bit-blaster computed it; absent for other
@@ -3573,6 +3578,10 @@ fn print_inspection_human(report: &mununu_core::verify::InspectionReport) {
             adapter = s.adapter,
             automaton = s.automaton.as_deref().unwrap_or("(unresolved)"),
         );
+        // mununu#1106 item 3 — the adapter's own account of what it left out of this source.
+        for w in &s.warnings {
+            println!("      warning: {w}");
+        }
     }
     println!("  automata ({}):", report.automata.len());
     for a in &report.automata {

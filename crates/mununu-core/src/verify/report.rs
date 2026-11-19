@@ -79,6 +79,13 @@ pub struct SourceSummary {
     /// adapters that did not run the partition (xstate, ctxdsl, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_summary: Option<crate::adapter::partition::PartitionSummary>,
+    /// What the adapter (or the predicate-cube lift) said it did less than asked while
+    /// translating this source — a construct it dropped, a variable it left out, an
+    /// approximation it took — in the adapter's own words (mununu#1106 item 3). Until then these
+    /// reached the log only, and a verdict over a model missing a piece read as a verdict over
+    /// the whole. Empty (and absent on the wire) when the translation was complete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Composition shape used for evaluation.

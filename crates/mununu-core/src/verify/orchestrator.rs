@@ -123,6 +123,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
                 adapter: source.adapter.clone(),
                 automaton: None,
                 partition_summary: None,
+                warnings: Vec::new(),
             });
             continue;
         }
@@ -152,7 +153,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
         };
 
         for (instance_id, content) in instances {
-            let (raw_ctxdsl, partition_summary) = dispatch_adapter(
+            let (raw_ctxdsl, partition_summary, warnings) = dispatch_adapter(
                 &source.adapter,
                 &instance_id,
                 &path,
@@ -188,6 +189,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
                 adapter: source.adapter.clone(),
                 automaton: None,
                 partition_summary,
+                warnings,
             });
         }
     }
@@ -638,7 +640,7 @@ pub fn inspect_project(
             // so there are no clustered-COI inputs — pass the empty
             // default. The bit-blaster then skips the clustered-COI
             // comparison (legacy intrinsic-seed-only behaviour).
-            let (raw_ctxdsl, partition_summary) = dispatch_adapter(
+            let (raw_ctxdsl, partition_summary, warnings) = dispatch_adapter(
                 &source.adapter,
                 &instance_id,
                 &path,
@@ -669,6 +671,7 @@ pub fn inspect_project(
                 adapter: source.adapter.clone(),
                 automaton: None,
                 partition_summary,
+                warnings,
             });
         }
     }
@@ -857,6 +860,15 @@ pub fn inspect_project(
 // ids, paths, options) rather than a cohesive struct, so an allow is the
 // right call here — matching the precedent on the other multi-input
 // dispatch / realize helpers in this crate.
+/// What a source's translation hands the orchestrator: the CTXDSL text, the auto-partition
+/// telemetry when the adapter ran it, and the adapter's warnings — what it did less than asked,
+/// in its own words — which the per-source report carries (mununu#1106 item 3).
+type Dispatched = (
+    String,
+    Option<crate::adapter::partition::PartitionSummary>,
+    Vec<String>,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_adapter(
     adapter: &str,
@@ -872,8 +884,17 @@ fn dispatch_adapter(
     // adapters ignore it. Empty default on the inspection path (no
     // property resolution there).
     cluster_coi: &ClusterCoiInputs,
-) -> Result<(String, Option<crate::adapter::partition::PartitionSummary>), VerifyError> {
-    let to_pair = |out: crate::adapter::AdapterOutput| (out.ctxdsl, out.partition_summary);
+) -> Result<Dispatched, VerifyError> {
+    // mununu#1106 item 3 — the adapter's warnings travel with the CTXDSL: `to_pair` used to keep
+    // the text and the partition summary and DROP `out.warnings`, so a construct an adapter
+    // left out reached the log at best and the report never.
+    let to_triple = |out: crate::adapter::AdapterOutput| {
+        (
+            out.ctxdsl,
+            out.partition_summary,
+            out.warnings.into_iter().map(|w| w.message).collect(),
+        )
+    };
     let err_for = |adapter: &str, source_id: &str, err: crate::adapter::AdapterError| {
         VerifyError::AdapterTranslationFailed {
             source_id: source_id.to_string(),
@@ -885,13 +906,13 @@ fn dispatch_adapter(
     match adapter {
         "ctxdsl" => {
             warn_unused_additional_files(adapter, source_id, additional_files);
-            Ok((content.to_string(), None))
+            Ok((content.to_string(), None, Vec::new()))
         }
         "xstate" => {
             warn_unused_additional_files(adapter, source_id, additional_files);
             let opts = AdapterOptions::default();
             XStateAdapter::translate(content, &opts)
-                .map(to_pair)
+                .map(to_triple)
                 .map_err(|err| err_for(adapter, source_id, err))
         }
         // The sole SystemVerilog route (S.2b removed the native `sv-rtl`
@@ -914,21 +935,21 @@ fn dispatch_adapter(
             warn_unused_additional_files(adapter, source_id, additional_files);
             let opts = AdapterOptions::default();
             crate::adapter::crewai::CrewaiAdapter::translate(content, &opts)
-                .map(to_pair)
+                .map(to_triple)
                 .map_err(|err| err_for(adapter, source_id, err))
         }
         "langgraph" => {
             warn_unused_additional_files(adapter, source_id, additional_files);
             let opts = AdapterOptions::default();
             crate::adapter::langgraph::LangGraphAdapter::translate(content, &opts)
-                .map(to_pair)
+                .map(to_triple)
                 .map_err(|err| err_for(adapter, source_id, err))
         }
         "microcode" => {
             warn_unused_additional_files(adapter, source_id, additional_files);
             let opts = AdapterOptions::default();
             crate::adapter::microcode::MicrocodeAdapter::translate(content, &opts)
-                .map(to_pair)
+                .map(to_triple)
                 .map_err(|err| err_for(adapter, source_id, err))
         }
         "extraction" => {
@@ -942,13 +963,13 @@ fn dispatch_adapter(
                 ..AdapterOptions::default()
             };
             crate::adapter::extraction::ExtractionAdapter::translate(content, &opts)
-                .map(to_pair)
+                .map(to_triple)
                 .map_err(|err| err_for(adapter, source_id, err))
         }
         "c-codesign" => {
             warn_unused_additional_files(adapter, source_id, additional_files);
             dispatch_c_codesign(source_id, file_path, options, base_dir)
-                .map(|ctxdsl| (ctxdsl, None))
+                .map(|ctxdsl| (ctxdsl, None, Vec::new()))
         }
         other => Err(VerifyError::UnknownAdapter {
             source_id: source_id.to_string(),
@@ -1033,7 +1054,9 @@ fn dispatch_sv_yosys(
     options: &std::collections::BTreeMap<String, toml::Value>,
     base_dir: &Path,
     cluster_coi: &ClusterCoiInputs,
-) -> Result<(String, Option<crate::adapter::partition::PartitionSummary>), VerifyError> {
+) -> Result<Dispatched, VerifyError> {
+    // mununu#1106 item 3 — what this route says it did less than asked, for the report.
+    let mut carried: Vec<String> = Vec::new();
     // Additional SV sources (submodules / stub packages), by basename —
     // also the typedef / case-literal source for sidecar widening below.
     let additional_sources: Vec<(String, String)> = additional_files
@@ -1081,6 +1104,8 @@ fn dispatch_sv_yosys(
             for w in &lint_warnings {
                 tracing::warn!(source_id, "{w}");
             }
+            // mununu#1106 item 3 — the lint's findings ride with the source into the report.
+            carried.extend(lint_warnings.iter().map(|w| w.to_string()));
             let widened = crate::adapter::systemverilog::sidecar_widening::widen_sidecar(
                 &raw,
                 content,
@@ -1141,7 +1166,12 @@ fn dispatch_sv_yosys(
             &opts,
             additional_sources.clone(),
             top,
-        );
+        )
+        .map(|(ctxdsl, partition, lift_warnings)| {
+            // The sidecar lint's findings come first, then the lift's.
+            carried.extend(lift_warnings);
+            (ctxdsl, partition, carried)
+        });
     }
 
     if is_multi_module {
@@ -1173,7 +1203,7 @@ fn dispatch_sv_yosys(
             adapter: "sv-yosys".to_string(),
             message: err.to_string(),
         })?;
-        return Ok((ctxdsl, None));
+        return Ok((ctxdsl, None, carried));
     }
 
     let yopts = crate::adapter::yosys::YosysOptions {
@@ -1194,7 +1224,10 @@ fn dispatch_sv_yosys(
             for w in &out.warnings {
                 tracing::warn!(source_id, "{}", w.message);
             }
-            (out.ctxdsl, out.partition_summary)
+            // mununu#1106 item 3 — and into the report, beside the source.
+            let mut carried = carried;
+            carried.extend(out.warnings.into_iter().map(|w| w.message));
+            (out.ctxdsl, out.partition_summary, carried)
         })
         .map_err(|err| VerifyError::AdapterTranslationFailed {
             source_id: source_id.to_string(),
@@ -1224,7 +1257,7 @@ fn dispatch_sv_predicate_cube(
     opts: &AdapterOptions,
     additional_sources: Vec<(String, String)>,
     top: Option<String>,
-) -> Result<(String, Option<crate::adapter::partition::PartitionSummary>), VerifyError> {
+) -> Result<Dispatched, VerifyError> {
     use crate::adapter::btor2::kmts_lift::{
         MayEdgeInference, MustEdgeInference, PredicateCubeLiftOptions, PredicateSpec,
         lift_predicate_cube,
@@ -1279,12 +1312,15 @@ fn dispatch_sv_predicate_cube(
     for w in &result.warnings {
         tracing::warn!(source_id, "{}", w.message);
     }
+    // mununu#1106 item 3 — the lift's warnings (a predicate it could not bind, an
+    // unestablished initial cube, …) reach the report beside the source, not the log alone.
+    let carried: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
 
     // Automaton name = the SV module; the verify.toml property `over` must
     // reference it (the same name the module declares).
     let ctxdsl = crate::adapter::clts_to_ir::clts_to_ctxdsl(&result.clts, &ann.module, source_id)
         .map_err(|err| translate_err(format!("cube → CTXDSL: {}", err.message)))?;
-    Ok((ctxdsl, None))
+    Ok((ctxdsl, None, carried))
 }
 
 /// Dispatch the `c-codesign` adapter — runs LLVM-IR extraction via
@@ -3305,5 +3341,71 @@ over = "Sys"
                 "satisfied verdicts should not carry a counterexample"
             );
         }
+    }
+
+    /// mununu#1106 item 3 — REPRODUCER: what an adapter says it left out of a source reaches
+    /// the per-source report (`sources[].warnings`), not the log alone. The XState adapter
+    /// drops a numeric context variable that has no bounds and says so in an `AdapterWarning`;
+    /// on the parent `dispatch_adapter` kept the CTXDSL and the partition summary and dropped
+    /// the warnings, so the report had no `warnings` key. Read through JSON so it names no
+    /// field this change adds: it compiles on the parent and fails there.
+    #[test]
+    fn x1106_an_adapters_warning_about_a_dropped_variable_reaches_the_source_report() {
+        let temp = tempdir().unwrap();
+        let machine = r#"{
+            "id": "m",
+            "initial": "s0",
+            "context": { "count": 0 },
+            "states": { "s0": { "on": { "GO": "s1" } }, "s1": {} }
+        }"#;
+        let _ = write_ctxdsl_source(temp.path(), "m.json", machine);
+        let config = VerifyConfig::from_toml(
+            r#"
+[project]
+name = "Dropped"
+
+[[sources]]
+id = "m"
+adapter = "xstate"
+files = ["m.json"]
+
+[alphabet]
+strategy = "direct"
+
+[composition]
+semantics = "asynchronous"
+members = ["m"]
+name = "System"
+
+[[properties]]
+name = "trivial"
+formula = "true"
+over = "System"
+"#,
+        )
+        .unwrap();
+        let inspection = inspect_project(&config, temp.path()).expect("inspection succeeded");
+        let json = serde_json::to_value(&inspection).expect("serializes");
+        let source = &json["sources"][0];
+        assert_eq!(source["id"], "m", "{json}");
+        let warnings = source["warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the source report carries `warnings`: {source}"));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().is_some_and(|w| w.contains("'count'"))),
+            "{warnings:?}"
+        );
+        // The verify path carries the same.
+        let report = verify_project(&config, temp.path()).expect("verify succeeded");
+        let json = serde_json::to_value(&report).expect("serializes");
+        assert!(
+            json["sources"][0]["warnings"].as_array().is_some_and(|w| w
+                .iter()
+                .any(|w| w.as_str().is_some_and(|w| w.contains("'count'")))),
+            "{}",
+            json["sources"][0]
+        );
     }
 }
