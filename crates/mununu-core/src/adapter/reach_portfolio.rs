@@ -1587,8 +1587,8 @@ fn decide_with_members_using(
 fn clock_sweep_cause(wall_fired: bool, wall_ms: u128) -> String {
     if wall_fired {
         format!(
-            "stopped at the portfolio's wall deadline ({wall_ms} ms, --timeout-ms) before it \
-             reached a verdict"
+            "stopped at the portfolio's wall deadline ({wall_ms} ms: `--timeout-ms` on the `btor2` \
+             verbs, the run budget on `sv verify-auto`) before it reached a verdict"
         )
     } else {
         "stopped when the run budget expired, before it reached a verdict".to_string()
@@ -2779,8 +2779,8 @@ mod tests {
     fn the_clock_sweep_names_the_wall_or_the_budget() {
         assert_eq!(
             clock_sweep_cause(true, 60_000),
-            "stopped at the portfolio's wall deadline (60000 ms, --timeout-ms) before it reached \
-             a verdict"
+            "stopped at the portfolio's wall deadline (60000 ms: `--timeout-ms` on the `btor2` \
+             verbs, the run budget on `sv verify-auto`) before it reached a verdict"
         );
         assert_eq!(
             clock_sweep_cause(false, 60_000),

@@ -10027,8 +10027,9 @@ fn attribute_portfolio_abstention(
                  does not carry (a constant width, an array sort, a missing binary): fix or route \
                  around it — more time will not help. A budget stop (mununu#893: the native \
                  member's deterministic resource limit, the same on every host) names the budget \
-                 it hit — a larger --timeout-ms scales it. An all-unknown with neither is the \
-                 genuine search abstention."
+                 it hit — `MUNUNU_NATIVE_QUERY_RLIMIT` raises it on this verb (`--timeout-ms` \
+                 scales the nominal allowance on the `btor2` verbs, which `sv verify-auto` does \
+                 not take). An all-unknown with neither is the genuine search abstention."
             .to_string(),
         items,
         property: Some(prop.name.clone()),

@@ -342,8 +342,8 @@ impl std::fmt::Display for BmcError {
             BmcError::ResourceLimit { k, units } => write!(
                 f,
                 "native BMC: the deterministic query budget ({units} z3 resource units, about \
-                 {} ms nominal) ran out at depth {k}; a larger --timeout-ms scales it, \
-                 {QUERY_RLIMIT_ENV} sets it",
+                 {} ms nominal) ran out at depth {k}; {QUERY_RLIMIT_ENV} sets it on any verb, \
+                 and --timeout-ms scales the nominal allowance on the `btor2` verbs that take it",
                 units / UNITS_PER_NOMINAL_MS.max(1)
             ),
         }
@@ -2282,5 +2282,24 @@ mod tests {
         let gate = QueryGate::default();
         assert_eq!(with_cancel_watchdog(Some(&cancel), &gate, || {}, || 7), 7);
         assert_eq!(with_cancel_watchdog(None, &gate, || {}, || 8), 8);
+    }
+
+    /// mununu#1106 (U2 sibling of item 4) — the budget-stop message names a remedy that works on
+    /// the verb the user ran: `MUNUNU_NATIVE_QUERY_RLIMIT` on any verb, and `--timeout-ms` only
+    /// as the `btor2` verbs' flag (`sv verify-auto` has none). On the parent it offered a bare
+    /// `--timeout-ms` as the thing that scales it.
+    #[test]
+    fn x1106_the_budget_stop_names_a_remedy_for_the_verb_the_user_ran() {
+        let msg = BmcError::ResourceLimit {
+            k: 7,
+            units: 15_000,
+        }
+        .to_string();
+        assert!(
+            msg.contains("MUNUNU_NATIVE_QUERY_RLIMIT sets it on any verb")
+                && msg.contains("on the `btor2` verbs that take it")
+                && !msg.contains("a larger --timeout-ms scales it"),
+            "{msg}"
+        );
     }
 }
