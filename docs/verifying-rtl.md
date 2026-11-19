@@ -1597,7 +1597,10 @@ verdict over one would be a precision loss rather than a soundness win, and woul
 cut-point contract that applying a cut may not change a verdict; the existing cut-point caveat in
 the coverage summary is what governs a violation under a cut.
 
-The remedy is to supply an `init` via a sidecar. Retrying is never the answer.
+The remedy is in the RTL: `detail` names the registers; give them a reset value (a reset branch, or
+a declaration initializer) and keep reset-gating on, which is what turns a reset's values into
+`init` lines. `sv verify-auto` cannot take an initial value from the command line or the request
+today — a mununu limitation. Retrying is never the answer.
 
 ### A violation through an undriven net: `violation-over-free-leaves` (mununu#750)
 
@@ -1679,8 +1682,10 @@ enumerates it only up to **16**; past that the property abstains with
 `reproducible`; no budget is named because none applies. Unlike `unestablished-initial-state` above,
 **nothing was decided and then withheld** — the start set was never read.
 
-The remedy is the same: establish the value — keep reset-gating on (the reset's values are injected
-as `init`), add an `init` through a sidecar, or pin the register with `--pin`.
+The remedy is the same: establish the value in the RTL — `detail` names the registers; give them a
+reset value and keep reset-gating on (the reset's values are injected as `init`). `--pin` ties a
+primary input, not a register, and `sv verify-auto` cannot take an initial value today — a mununu
+limitation.
 
 ### A violation read only at a doubtful start cell: `violation-at-unestablished-initial-cubes` (mununu#1085)
 

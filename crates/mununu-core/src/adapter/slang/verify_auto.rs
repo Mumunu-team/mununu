@@ -2146,6 +2146,7 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
     if uninit.is_empty() {
         return;
     }
+    let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
 
     for p in report.properties.iter_mut() {
         if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
@@ -2163,17 +2164,21 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
         }
         let atoms = crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula);
         let cone = crate::adapter::btor2::dep_graph::cone_leaf_nids(&file, &atoms);
-        let touched: Vec<String> = cone
+        // mununu#1121 — the registers by the names the design gives them (an unnamed state by
+        // its BTOR2 node id), so the remedy can point at them.
+        let mut touched: Vec<String> = cone
             .iter()
             .filter(|n| uninit.contains(n))
-            .map(|n| n.to_string())
+            .map(|n| symbols.get(n).cloned().unwrap_or_else(|| format!("n{n}")))
             .collect();
+        touched.sort();
+        touched.dedup();
         if touched.is_empty() {
             continue;
         }
         p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
         p.bottom_reason = Some(BottomReason::UnestablishedInitialState {
-            registers: touched.len(),
+            registers: touched,
             gated_resets: report.diagnostics.gated_resets.clone(),
         });
     }
@@ -7973,7 +7978,7 @@ pub(crate) fn verify_auto_impl(
                 bottom_reason: Some(BottomReason::UnestablishedInitialCubes {
                     free_dimensions: free_input_bits.len(),
                     cap: MAX_FREE_INIT_DIMENSIONS,
-                    registers: unestablished_registers.len(),
+                    registers: unestablished_registers.iter().cloned().collect(),
                 }),
                 decided_by: None,
                 vacuity: None,
@@ -8959,6 +8964,27 @@ pub(crate) fn escalate_bottom_with_slice(
 /// the wrong order, and two hypotheses refuted — neither of them from the `⊥` itself.
 ///
 /// No longer `Copy`: [`Self::EngineDidNotComplete`] carries the engine's verbatim message.
+/// mununu#1121 — the one remedy for an init-less register that exists on `sv verify-auto`
+/// (`docs/policies/failure-paths.md` Rule 5). The verb takes no sidecar and no `init` key; the
+/// value has to come from the RTL, and the values a reset branch gives are the ones reset-gating
+/// recovers (mununu#578) when it is on.
+const INIT_REMEDY: &str = "To decide this property, give those registers a reset value in the \
+     RTL (a reset branch, or a declaration initializer) and keep reset-gating on — it is on by \
+     default; `--no-gate-reset` (API `gate_reset: false`) turns it off. `sv verify-auto` cannot \
+     take an initial value from the command line or the request today: a mununu limitation.";
+
+/// The first registers of a list by name, the rest as a count, so a one-line reason stays one
+/// line on a cone that touches hundreds.
+fn named_registers(registers: &[String]) -> String {
+    const SHOWN: usize = 12;
+    let shown: Vec<&str> = registers.iter().take(SHOWN).map(String::as_str).collect();
+    if registers.len() > SHOWN {
+        format!("{} and {} more", shown.join(", "), registers.len() - SHOWN)
+    } else {
+        shown.join(", ")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BottomReason {
@@ -9055,8 +9081,9 @@ pub enum BottomReason {
     /// `determinism` is `Reproducible`: this is a property of the model, not of the host. Re-running
     /// will not change it; establishing the reset values will.
     UnestablishedInitialState {
-        /// How many init-less registers the property's cone touches.
-        registers: usize,
+        /// The init-less registers the property's cone touches, by the design's names (an
+        /// unnamed BTOR2 state as `n<id>`), sorted. The API's `registers` field is their count.
+        registers: Vec<String>,
         /// The resets pinned inactive, which is what removed the reset path.
         gated_resets: Vec<String>,
     },
@@ -9101,9 +9128,9 @@ pub enum BottomReason {
         free_dimensions: usize,
         /// The cap they exceeded.
         cap: usize,
-        /// How many init-less registers contribute to them (the remedy's size: an `init` for
-        /// each, via a sidecar or reset-gating).
-        registers: usize,
+        /// The init-less registers that contribute to them, by name, sorted (the remedy's
+        /// size: a reset value for each). The API's `registers` field is their count.
+        registers: Vec<String>,
     },
     /// mununu#1085 — the cube path read a VIOLATED only at initial cube(s) the cycle-0 filter
     /// kept **on doubt**: its query was inconclusive (a timeout or `MUNUNU_CUBE_SMT_RLIMIT`),
@@ -9295,15 +9322,18 @@ impl BottomReason {
                 registers,
                 gated_resets,
             } => format!(
-                "the property's cone touches {registers} register(s) whose INITIAL VALUE is not \
-                 established, with {} pinned inactive. A free cycle-0 state OVER-approximates \
+                "the property's cone touches {} register(s) whose INITIAL VALUE is not \
+                 established ({}), with {} pinned inactive. A free cycle-0 state OVER-approximates \
                  reachability, and that licenses a definite HOLDS but never a definite VIOLATED — \
                  so the violation is withheld rather than reported. Since mununu#578 the reset \
                  values that CAN be recovered are established automatically, so a register still \
                  free here is one with no reset value to recover — it HOLDS through reset \
-                 (`next = ite(rst, d, q)`). Supply an `init` for it via a sidecar to decide this \
-                 property; a `--cutpoint` is deliberately free and is NOT counted here.",
-                gated_resets.join(", ")
+                 (`next = ite(rst, d, q)`). {} A `--cutpoint` is deliberately free and is NOT \
+                 counted here.",
+                registers.len(),
+                named_registers(registers),
+                gated_resets.join(", "),
+                INIT_REMEDY
             ),
             Self::ViolationOverFreeLeaves { leaves } => format!(
                 "the violation was found on a model FREER than the RTL: the property's cone reads \
@@ -9341,11 +9371,13 @@ impl BottomReason {
                 registers,
             } => format!(
                 "the property's predicates have {free_dimensions} FREE initial dimensions (free \
-                 inputs, and predicates over {registers} register(s) with no `init` line), past \
+                 inputs, and predicates over {} register(s) with no `init` line: {}), past \
                  the {cap} the cube path enumerates — so its initial cube set was not read and \
                  nothing was decided. An init-less register is FREE at cycle 0 on every engine \
-                 (mununu#579); supply an `init` for those registers via a sidecar, or let \
-                 reset-gating establish them, to decide this property."
+                 (mununu#579). {}",
+                registers.len(),
+                named_registers(registers),
+                INIT_REMEDY
             ),
             Self::ViolationAtUnestablishedInitialCubes {
                 cubes,
@@ -13558,7 +13590,7 @@ mod tests {
         );
         match &by("ag").bottom_reason {
             Some(BottomReason::UnestablishedInitialState { registers, .. }) => {
-                assert_eq!(*registers, 1, "one init-less register in the cone");
+                assert_eq!(registers.len(), 1, "one init-less register in the cone");
             }
             other => panic!("expected the named reason, got {other:?}"),
         }
@@ -13938,7 +13970,7 @@ mod tests {
         let r = BottomReason::UnestablishedInitialCubes {
             free_dimensions: MAX_FREE_INIT_DIMENSIONS + 1,
             cap: MAX_FREE_INIT_DIMENSIONS,
-            registers: 3,
+            registers: vec!["a_q".into(), "b_q".into(), "c_q".into()],
         };
         assert_eq!(r.tag(), "unestablished-initial-cubes");
         assert_eq!(r.determinism(), BottomDeterminism::Reproducible);
@@ -14410,6 +14442,84 @@ mod tests {
             matches!(report.properties[0].outcome, VerifyOutcome::Violated { .. }),
             "with no reset pinned there is nothing mununu removed, so the verdict stands"
         );
+    }
+
+    /// mununu#1121 (U2.1) — the withheld VIOLATED names the init-less registers and a remedy
+    /// that exists on this verb. The old text said "supply an `init` via a sidecar": `sv
+    /// verify-auto` takes no sidecar and no key is called `init`, so the reader had nothing to
+    /// do. Built through the real withholding path over a BTOR2 with a named init-less state.
+    #[test]
+    fn x1121_the_withheld_violation_names_the_registers_and_a_remedy_this_verb_has() {
+        const NO_INIT: &str =
+            "1 sort bitvec 10\n2 state 1 cnt\n3 one 1\n4 add 1 2 3\n5 next 1 2 4\n";
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "ag".into(),
+                label: None,
+                kind: SvaKind::Assert,
+                formula: "nu X. ((cnt <= 1) && [] X)".into(),
+                outcome: VerifyOutcome::Violated { false_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+                portfolio: None,
+            }],
+            diagnostics: ModelDiagnostics {
+                gated_resets: vec!["rst".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        downgrade_violated_on_unestablished_init(&mut report, NO_INIT);
+        let reason = report.properties[0]
+            .bottom_reason
+            .as_ref()
+            .expect("the violation over a free cnt is withheld");
+        assert_eq!(reason.tag(), "unestablished-initial-state");
+        let line = reason.one_line();
+        assert!(
+            line.contains("(cnt)"),
+            "the register the cone touches is named: {line}"
+        );
+        assert!(
+            line.contains("reset value in the RTL") && line.contains("`--no-gate-reset`"),
+            "the remedy is one this verb has: {line}"
+        );
+        assert!(
+            line.contains("cannot take an initial value") && line.contains("mununu limitation"),
+            "the missing input is owned, not hidden: {line}"
+        );
+        assert!(
+            !line.contains("sidecar"),
+            "no sidecar exists on this verb: {line}"
+        );
+    }
+
+    /// mununu#1121 (U2.1) — the cube path's abstention names its registers the same way, and a
+    /// long list stays one line: the first twelve by name, the rest as a count.
+    #[test]
+    fn x1121_the_initial_cube_abstention_names_its_registers_and_caps_the_list() {
+        let few = BottomReason::UnestablishedInitialCubes {
+            free_dimensions: 20,
+            cap: 16,
+            registers: vec!["a_q".into(), "b_q".into()],
+        };
+        let line = few.one_line();
+        assert!(
+            line.contains("2 register(s) with no `init` line: a_q, b_q"),
+            "{line}"
+        );
+        assert!(!line.contains("sidecar"), "{line}");
+        assert!(line.contains("`--no-gate-reset`"), "{line}");
+
+        let many: Vec<String> = (0..30).map(|i| format!("r{i:02}_q")).collect();
+        let listed = named_registers(&many);
+        assert!(listed.starts_with("r00_q, r01_q"), "{listed}");
+        assert!(listed.ends_with("r11_q and 18 more"), "{listed}");
+        assert!(!listed.contains("r12_q"), "{listed}");
+        assert_eq!(named_registers(&many[..12]).matches(" more").count(), 0);
     }
 
     /// mununu#552 — the dump is a self-contained reproducer: the model AND the formulas.
