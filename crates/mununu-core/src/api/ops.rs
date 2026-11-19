@@ -387,9 +387,15 @@ pub(crate) fn compute_counterstrategy_result(
 /// - When neither is given: returns `(None, None)` — caller decides whether
 ///   that's an error.
 ///
-/// The argument values are user input written into CTXDSL text: each is a string literal
-/// through [`crate::context_dsl::string_literal`] (quotes, backslashes and line breaks
-/// escaped), so a value cannot close the clause or start another declaration.
+/// Every piece of the request written into CTXDSL text is user input (OWASP: never interpolate
+/// it raw). The argument VALUES are string literals through
+/// [`crate::context_dsl::string_literal`] (quotes, backslashes and line breaks escaped), so a
+/// value cannot close the clause or start another declaration. The template id, the argument
+/// KEYS and the automaton name sit in identifier positions, where a literal is not the grammar
+/// and escaping is no help: each must be exactly one CTXDSL identifier
+/// ([`crate::context_dsl::is_identifier`]) or the request is refused with a `400` before any
+/// text is built — an id such as `x { } } } context evil {` used to close the sidecar's blocks
+/// and declare its own content.
 pub(crate) fn resolve_template_ref_for_cache(
     formula: &Option<String>,
     template_ref: &Option<crate::adapter::templates::TemplateRef>,
@@ -403,29 +409,48 @@ pub(crate) fn resolve_template_ref_for_cache(
         Some(t) => t,
         None => return Ok((None, None)),
     };
-    Ok((
-        Some(tref.template.clone()),
-        Some(template_ref_sidecar(tref, automaton)),
-    ))
+    let sidecar =
+        template_ref_sidecar(tref, automaton).map_err(|message| ApiError::BadRequest {
+            message,
+            details: None,
+        })?;
+    Ok((Some(tref.template.clone()), Some(sidecar)))
 }
 
 /// The synthesized sidecar behind a `template_ref`: one formula, named after the template id,
 /// over `automaton`, whose body is the `template` clause with the reference's arguments as
-/// escaped string literals in key order (deterministic text ⇒ a stable cache key).
+/// escaped string literals in key order (deterministic text ⇒ a stable cache key). `Err` names
+/// the first of the template id, an argument key or the automaton that is not a CTXDSL
+/// identifier; no text is built on it.
 pub(crate) fn template_ref_sidecar(
     tref: &crate::adapter::templates::TemplateRef,
     automaton: &str,
-) -> String {
+) -> Result<String, String> {
+    let ident = |what: &str, text: &str| -> Result<(), String> {
+        if crate::context_dsl::is_identifier(text) {
+            Ok(())
+        } else {
+            Err(format!(
+                "template_ref: the {what} {text:?} is not a CTXDSL identifier (letters, digits \
+                 and `_`, not starting with a digit, not a keyword)"
+            ))
+        }
+    };
+    ident("template id", &tref.template)?;
+    ident("automaton", automaton)?;
     let mut args: Vec<(&String, &String)> = tref.args.iter().collect();
     args.sort();
+    for (k, _) in &args {
+        ident("argument key", k)?;
+    }
     let bindings: String = args
         .iter()
         .map(|(k, v)| format!("        {k} = {};\n", crate::context_dsl::string_literal(v)))
         .collect();
-    format!(
+    Ok(format!(
         "context __template_sidecar {{\n  mu_formulas {{\n    formula {id} {{\n      over {automaton};\n      template {id} {{\n{bindings}      }}\n    }}\n  }}\n}}\n",
         id = tref.template
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -491,6 +516,62 @@ context Light {
         );
     }
 
+    /// REPRODUCER (mununu#966 follow-up, OWASP) — the template id, an argument key and the
+    /// automaton name sit in IDENTIFIER positions of the synthesized sidecar, where escaping is
+    /// no help: on the parent, an id of `x { } } } context evil { … }` reached the text raw,
+    /// closed the sidecar's blocks and declared its own context. Each position is refused with a
+    /// `400` naming it, and no text is built; a request that is identifiers throughout is not.
+    #[test]
+    fn a_hostile_template_id_key_or_automaton_is_refused_before_any_text_is_built() {
+        let evil =
+            "x { } } } context evil { mu_formulas { formula pwn { over Light; body = true; } } } ";
+        for (what, template, key, automaton) in [
+            ("template id", evil, "TARGET", "Light"),
+            ("template id", "a;b", "TARGET", "Light"),
+            ("template id", "two\nlines", "TARGET", "Light"),
+            ("argument key", "reachable", evil, "Light"),
+            ("argument key", "reachable", "K;", "Light"),
+            ("argument key", "reachable", "k\n", "Light"),
+            ("automaton", "reachable", "TARGET", evil),
+            ("automaton", "reachable", "TARGET", "Light;"),
+            ("automaton", "reachable", "TARGET", "L\night"),
+        ] {
+            let tref = tref(template, &[(key, "dim")]);
+            let err = resolve_template_ref_for_cache(&None, &Some(tref.clone()), automaton)
+                .expect_err("a non-identifier in an identifier position is refused");
+            let message = match err {
+                ApiError::BadRequest { message, .. } => message,
+                other => panic!("{other:?}"),
+            };
+            assert!(message.contains(what), "{what}: {message}");
+            assert!(message.contains("not a CTXDSL identifier"), "{message}");
+        }
+        // The same request with identifiers throughout resolves to one sidecar with one formula.
+        let (_, ok) = resolve_template_ref_for_cache(
+            &None,
+            &Some(tref("reachable", &[("TARGET", "dim")])),
+            "Light",
+        )
+        .expect("identifiers throughout");
+        let ok = ok.expect("a synthesized sidecar");
+        let doc = crate::context_dsl::parse(&ok).unwrap_or_else(|e| panic!("{ok}\n{e:?}"));
+        assert_eq!(doc.mu_formulas.len(), 1);
+    }
+
+    /// The sidecar builder itself refuses by name and builds nothing on a refusal.
+    #[test]
+    fn the_sidecar_builder_names_the_position_it_refuses() {
+        let err = template_ref_sidecar(&tref("a b", &[("TARGET", "dim")]), "Light").unwrap_err();
+        assert!(
+            err.contains("template id") && err.contains("\"a b\""),
+            "{err}"
+        );
+        let err = template_ref_sidecar(&tref("reachable", &[("TARGET", "dim")]), "L;").unwrap_err();
+        assert!(err.contains("automaton"), "{err}");
+        let err = template_ref_sidecar(&tref("reachable", &[("T }", "dim")]), "Light").unwrap_err();
+        assert!(err.contains("argument key"), "{err}");
+    }
+
     /// mununu#966 (OWASP) — argument values are user input written into CTXDSL text: a value
     /// holding `}`, `;`, `"`, a backslash or a line break cannot close the clause or declare
     /// anything; it parses as exactly one binding whose value round-trips.
@@ -505,7 +586,8 @@ context Light {
             "two\nlines",
             "} formula evil { over Light; body = true; }",
         ] {
-            let sidecar = template_ref_sidecar(&tref("reachable", &[("TARGET", value)]), "Light");
+            let sidecar = template_ref_sidecar(&tref("reachable", &[("TARGET", value)]), "Light")
+                .expect("a value is escaped, never refused");
             let doc =
                 crate::context_dsl::parse(&sidecar).unwrap_or_else(|e| panic!("{sidecar}\n{e:?}"));
             assert_eq!(doc.mu_formulas.len(), 1, "{sidecar}");
@@ -518,8 +600,10 @@ context Light {
             assert_eq!(spec.args[0].value, value, "{sidecar}");
         }
         // Two arguments come out in key order, whatever order the request held them in.
-        let a = template_ref_sidecar(&tref("t", &[("B", "2"), ("A", "1")]), "Light");
-        let b = template_ref_sidecar(&tref("t", &[("A", "1"), ("B", "2")]), "Light");
+        let a = template_ref_sidecar(&tref("t", &[("B", "2"), ("A", "1")]), "Light")
+            .expect("identifiers throughout");
+        let b = template_ref_sidecar(&tref("t", &[("A", "1"), ("B", "2")]), "Light")
+            .expect("identifiers throughout");
         assert_eq!(a, b);
         assert!(
             a.find("A = \"1\"").unwrap() < a.find("B = \"2\"").unwrap(),

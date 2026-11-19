@@ -44,6 +44,7 @@ pub fn string_literal(value: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
             c => out.push(c),
         }
     }
@@ -51,9 +52,49 @@ pub fn string_literal(value: &str) -> String {
     out
 }
 
+/// Whether `text` is exactly one CTXDSL identifier — what the lexer reads as a single
+/// `Identifier` token and nothing else (so not a keyword, not empty, no punctuation, no
+/// whitespace). The check a caller applies to user-supplied text it writes into generated
+/// CTXDSL in an IDENTIFIER position (a formula or template name, an argument key, an automaton
+/// name), where a string literal is not the grammar and escaping is no help: anything else is
+/// refused before any text is built (mununu#966 follow-up — a `template_ref` id such as
+/// `x { } } } context evil {` closed the synthesized sidecar's blocks and declared its own).
+pub fn is_identifier(text: &str) -> bool {
+    match lex(text) {
+        Ok(tokens) => {
+            tokens.len() == 2
+                && matches!(&tokens[0].kind, token::TokenKind::Identifier(s) if s == text)
+                && matches!(tokens[1].kind, token::TokenKind::Eof)
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod string_literal_tests {
     use super::*;
+
+    /// The identifier check is the lexer's rule: one identifier token, nothing else.
+    #[test]
+    fn is_identifier_accepts_exactly_one_identifier_token() {
+        for ok in ["reachable", "TARGET", "u_x", "_a1", "Light"] {
+            assert!(is_identifier(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            " a",
+            "a b",
+            "a;",
+            "x { } } } context evil {",
+            "a}",
+            "two\nlines",
+            "\"quoted\"",
+            "42",
+            "body",
+        ] {
+            assert!(!is_identifier(bad), "{bad:?}");
+        }
+    }
 
     /// Every value the escaper handles comes back through the lexer unchanged, including the
     /// characters that would otherwise end a binding or a block.
