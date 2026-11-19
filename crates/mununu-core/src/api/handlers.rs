@@ -3857,13 +3857,19 @@ fn context_predicates_handler_impl(
 /// optional synthesized sidecar CTXDSL string.
 ///
 /// - When `formula` is given: returns `(Some(name), None)`.
-/// - When `template_ref` is given: instantiates the template, returns
-///   `(Some(template_formula_name), Some(synth_sidecar_ctxdsl))` so the caller
-///   can pass the synthesized string to `cache::get_or_realize` as an extra
-///   sidecar (the cache key then covers the template instantiation, enabling
-///   hits across repeated requests with identical template params).
+/// - When `template_ref` is given: returns `(Some(formula_name), Some(synth_sidecar_ctxdsl))`,
+///   a sidecar whose formula is the CTXDSL `template` CLAUSE for the reference — the one
+///   instantiation path, `realize::collect_formulas`, expands it (mununu#966: the API used to
+///   instantiate here and write the expanded formula into the sidecar, a second path with its
+///   own error texts). The caller passes the sidecar to `cache::get_or_realize`, so the cache
+///   key still covers the template and its arguments. The formula is named after the template
+///   id (`reachable`), the name the clause would carry in a user's own CTXDSL.
 /// - When neither is given: returns `(None, None)` — caller decides whether
 ///   that's an error.
+///
+/// The argument values are user input written into CTXDSL text: each is a string literal
+/// through [`crate::context_dsl::string_literal`] (quotes, backslashes and line breaks
+/// escaped), so a value cannot close the clause or start another declaration.
 pub(crate) fn resolve_template_ref_for_cache(
     formula: &Option<String>,
     template_ref: &Option<crate::adapter::templates::TemplateRef>,
@@ -3877,27 +3883,29 @@ pub(crate) fn resolve_template_ref_for_cache(
         Some(t) => t,
         None => return Ok((None, None)),
     };
+    Ok((
+        Some(tref.template.clone()),
+        Some(template_ref_sidecar(tref, automaton)),
+    ))
+}
 
-    let registry =
-        crate::adapter::templates::TemplateRegistry::configured_default().map_err(|message| {
-            ApiError::BadRequest {
-                message,
-                details: None,
-            }
-        })?;
-    let inst = registry
-        .instantiate(tref)
-        .map_err(|e| ApiError::BadRequest {
-            message: format!("Template instantiation failed: {e}"),
-            details: None,
-        })?;
-
-    let formula_name = inst.name.clone();
-    let sidecar_ctxdsl = format!(
-        "context __template_sidecar {{\n  mu_formulas {{\n    formula {formula_name} {{\n      over {automaton};\n      body = {};\n    }}\n  }}\n}}\n",
-        inst.formula
-    );
-    Ok((Some(formula_name), Some(sidecar_ctxdsl)))
+/// The synthesized sidecar behind a `template_ref`: one formula, named after the template id,
+/// over `automaton`, whose body is the `template` clause with the reference's arguments as
+/// escaped string literals in key order (deterministic text ⇒ a stable cache key).
+pub(crate) fn template_ref_sidecar(
+    tref: &crate::adapter::templates::TemplateRef,
+    automaton: &str,
+) -> String {
+    let mut args: Vec<(&String, &String)> = tref.args.iter().collect();
+    args.sort();
+    let bindings: String = args
+        .iter()
+        .map(|(k, v)| format!("        {k} = {};\n", crate::context_dsl::string_literal(v)))
+        .collect();
+    format!(
+        "context __template_sidecar {{\n  mu_formulas {{\n    formula {id} {{\n      over {automaton};\n      template {id} {{\n{bindings}      }}\n    }}\n  }}\n}}\n",
+        id = tref.template
+    )
 }
 
 /// Validate an assume/guarantee contract set's discharge graph.
@@ -6572,6 +6580,106 @@ members = ["x"]
             .await
             .expect_err("malformed target must be rejected pre-lift");
         assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+}
+
+#[cfg(test)]
+mod template_ref_sidecar_tests {
+    use super::*;
+    use crate::adapter::templates::{TemplateRef, TemplateRegistry};
+    use crate::context_dsl::ast::FormulaExpr;
+
+    const LIGHT: &str = r#"
+context Light {
+    alphabet { label tick; }
+    automata {
+        automaton Light {
+            states { state lit initial; state dim; }
+            transitions {
+                transition lit -> dim on label tick;
+                transition dim -> lit on label tick;
+            }
+        }
+    }
+}
+"#;
+
+    fn tref(template: &str, args: &[(&str, &str)]) -> TemplateRef {
+        TemplateRef {
+            template: template.to_string(),
+            args: args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// mununu#966 — the API's `template_ref` goes through the one instantiation path: the
+    /// synthesized sidecar carries the `template` clause, realization expands it, and the
+    /// realized formula is byte-for-byte what the registry instantiates for the same reference.
+    #[test]
+    fn a_template_ref_realizes_to_the_registrys_own_instantiation() {
+        let registry = TemplateRegistry::configured_default().expect("the catalog");
+        let tref = tref("reachable", &[("TARGET", "dim")]);
+        let (name, sidecar) =
+            resolve_template_ref_for_cache(&None, &Some(tref.clone()), "Light").expect("resolves");
+        let sidecar = sidecar.expect("a synthesized sidecar");
+        assert_eq!(name.as_deref(), Some("reachable"));
+        let doc = crate::context_dsl::parse(LIGHT).expect("the context parses");
+        let side =
+            crate::context_dsl::parse(&sidecar).unwrap_or_else(|e| panic!("{sidecar}\n{e:?}"));
+        let realized = crate::context_dsl::realize_with_templates(&doc, &[side], &registry)
+            .unwrap_or_else(|e| panic!("{sidecar}\n{e:?}"));
+        let inst = registry
+            .instantiate(&tref)
+            .expect("the registry's own instantiation");
+        let formula = &realized.formulas["reachable"];
+        assert_eq!(formula.raw, inst.formula);
+        let expansion = formula
+            .template
+            .as_ref()
+            .expect("recorded as a template expansion");
+        assert_eq!(expansion.template, "reachable");
+        assert_eq!(
+            expansion.args.get("TARGET").map(String::as_str),
+            Some("dim")
+        );
+    }
+
+    /// mununu#966 (OWASP) — argument values are user input written into CTXDSL text: a value
+    /// holding `}`, `;`, `"`, a backslash or a line break cannot close the clause or declare
+    /// anything; it parses as exactly one binding whose value round-trips.
+    #[test]
+    fn hostile_argument_values_stay_inside_their_binding() {
+        for value in [
+            "dim",
+            "a}b",
+            "x; y",
+            "say \"hi\"",
+            "back\\slash",
+            "two\nlines",
+            "} formula evil { over Light; body = true; }",
+        ] {
+            let sidecar = template_ref_sidecar(&tref("reachable", &[("TARGET", value)]), "Light");
+            let doc =
+                crate::context_dsl::parse(&sidecar).unwrap_or_else(|e| panic!("{sidecar}\n{e:?}"));
+            assert_eq!(doc.mu_formulas.len(), 1, "{sidecar}");
+            let FormulaExpr::Template(spec) = &doc.mu_formulas[0].body else {
+                panic!("{sidecar}: not a template clause");
+            };
+            assert_eq!(spec.template.name, "reachable");
+            assert_eq!(spec.args.len(), 1);
+            assert_eq!(spec.args[0].name.name, "TARGET");
+            assert_eq!(spec.args[0].value, value, "{sidecar}");
+        }
+        // Two arguments come out in key order, whatever order the request held them in.
+        let a = template_ref_sidecar(&tref("t", &[("B", "2"), ("A", "1")]), "Light");
+        let b = template_ref_sidecar(&tref("t", &[("A", "1"), ("B", "2")]), "Light");
+        assert_eq!(a, b);
+        assert!(
+            a.find("A = \"1\"").unwrap() < a.find("B = \"2\"").unwrap(),
+            "{a}"
+        );
     }
 }
 
