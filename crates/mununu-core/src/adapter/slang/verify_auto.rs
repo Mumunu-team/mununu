@@ -4571,20 +4571,69 @@ fn synth_sidecar_json(
 /// decides what happens next: only the RUN budget's expiry (`run_expired`) stops the run — a
 /// per-property expiry marks ITS row and the rows after it are still attempted. Before this
 /// split, one slow property abstained every later one.
+///
+/// mununu#1085 — a `False` read ONLY at initial cubes the cycle-0 filter kept on doubt
+/// ([`InitialCubes::doubtful`](crate::adapter::btor2::kmts_lift::InitialCubes)) is not a
+/// definite violation: the design may never occupy such a cube at cycle 0 (the filter drops a
+/// cube on a proven `Unsat` only, which is the right direction for `holds` and the wrong one
+/// for `violated`). It is withheld as `Unknown` carrying
+/// [`BottomReason::ViolationAtUnestablishedInitialCubes`], which names each cube (over
+/// `dim_names`, the predicate per cube bit) and why it was kept. A `False` at any established
+/// initial cube is a violation as before.
 fn cube_outcome(
     res: Result<(crate::mu_calculus::trit::TritSet, bool), crate::adapter::AdapterError>,
-    init_cubes: &[usize],
+    init_cubes: &crate::adapter::btor2::kmts_lift::InitialCubes,
+    dim_names: &[String],
     property_expired: bool,
     run_expired: bool,
 ) -> (VerifyOutcome, Option<BottomReason>, bool) {
     match res {
         Ok((v, stopped_on_budget)) => {
             use crate::mu_calculus::trit::Trit;
-            let any_false = init_cubes.iter().any(|&ic| v.verdict_at(ic) == Trit::False);
+            let false_initial: Vec<usize> = init_cubes
+                .cubes
+                .iter()
+                .copied()
+                .filter(|&ic| v.verdict_at(ic) == Trit::False)
+                .collect();
             let any_unknown = init_cubes
+                .cubes
                 .iter()
                 .any(|&ic| v.verdict_at(ic) == Trit::Unknown);
-            if any_false {
+            if !false_initial.is_empty() {
+                let doubts: Vec<(usize, &crate::adapter::btor2::kmts_lift::InitialCubeDoubt)> =
+                    false_initial
+                        .iter()
+                        .filter_map(|&ic| init_cubes.doubt_of(ic).map(|d| (ic, d)))
+                        .collect();
+                if doubts.len() == false_initial.len() {
+                    // Every falsifying initial cube is a doubt-kept one: withheld.
+                    let render = |cube: usize| -> String {
+                        let lits: Vec<String> = dim_names
+                            .iter()
+                            .enumerate()
+                            .map(|(bit, name)| {
+                                if (cube >> bit) & 1 == 1 {
+                                    name.clone()
+                                } else {
+                                    format!("!({name})")
+                                }
+                            })
+                            .collect();
+                        format!("cube {cube} {{{}}}", lits.join(", "))
+                    };
+                    return (
+                        VerifyOutcome::Unknown { unknown_cells: 0 },
+                        Some(BottomReason::ViolationAtUnestablishedInitialCubes {
+                            cubes: doubts
+                                .iter()
+                                .map(|(ic, d)| format!("{}: {d}", render(*ic)))
+                                .collect(),
+                            host_dependent: doubts.iter().any(|(_, d)| d.is_host_dependent()),
+                        }),
+                        false,
+                    );
+                }
                 let false_cells = (0..v.len())
                     .filter(|&i| v.verdict_at(i) == Trit::False)
                     .count();
@@ -7932,7 +7981,10 @@ pub(crate) fn verify_auto_impl(
         // to ⊥, and the whole property would read ⊥ at it. Keep the cubes a concrete reset
         // state inhabits, under the cycle-0 pins established above (bit order as the lift's:
         // simple specs, then compounds).
-        let init_cubes = {
+        // mununu#1085 — the filter also names the cubes it kept on DOUBT (an inconclusive
+        // query, a spent budget, a memory `init` that did not encode, …): `cube_outcome`
+        // withholds a `violated` read only at such a cube. `dim_names` renders them.
+        let (init_cubes, dim_names) = {
             let mut dims: Vec<PredicateSpec> = seeded.specs.clone();
             let mut exprs = std::collections::HashMap::new();
             for (name, expr) in &seeded.compounds {
@@ -7947,9 +7999,11 @@ pub(crate) fn verify_auto_impl(
                 .iter()
                 .map(|(k, v)| (k.clone(), vec![*v]))
                 .collect();
-            crate::adapter::btor2::kmts_lift::cycle_zero_feasible_cubes(
+            let cubes = crate::adapter::btor2::kmts_lift::cycle_zero_feasible_cubes(
                 &file, &dims, &exprs, init_cubes, &pins,
-            )
+            );
+            let names: Vec<String> = dims.into_iter().map(|d| d.name).collect();
+            (cubes, names)
         };
 
         // R-F5.5d — the final 3-valued verdict over the cube space, from the
@@ -7999,6 +8053,7 @@ pub(crate) fn verify_auto_impl(
         let (outcome, cube_bottom_reason, stop_run) = cube_outcome(
             final_verdict_res,
             &init_cubes,
+            &dim_names,
             crate::adapter::run_budget::expired(),
             run_budget.expired(),
         );
@@ -9040,6 +9095,23 @@ pub enum BottomReason {
         /// each, via a sidecar or reset-gating).
         registers: usize,
     },
+    /// mununu#1085 — the cube path read a VIOLATED only at initial cube(s) the cycle-0 filter
+    /// kept **on doubt**: its query was inconclusive (a timeout or `MUNUNU_CUBE_SMT_RLIMIT`),
+    /// the run budget had expired before it, the design or a memory `init` did not encode, or
+    /// every candidate proved empty and the product was kept. The filter drops a cube on a
+    /// proven `Unsat` only — right for `holds` (a kept infeasible cube is more ⊥), wrong for
+    /// `violated` (the design may never occupy the cube at cycle 0) — so the violation is
+    /// withheld rather than reported. A VIOLATED at any ESTABLISHED initial cube ships as
+    /// before. Host-dependent when a clock or a resource bound caused the doubt, reproducible
+    /// when an encoding did.
+    ViolationAtUnestablishedInitialCubes {
+        /// The falsifying initial cubes, each as its predicate literals and the reason it was
+        /// kept — `cube 3 {out_valid == 1, !(fresh == 1)}: the cycle-0 query was inconclusive`.
+        cubes: Vec<String>,
+        /// Whether any of the doubts is a clock or a resource bound (so a re-run may decide
+        /// the row) rather than a property of the input.
+        host_dependent: bool,
+    },
     /// The property was **never attempted** — filtered out before any engine ran.
     /// mununu#579 — this report contradicts **itself**: two properties of the same model came back
     /// with definite verdicts that cannot both be right.
@@ -9129,6 +9201,15 @@ impl BottomReason {
             }
             // Cause not established, so determinism is not either.
             Self::UnclassifiedBottom => BottomDeterminism::Unestablished,
+            // mununu#1085 — the doubt that kept the cube decides: a clock or a resource bound
+            // is the host's, an encoding gap is the input's.
+            Self::ViolationAtUnestablishedInitialCubes { host_dependent, .. } => {
+                if *host_dependent {
+                    BottomDeterminism::HostDependent
+                } else {
+                    BottomDeterminism::Reproducible
+                }
+            }
             // Shape, modelling, contradiction and never-attempted are all functions of the
             // input alone.
             Self::SafetyShapeNotReducible
@@ -9160,6 +9241,9 @@ impl BottomReason {
             Self::ViolationOverClockAsData { .. } => "violation-over-clock-as-data",
             Self::ViolationWithoutFairness { .. } => "violation-without-fairness",
             Self::UnestablishedInitialCubes { .. } => "unestablished-initial-cubes",
+            Self::ViolationAtUnestablishedInitialCubes { .. } => {
+                "violation-at-unestablished-initial-cubes"
+            }
             Self::ReportSelfContradiction { .. } => "report-self-contradiction",
             Self::NotAttempted => "not-attempted",
         }
@@ -9251,6 +9335,25 @@ impl BottomReason {
                  nothing was decided. An init-less register is FREE at cycle 0 on every engine \
                  (mununu#579); supply an `init` for those registers via a sidecar, or let \
                  reset-gating establish them, to decide this property."
+            ),
+            Self::ViolationAtUnestablishedInitialCubes {
+                cubes,
+                host_dependent,
+            } => format!(
+                "the violation was read ONLY at {} initial cube(s) the cycle-0 filter kept \
+                 without a cycle-0 state proved to inhabit them ({}). A cube is dropped on a \
+                 proven `Unsat` only — the right direction for a HOLDS, the wrong one for a \
+                 VIOLATED: the design may never occupy such a cube at cycle 0 — so the \
+                 violation is withheld rather than reported (mununu#1085). {}",
+                cubes.len(),
+                cubes.join("; "),
+                if *host_dependent {
+                    "The doubt is a clock or a resource bound (MUNUNU_CUBE_SMT_RLIMIT, the run \
+                     budget): a re-run with more of it may decide this property."
+                } else {
+                    "The doubt is an encoding gap of the input: a re-run cannot help; supply an \
+                     `init` the filter can encode, or decide the row with another engine."
+                }
             ),
             Self::ReportSelfContradiction { detail } => format!(
                 "🔴 SOUNDNESS ALARM — this report contradicts ITSELF: {detail}. The two verdicts \
@@ -11519,15 +11622,16 @@ mod tests {
         use bitvec::prelude::*;
         // two cells: cell 0 ⊥ (out of bounds), cell 1 false
         let set = TritSet::from_predicate(bitvec![usize, Lsb0; 0, 0], &bitvec![usize, Lsb0; 1, 0]);
-        let init = [0usize];
-        let (o, r, stop) = cube_outcome(Ok((set.clone(), true)), &init, false, false);
+        let init = crate::adapter::btor2::kmts_lift::InitialCubes::established(vec![0]);
+        let names = ["c".to_string()];
+        let (o, r, stop) = cube_outcome(Ok((set.clone(), true)), &init, &names, false, false);
         assert!(matches!(o, VerifyOutcome::Unknown { .. }));
         assert_eq!(r, Some(BottomReason::BudgetExpired));
         assert!(!stop, "a per-property stop does not stop the run");
-        let (_, r2, stop2) = cube_outcome(Ok((set.clone(), true)), &init, true, true);
+        let (_, r2, stop2) = cube_outcome(Ok((set.clone(), true)), &init, &names, true, true);
         assert_eq!(r2, Some(BottomReason::BudgetExpired));
         assert!(stop2, "the run budget's expiry stops the run");
-        let (o3, r3, stop3) = cube_outcome(Ok((set, false)), &init, false, false);
+        let (o3, r3, stop3) = cube_outcome(Ok((set, false)), &init, &names, false, false);
         assert!(matches!(o3, VerifyOutcome::Unknown { .. }));
         assert_eq!(r3, None, "a plain ⊥ is not a budget stop");
         assert!(!stop3);
@@ -11536,20 +11640,193 @@ mod tests {
             location: None,
             message: "budget expired".into(),
         };
-        let (o4, r4, stop4) = cube_outcome(Err(budget_err.clone()), &init, true, false);
+        let (o4, r4, stop4) = cube_outcome(Err(budget_err.clone()), &init, &names, true, false);
         assert_eq!(o4.label(), "unknown", "never `skipped`");
         assert_eq!(r4, Some(BottomReason::BudgetExpired));
         assert!(!stop4);
-        let (_, _, stop5) = cube_outcome(Err(budget_err), &init, true, true);
+        let (_, _, stop5) = cube_outcome(Err(budget_err), &init, &names, true, true);
         assert!(stop5);
         let other = AdapterError {
             kind: crate::adapter::AdapterErrorKind::ParseError,
             location: None,
             message: "boom".into(),
         };
-        let (o6, r6, _) = cube_outcome(Err(other), &init, false, false);
+        let (o6, r6, _) = cube_outcome(Err(other), &init, &names, false, false);
         assert_eq!(o6.label(), "skipped");
         assert_eq!(r6, None);
+    }
+
+    /// mununu#1085 — a `False` read ONLY at initial cubes the cycle-0 filter kept on doubt is
+    /// withheld as `unknown` carrying `violation-at-unestablished-initial-cubes`, which names
+    /// each cube over the predicate names and why it was kept, and reads host-dependent exactly
+    /// when the doubt is a clock or a resource bound; a `False` at any established initial cube
+    /// is a `violated` as before, whatever the other initial cubes carry.
+    #[test]
+    fn a_violation_read_only_at_doubt_kept_initial_cubes_is_withheld_and_named() {
+        use crate::adapter::btor2::kmts_lift::{InitialCubeDoubt, InitialCubes};
+        use crate::mu_calculus::trit::TritSet;
+        use bitvec::prelude::*;
+        // four cells over two predicates: cells 0 and 2 False, cells 1 and 3 True, none ⊥
+        // (the second argument is the OOB / unknown mask)
+        let set = TritSet::from_predicate(
+            bitvec![usize, Lsb0; 0, 1, 0, 1],
+            &bitvec![usize, Lsb0; 0, 0, 0, 0],
+        );
+        let names = ["a == 1".to_string(), "b == 1".to_string()];
+        // The only falsifying initial cube (2) was kept on an inconclusive query.
+        let doubted = InitialCubes {
+            cubes: vec![1, 2],
+            doubtful: vec![(2, InitialCubeDoubt::QueryInconclusive)],
+        };
+        let (o, r, stop) = cube_outcome(Ok((set.clone(), false)), &doubted, &names, false, false);
+        assert_eq!(o.label(), "unknown", "{o:?}");
+        assert!(!stop);
+        match r {
+            Some(BottomReason::ViolationAtUnestablishedInitialCubes {
+                cubes,
+                host_dependent,
+            }) => {
+                assert_eq!(
+                    cubes,
+                    vec!["cube 2 {!(a == 1), b == 1}: the cycle-0 query was inconclusive"]
+                );
+                assert!(host_dependent, "an inconclusive query is the host's");
+            }
+            other => panic!("{other:?}"),
+        }
+        let reason = BottomReason::ViolationAtUnestablishedInitialCubes {
+            cubes: vec!["cube 2 {..}: a memory `init` did not encode".into()],
+            host_dependent: false,
+        };
+        assert_eq!(reason.tag(), "violation-at-unestablished-initial-cubes");
+        assert_eq!(reason.determinism(), BottomDeterminism::Reproducible);
+        assert!(
+            reason.one_line().contains("withheld"),
+            "{}",
+            reason.one_line()
+        );
+        // A False at an established initial cube (0) beside the doubted one: violated.
+        let mixed = InitialCubes {
+            cubes: vec![0, 2],
+            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired)],
+        };
+        let (o2, r2, _) = cube_outcome(Ok((set.clone(), false)), &mixed, &names, false, false);
+        assert_eq!(o2.label(), "violated", "{o2:?}");
+        assert_eq!(r2, None);
+        // No False at an initial cube: the doubt changes nothing (holds over cells 1 and 3).
+        let quiet = InitialCubes {
+            cubes: vec![1, 3],
+            doubtful: vec![(3, InitialCubeDoubt::NoCandidate)],
+        };
+        let (o3, r3, _) = cube_outcome(Ok((set, false)), &quiet, &names, false, false);
+        assert_eq!(o3.label(), "holds", "{o3:?}");
+        assert_eq!(r3, None);
+    }
+
+    /// mununu#1085 — the reproducer's run, on a prepared model (no toolchain): mununu#1061's
+    /// design, a zero-initialised two-cell memory `v` read through `ptr` as `out_valid`, where
+    /// nothing ever changes, under `AG(out_valid == 0)`. With `doubt` the cycle-0 query is forced
+    /// inconclusive (a 1-unit Z3 resource bound, the thread-local test override of
+    /// `MUNUNU_CUBE_SMT_RLIMIT`), so the cube `out_valid == 1` is kept on doubt and the property
+    /// reads `False` there. The re-plan is deferred so the cube path's own verdict is read.
+    fn x1085_row(doubt: bool) -> PropertyVerdict {
+        use crate::adapter::slang::translate::{SvaKind, TranslatedAssertion, TranslationReport};
+        const MEMORY_READ_AT_RESET: &str = "1 sort bitvec 1\n2 sort array 1 1\n3 zero 1\n\
+4 state 2 v\n5 init 2 4 3\n6 state 1 ptr\n7 init 1 6 3\n8 read 1 4 6\n9 output 8 out_valid\n\
+10 state 1 fresh\n11 init 1 10 3\n12 next 2 4 4\n13 next 1 6 6\n14 next 1 10 10\n";
+        let prepared = PreparedModel {
+            btor2: MEMORY_READ_AT_RESET.to_string(),
+            report: AutoVerifyReport::default(),
+            extraction: TranslationReport {
+                translated: vec![TranslatedAssertion {
+                    name: "out_valid_low".to_string(),
+                    label: None,
+                    kind: SvaKind::Assert,
+                    formula: "nu X.((out_valid == 0) && [] X)".to_string(),
+                    recoverability_companion: None,
+                    written: None,
+                }],
+                ..Default::default()
+            },
+            predicate_hints: Vec::new(),
+            ann_scan: AnnotationScan::default(),
+            applied_config_values: Vec::new(),
+            fault: None,
+            source_index: Err("no source index in this test".to_string()),
+        };
+        let opts = VerifyAutoOptions {
+            replan_defer: true,
+            ..Default::default()
+        };
+        let _rl = doubt
+            .then(|| crate::adapter::env_var::override_for_test("MUNUNU_CUBE_SMT_RLIMIT", "1"));
+        let report = verify_auto_impl(&[], &YosysOptions::default(), &opts, Some(prepared))
+            .expect("the prepared model verifies");
+        report
+            .properties
+            .iter()
+            .find(|p| p.name == "out_valid_low")
+            .cloned()
+            .expect("the row is reported")
+    }
+
+    /// mununu#1085 — REPRODUCER: a violation read only at an initial cube the cycle-0 filter
+    /// kept on doubt shipped as a definite `violated`, at a cycle-0 state the design never
+    /// occupies. On the parent the row leaves the cube path `violated`, and only the witness
+    /// search's contradiction rule (mununu#1076, a reach member proving the target unreachable)
+    /// turns it into `unknown` carrying `EngineContradiction` — a soundness alarm raised against
+    /// a verdict that was never established. Now the cube path withholds it itself, so no alarm
+    /// is raised. Control: with the query answered the row HOLDS (`out_valid` is 0 at reset and
+    /// never changes). Names no API this fix adds, so it compiles on the parent and fails there.
+    #[test]
+    fn x1085_a_violation_read_only_at_a_doubt_kept_initial_cube_ships_unknown_not_violated() {
+        let control = x1085_row(false);
+        assert_eq!(control.outcome.label(), "holds", "control: {control:?}");
+        let p = x1085_row(true);
+        assert_ne!(
+            p.outcome.label(),
+            "violated",
+            "a violation read only at a doubt-kept initial cube is not definite: {p:?}"
+        );
+        assert_eq!(p.outcome.label(), "unknown", "{p:?}");
+        assert!(
+            !matches!(
+                p.bottom_reason,
+                Some(BottomReason::EngineContradiction { .. })
+            ),
+            "the cube path withholds the unestablished violation itself; a witness search \
+             must not have to contradict it: {p:?}"
+        );
+    }
+
+    /// mununu#1085 — the withheld row names the cube and the doubt, and reads host-dependent
+    /// (a resource bound); the control carries no such reason.
+    #[test]
+    fn x1085_the_withheld_violation_names_its_doubt_kept_cube() {
+        let control = x1085_row(false);
+        assert!(
+            !matches!(
+                control.bottom_reason,
+                Some(BottomReason::ViolationAtUnestablishedInitialCubes { .. })
+            ),
+            "control: with the query answered no cube is kept on doubt: {control:?}"
+        );
+        let p = x1085_row(true);
+        match &p.bottom_reason {
+            Some(BottomReason::ViolationAtUnestablishedInitialCubes {
+                cubes,
+                host_dependent,
+            }) => {
+                assert!(*host_dependent, "a resource bound is the host's");
+                assert!(
+                    cubes
+                        .iter()
+                        .any(|c| c.contains("out_valid == 0") && c.contains("inconclusive")),
+                    "{cubes:?}"
+                );
+            }
+            other => panic!("expected the withheld-violation reason, got {other:?}"),
+        }
     }
 
     // P3 Update 2 — a safety AG-invariant the cube left ⊥ that is actually VIOLATED is
