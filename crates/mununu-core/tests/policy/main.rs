@@ -13,5 +13,6 @@ mod env_vars_documented_d1;
 mod ignored_tests_have_a_runner;
 mod licence_never_reaches_a_verdict_h1;
 mod no_links_into_untracked_paths_g4;
+mod one_yosys_minimum_version_1121;
 mod remedies_name_real_flags_1106;
 mod third_party_inventory_g1;

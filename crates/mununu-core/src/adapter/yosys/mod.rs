@@ -2810,6 +2810,12 @@ fn parse_yosys_src(src: &str) -> (Option<String>, Option<u32>) {
 }
 
 /// Find a usable yosys binary.
+/// The one yosys the lift needs: the first release with yosys-slang's `read_slang` built in
+/// (mununu#1121, U2.5 — two messages twenty lines apart used to name two different minimums).
+/// An older yosys lifts only with `MUNUNU_YOSYS_SLANG_PLUGIN`; `docs/external-tools.md` §Yosys
+/// is the prose copy, and the policy test `one_yosys_minimum_version_1121` holds them equal.
+pub const YOSYS_MIN_VERSION: &str = "0.67";
+
 fn locate_yosys() -> Result<PathBuf, AdapterError> {
     if let Some(path) = crate::adapter::env_var::read("MUNUNU_YOSYS_PATH") {
         return Ok(PathBuf::from(path));
@@ -2824,7 +2830,12 @@ fn locate_yosys() -> Result<PathBuf, AdapterError> {
     }
     Err(AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
-        message: "adapter/yosys: yosys binary not found in $PATH (set MUNUNU_YOSYS_PATH or install yosys ≥ 0.40)".into(),
+        message: format!(
+            "adapter/yosys: yosys binary not found in $PATH — install yosys ≥ {YOSYS_MIN_VERSION} \
+             (its built-in `read_slang` is the lift's front end; the pinned `mununu-sva` image \
+             has it) or set MUNUNU_YOSYS_PATH to one; an older yosys lifts only with a \
+             yosys-slang plugin in MUNUNU_YOSYS_SLANG_PLUGIN"
+        ),
         location: None,
     })
 }
@@ -2872,11 +2883,11 @@ fn slang_plugin_arg() -> Option<String> {
 fn read_slang_hint(text: &str) -> String {
     let mut hint = String::new();
     if text.contains("No such command: read_slang") {
-        hint.push_str(
-            " — this yosys has no `read_slang`: use yosys ≥ 0.67 (the pinned oss-cad-suite of \
-             the mununu-sva image has it built in) or set MUNUNU_YOSYS_SLANG_PLUGIN to a \
-             yosys-slang plugin",
-        );
+        hint.push_str(&format!(
+            " — this yosys has no `read_slang`: use yosys ≥ {YOSYS_MIN_VERSION} (the pinned \
+             oss-cad-suite of the mununu-sva image has it built in) or set \
+             MUNUNU_YOSYS_SLANG_PLUGIN to a yosys-slang plugin"
+        ));
     }
     if text.contains("unknown module '") {
         hint.push_str(&format!(
