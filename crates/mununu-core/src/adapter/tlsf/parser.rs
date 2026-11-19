@@ -347,9 +347,12 @@ impl<'a> TlsfParser<'a> {
             self.parse_info(&mut spec)?;
         }
 
-        // Skip GLOBAL section if present
+        // mununu#1106 (item 1's sibling) — a GLOBAL section used to be skipped whole, so a
+        // PARAMETERS constant or a DEFINITIONS name used in MAIN read later as a free atom and the
+        // spec went to synthesis meaning something else. An empty GLOBAL (or empty sub-sections)
+        // is fine; one that declares anything is refused by name, with the remedy.
         if self.current == Token::Global {
-            self.skip_block()?;
+            self.read_global()?;
         }
 
         // Parse MAIN section
@@ -522,24 +525,69 @@ impl<'a> TlsfParser<'a> {
         Ok(())
     }
 
-    fn skip_block(&mut self) -> Result<(), AdapterError> {
-        self.advance()?; // skip keyword
+    /// Accept an empty `GLOBAL { }` (or one whose `PARAMETERS { }` / `DEFINITIONS { }` are
+    /// empty); refuse one that declares anything, naming the sub-sections it fills.
+    fn read_global(&mut self) -> Result<(), AdapterError> {
+        self.advance()?; // GLOBAL
         self.expect(&Token::LBrace)?;
-        let mut depth = 1;
+        let mut depth = 1usize;
+        let mut filled: Vec<String> = Vec::new();
+        let mut section: Option<String> = None;
+        let refusal = |filled: &[String]| -> AdapterError {
+            let what = if filled.is_empty() {
+                "content".to_string()
+            } else {
+                filled.join(" and ")
+            };
+            AdapterError {
+                kind: AdapterErrorKind::ParseError,
+                message: format!(
+                    "the GLOBAL section declares {what} this reader does not read (a name declared \
+                     there would be a free atom in MAIN, and the spec would mean something else): \
+                     unfold the specification to the basic format (syfco's basic output inlines \
+                     parameters and definitions), or write the expressions out in MAIN"
+                ),
+                location: None,
+            }
+        };
         while depth > 0 && self.current != Token::Eof {
-            if self.current == Token::LBrace {
-                depth += 1;
-            } else if self.current == Token::RBrace {
-                depth -= 1;
+            match &self.current {
+                Token::LBrace => depth += 1,
+                Token::RBrace => {
+                    depth -= 1;
+                    if depth == 1 {
+                        section = None;
+                    }
+                }
+                Token::Ident(name) if depth == 1 => section = Some(name.clone()),
+                _ => {
+                    let owner = section.clone().unwrap_or_else(|| "GLOBAL".to_string());
+                    if !filled.contains(&owner) {
+                        filled.push(owner);
+                    }
+                }
             }
             if depth > 0 {
-                self.advance()?;
+                // The lexer has no token for `=` (nor for the operators a definition uses), so a
+                // real PARAMETERS / DEFINITIONS line stops it here: that is the same refusal,
+                // said with the section's name and the remedy, not a bare "Unexpected character".
+                if self.advance().is_err() {
+                    let owner = section.clone().unwrap_or_else(|| "GLOBAL".to_string());
+                    if !filled.contains(&owner) {
+                        filled.push(owner);
+                    }
+                    return Err(refusal(&filled));
+                }
             }
         }
-        if depth == 0 {
-            self.advance()?;
+        if depth > 0 {
+            return Err(self.lexer.err("unterminated GLOBAL section"));
         }
-        Ok(())
+        self.advance()?; // the closing brace
+        if filled.is_empty() {
+            return Ok(());
+        }
+        Err(refusal(&filled))
     }
 
     // -----------------------------------------------------------------------
@@ -694,6 +742,48 @@ impl<'a> TlsfParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1106 (item 1's sibling) — REPRODUCER: a GLOBAL section that declares something is
+    /// refused by name; on the parent it was skipped whole and the spec parsed `Ok` with the
+    /// definition's name as a free atom in GUARANTEES.
+    #[test]
+    fn a_global_section_that_declares_anything_is_refused_instead_of_skipped() {
+        let input = r#"
+GLOBAL {
+  PARAMETERS { n = 2; }
+  DEFINITIONS { safe = a && b; }
+}
+MAIN {
+  INPUTS { a; }
+  OUTPUTS { b; }
+  GUARANTEES { G safe; }
+}
+"#;
+        let e = parse(input).expect_err("a filled GLOBAL is refused");
+        assert!(
+            e.message.contains("the GLOBAL section declares PARAMETERS")
+                && e.message.contains("free atom")
+                && e.message.contains("basic format")
+                && !e.message.contains("Unexpected character"),
+            "{}",
+            e.message
+        );
+        let e = parse("GLOBAL { DEFINITIONS { safe = a && b; } } MAIN { INPUTS { a; } OUTPUTS { b; } GUARANTEES { G safe; } }")
+            .expect_err("refused");
+        assert!(
+            e.message.contains("declares DEFINITIONS") && e.message.contains("syfco"),
+            "{}",
+            e.message
+        );
+        // Controls: an empty GLOBAL, and empty sub-sections, parse in full.
+        for ok in [
+            "GLOBAL { } MAIN { INPUTS { a; } OUTPUTS { b; } GUARANTEES { G (!a || b); } }",
+            "GLOBAL { PARAMETERS { } DEFINITIONS { } } MAIN { INPUTS { a; } OUTPUTS { b; } GUARANTEES { G (!a || b); } }",
+        ] {
+            let spec = parse(ok).expect("an empty GLOBAL is fine");
+            assert_eq!(spec.guarantees.len(), 1, "{ok}");
+        }
+    }
 
     #[test]
     fn parse_lilydemo03() {
