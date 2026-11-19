@@ -2711,6 +2711,7 @@ fn run_symbolic_cegar_response(
                 false_cells: it.definite_false,
                 unknown_cells: it.bottom,
                 unlifted_cells: 0,
+                violation_at_reset: None,
             },
         })
         .collect();
@@ -2741,6 +2742,7 @@ fn run_symbolic_cegar_response(
             false_cells: v.definite_false,
             unknown_cells: v.bottom,
             unlifted_cells: 0,
+            violation_at_reset: None,
         },
         lazy_lift_pending: false,
         approximant_reuse_enabled: false,
@@ -2919,6 +2921,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             false_cells,
             unknown_cells,
             unlifted_cells,
+            violation_at_reset: None,
         }
     };
     let pred_view = |p: &PredicateSpec| PredicateView {
@@ -2991,7 +2994,18 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             CegarTermination::BudgetExpired => "budget-expired",
         }
         .to_string(),
-        cells: summarize(&trace.final_verdict, &trace.unlifted_cells),
+        cells: {
+            // mununu#1106 — the final tally carries its reset-state reading.
+            let mut cells = summarize(&trace.final_verdict, &trace.unlifted_cells);
+            cells.violation_at_reset =
+                trace
+                    .violation_at_reset()
+                    .map(|v| crate::api::models::ViolationAtResetView {
+                        established: v.is_established(),
+                        detail: v.to_string(),
+                    });
+            cells
+        },
         lazy_lift_pending: trace.lazy_lift_pending,
         approximant_reuse_enabled: trace.approximant_reuse_enabled,
         warnings: trace.warnings.iter().map(|w| w.message.clone()).collect(),
@@ -6733,5 +6747,54 @@ over = "Sys"
                 .expect_err("a symlink out of the root is refused");
             assert!(format!("{err}").contains("sources[0].files[0]"), "{err}");
         }
+    }
+
+    /// mununu#1106 — REPRODUCER: a `btor2 cegar` VIOLATED tally over a design whose memory
+    /// `init` did not encode (the mununu#1061 fixture with a 2-bit `init` on a 1-bit-element
+    /// memory, so every initial cube is kept on doubt — mununu#1085) carries its reset-state
+    /// reading in `cells.violation_at_reset`: `established: false`, the doubt named. On the
+    /// parent the summary had no such key and the definite VIOLATED stood beside the warning.
+    /// Built from JSON and read as JSON, so it names no API this change adds.
+    #[test]
+    fn x1106_a_cegar_violation_over_doubt_kept_initial_cubes_says_it_is_not_established_at_reset() {
+        let btor2 = "1 sort bitvec 1\n2 sort array 1 1\n3 zero 1\n15 sort bitvec 2\n16 zero 15\n\
+4 state 2 v\n5 init 2 4 16\n6 state 1 ptr\n7 init 1 6 3\n8 read 1 4 6\n9 output 8 out_valid\n\
+10 state 1 fresh\n11 init 1 10 3\n12 next 2 4 4\n13 next 1 6 6\n14 next 1 10 10\n";
+        let request: Btor2CegarRequest = serde_json::from_value(serde_json::json!({
+            "content": btor2,
+            "formula": "nu X. (not out_valid and [] X)",
+            "predicates": [
+                { "name": "out_valid", "register": "out_valid", "value": 1 },
+                { "name": "fresh", "register": "fresh", "value": 1 }
+            ],
+            "max_iterations": 2
+        }))
+        .expect("a cegar request");
+        let response = btor2_cegar_handler_impl(request).expect("the handler answers");
+        let json = serde_json::to_value(response.0).expect("serializes");
+        let cells = &json["cells"];
+        assert!(
+            cells["false_cells"].as_u64().unwrap_or(0) > 0,
+            "the formula is falsified somewhere in the cube: {cells}"
+        );
+        let var = &cells["violation_at_reset"];
+        assert!(
+            var.is_object(),
+            "the summary carries its reset-state reading: {cells}"
+        );
+        assert_eq!(var["established"], false, "{var}");
+        let detail = var["detail"].as_str().unwrap_or("");
+        assert!(
+            detail.contains("NOT established at a reset state")
+                && detail.contains("a memory `init` did not encode"),
+            "{detail}"
+        );
+        assert!(
+            json["warnings"].as_array().is_some_and(|w| w
+                .iter()
+                .any(|w| w.as_str().is_some_and(|s| s.contains("[mununu#1085]")))),
+            "the lift's doubt warning is beside it: {}",
+            json["warnings"]
+        );
     }
 }

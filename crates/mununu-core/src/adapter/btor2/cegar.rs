@@ -468,6 +468,9 @@ pub struct CegarTrace {
     /// regress across iterations.
     ///
     /// Default `Vec::new()` — empty when no advisories fire.
+    /// mununu#1106 — the LAST lift's initial cubes and which of them were kept on doubt
+    /// (mununu#1085): what [`CegarTrace::violation_at_reset`] reads a VIOLATED tally against.
+    pub initial_cubes: crate::adapter::btor2::kmts_lift::InitialCubes,
     pub warnings: Vec<crate::adapter::AdapterWarning>,
     /// R-Y5 (2026-06-08) — register names that the failure
     /// subgame identifies as load-bearing for `KleeneBot`
@@ -548,6 +551,88 @@ fn decode_cube_valuation(index: usize, predicates: &[PredicateSpec]) -> Vec<(Str
         .enumerate()
         .map(|(j, p)| (p.name.clone(), (index >> j) & 1 == 1))
         .collect()
+}
+
+/// mununu#1106 (after mununu#1085) — whether a VIOLATED tally is established AT A RESET STATE.
+/// The tally counts every lifted cell; a falsifying cell is "at reset" only when it is an initial
+/// cube, and an initial cube kept on doubt (an inconclusive cycle-0 query, a memory `init` the
+/// encoder could not take, …) may be one the design never occupies at cycle 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViolationAtReset {
+    /// An initial cube proved inhabited at cycle 0 falsifies the formula.
+    Established { cube: usize },
+    /// Every falsifying initial cube was kept on doubt; one `cube N: <doubt> — <remedy>` per cube.
+    DoubtOnly { cubes: Vec<String> },
+    /// No initial cube falsifies the formula: the falsifying cells lie elsewhere in the cube.
+    NoInitialCellFalsifies,
+}
+
+impl ViolationAtReset {
+    /// `true` only for [`ViolationAtReset::Established`].
+    pub fn is_established(&self) -> bool {
+        matches!(self, Self::Established { .. })
+    }
+}
+
+impl std::fmt::Display for ViolationAtReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Established { cube } => {
+                write!(
+                    f,
+                    "established at a reset state (initial cube {cube} falsifies it)"
+                )
+            }
+            Self::DoubtOnly { cubes } => write!(
+                f,
+                "NOT established at a reset state: every falsifying initial cube was kept on \
+                 doubt, not on a cycle-0 state proved to inhabit it ({})",
+                cubes.join("; ")
+            ),
+            Self::NoInitialCellFalsifies => f.write_str(
+                "NOT established at a reset state: no initial cube falsifies the formula; the \
+                 falsifying cells lie elsewhere in the cube, which the tally counts and a reset \
+                 state may never reach",
+            ),
+        }
+    }
+}
+
+impl CegarTrace {
+    /// mununu#1106 — read the VIOLATED tally against the initial cubes: `None` when no cell
+    /// falsifies the formula (nothing to establish), else which of the three readings holds.
+    pub fn violation_at_reset(&self) -> Option<ViolationAtReset> {
+        let falsifying = |i: usize| {
+            i < self.final_verdict.len()
+                && !self.unlifted_cells.contains(&i)
+                && self.final_verdict.verdict_at(i) == Trit::False
+        };
+        if !(0..self.final_verdict.len()).any(falsifying) {
+            return None;
+        }
+        if let Some(cube) = self
+            .initial_cubes
+            .cubes
+            .iter()
+            .copied()
+            .filter(|c| falsifying(*c) && self.initial_cubes.doubt_of(*c).is_none())
+            .min()
+        {
+            return Some(ViolationAtReset::Established { cube });
+        }
+        let doubtful: Vec<String> = self
+            .initial_cubes
+            .doubtful
+            .iter()
+            .filter(|(c, _)| falsifying(*c))
+            .map(|(c, d)| format!("cube {c}: {d} — {}", d.remedy()))
+            .collect();
+        if doubtful.is_empty() {
+            Some(ViolationAtReset::NoInitialCellFalsifies)
+        } else {
+            Some(ViolationAtReset::DoubtOnly { cubes: doubtful })
+        }
+    }
 }
 
 impl CegarTrace {
@@ -802,6 +887,8 @@ pub fn cegar_refine_loop(
 ) -> Result<CegarTrace, AdapterError> {
     let mut current_predicates = initial_predicates;
     let mut iterations: Vec<CegarIteration> = Vec::new();
+    // mununu#1106 — the last lift's initial cubes, for `violation_at_reset`.
+    let mut last_initial_cubes = crate::adapter::btor2::kmts_lift::InitialCubes::default();
     let mut warnings: Vec<crate::adapter::AdapterWarning> = Vec::new();
 
     // B.1 increment 3c (2026-06-26) — sidecar compound predicates. Read any
@@ -1056,6 +1143,7 @@ pub fn cegar_refine_loop(
                 lazy_lift_pending: true,
                 approximant_reuse_enabled: cegar_opts.enable_approximant_reuse,
                 warnings: warnings.clone(),
+                initial_cubes: last_initial_cubes.clone(),
                 init_refinement_candidates: init_refinement_candidates.iter().cloned().collect(),
                 final_clts: captured_clts.take(),
                 counterexample: None,
@@ -1085,6 +1173,15 @@ pub fn cegar_refine_loop(
             // B.1 3c — `effective_strategy` forces Eager when compounds present.
             effective_strategy,
         )?;
+        last_initial_cubes = lift_result.initial_cubes.clone();
+        // mununu#1106 — the lift's own warnings (a cube kept on doubt, mununu#1085; a must-edge
+        // inference fallback; …) reach the trace: they used to stop at the lift's log line. Each
+        // iteration re-lifts, so a repeated message is kept once.
+        for w in &lift_result.warnings {
+            if !warnings.iter().any(|seen| seen.message == w.message) {
+                warnings.push(w.clone());
+            }
+        }
         // mununu#728 — the budget is polled right after the lift as well. The poll at the top of
         // the loop only fires from iteration 1, so a first-round lift that ran past the deadline
         // (the label and feasibility loops saturate on expiry, soundly, but return `Ok`) used to
@@ -1427,6 +1524,7 @@ pub fn cegar_refine_loop(
                 lazy_lift_pending: true,
                 approximant_reuse_enabled: cegar_opts.enable_approximant_reuse,
                 warnings: warnings.clone(),
+                initial_cubes: last_initial_cubes.clone(),
                 init_refinement_candidates: init_refinement_candidates.iter().cloned().collect(),
                 // CTXDSL Phase 2 — final cube model (Some only under emit_ctxdsl).
                 final_clts: captured_clts.take(),
@@ -1464,6 +1562,7 @@ pub fn cegar_refine_loop(
                 lazy_lift_pending: true,
                 approximant_reuse_enabled: cegar_opts.enable_approximant_reuse,
                 warnings: warnings.clone(),
+                initial_cubes: last_initial_cubes.clone(),
                 init_refinement_candidates: init_refinement_candidates.iter().cloned().collect(),
                 // CTXDSL Phase 2 — final cube model (Some only under emit_ctxdsl).
                 final_clts: captured_clts.take(),
@@ -1570,6 +1669,7 @@ pub fn cegar_refine_loop(
                 lazy_lift_pending: true,
                 approximant_reuse_enabled: cegar_opts.enable_approximant_reuse,
                 warnings: warnings.clone(),
+                initial_cubes: last_initial_cubes.clone(),
                 init_refinement_candidates: init_refinement_candidates.iter().cloned().collect(),
                 // CTXDSL Phase 2 — final cube model (Some only under emit_ctxdsl).
                 final_clts: captured_clts.take(),
@@ -2132,6 +2232,92 @@ mod tests {
     // Track I.1 — a non-HOLDS verdict surfaces the predicate valuation of the
     // cube cells that falsify the formula (definite-F) or that the abstraction
     // cannot decide (⊥), decoded from the cube-index bit convention.
+    /// mununu#1106 — the seam: a VIOLATED tally read against the initial cubes. Four cubes over
+    /// [idle, err]: cube0 = F, cube1 = T, cube2 = F, cube3 = ⊥.
+    #[test]
+    fn x1106_a_violated_tally_is_read_against_the_initial_cubes() {
+        use crate::adapter::btor2::kmts_lift::{InitialCubeDoubt, InitialCubes};
+        use bitvec::prelude::*;
+        let preds = vec![
+            PredicateSpec {
+                name: "idle".into(),
+                register: "state_q".into(),
+                value: 55,
+            },
+            PredicateSpec {
+                name: "err".into(),
+                register: "state_q".into(),
+                value: 41,
+            },
+        ];
+        let trace = |initial_cubes: InitialCubes,
+                     must: BitVec<usize, Lsb0>,
+                     may: BitVec<usize, Lsb0>| CegarTrace {
+            iterations: Vec::new(),
+            final_verdict: crate::mu_calculus::trit::TritSet::from_parts(must, may),
+            unlifted_cells: Vec::new(),
+            final_predicates: preds.clone(),
+            terminated_with: CegarTermination::Converged,
+            initial_cubes,
+            lazy_lift_pending: true,
+            approximant_reuse_enabled: false,
+            warnings: Vec::new(),
+            init_refinement_candidates: Vec::new(),
+            final_clts: None,
+            counterexample: None,
+        };
+        let must = bitvec![usize, Lsb0; 0, 1, 0, 0];
+        let may = bitvec![usize, Lsb0; 0, 1, 0, 1];
+        // An established initial cube (0) falsifies: established, even with a doubtful one beside it.
+        let t = trace(
+            InitialCubes {
+                cubes: vec![0, 2],
+                doubtful: vec![(2, InitialCubeDoubt::QueryInconclusive)],
+            },
+            must.clone(),
+            may.clone(),
+        );
+        assert_eq!(
+            t.violation_at_reset(),
+            Some(ViolationAtReset::Established { cube: 0 })
+        );
+        assert!(t.violation_at_reset().unwrap().is_established());
+        // Only a doubt-kept initial cube falsifies: not established, the doubt and remedy named.
+        let t = trace(
+            InitialCubes {
+                cubes: vec![1, 2],
+                doubtful: vec![(2, InitialCubeDoubt::QueryInconclusive)],
+            },
+            must.clone(),
+            may.clone(),
+        );
+        let v = t.violation_at_reset().expect("some cell falsifies");
+        assert!(!v.is_established());
+        let text = v.to_string();
+        assert!(
+            text.contains("NOT established at a reset state")
+                && text.contains("cube 2: the cycle-0 query was inconclusive — a re-run"),
+            "{text}"
+        );
+        // No initial cube falsifies at all.
+        let t = trace(
+            InitialCubes::established(vec![1]),
+            must.clone(),
+            may.clone(),
+        );
+        assert_eq!(
+            t.violation_at_reset(),
+            Some(ViolationAtReset::NoInitialCellFalsifies)
+        );
+        // Nothing falsifies: nothing to establish.
+        let t = trace(
+            InitialCubes::established(vec![0]),
+            bitvec![usize, Lsb0; 1, 1, 1, 1],
+            bitvec![usize, Lsb0; 1, 1, 1, 1],
+        );
+        assert_eq!(t.violation_at_reset(), None);
+    }
+
     #[test]
     fn i1_witness_cells_decode_falsifying_and_undecided_valuations() {
         use bitvec::prelude::*;
@@ -2156,6 +2342,7 @@ mod tests {
                 },
             ],
             terminated_with: CegarTermination::Converged,
+            initial_cubes: crate::adapter::btor2::kmts_lift::InitialCubes::default(),
             lazy_lift_pending: true,
             approximant_reuse_enabled: false,
             warnings: Vec::new(),

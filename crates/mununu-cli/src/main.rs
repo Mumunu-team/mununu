@@ -6014,10 +6014,17 @@ fn run_cegar_cli(
             &trace.final_verdict,
             &trace.unlifted_cells,
         );
+    // mununu#1106 — a VIOLATED tally is read against the initial cubes: established at a reset
+    // state, or not (every falsifying initial cube kept on doubt — mununu#1085 — or none
+    // falsifying at all). The counts stay; the qualifier is what the verdict means.
+    let violation_at_reset = trace.violation_at_reset();
     let outcome = if bot_cells > 0 {
         format!("INDEFINITE — {bot_cells} cell(s) need further refinement")
     } else if f_cells > 0 {
-        format!("PROPERTY VIOLATED — {f_cells} cell(s) falsify the formula")
+        match &violation_at_reset {
+            Some(v) => format!("PROPERTY VIOLATED — {f_cells} cell(s) falsify the formula; {v}"),
+            None => format!("PROPERTY VIOLATED — {f_cells} cell(s) falsify the formula"),
+        }
     } else {
         format!("PROPERTY HOLDS — all {t_cells} cell(s) satisfy the formula")
     };
@@ -6045,6 +6052,11 @@ fn run_cegar_cli(
                 "unlifted_cells": unlifted_cells,
             },
             "outcome": outcome,
+            // mununu#1106 — present when some cell falsifies the formula.
+            "violation_at_reset": violation_at_reset.as_ref().map(|v| serde_json::json!({
+                "established": v.is_established(),
+                "detail": v.to_string(),
+            })),
             "violating_cells": cegar_cells_json(&violating_cells),
             "undecided_cells": cegar_cells_json(&undecided_cells),
             // Track I.1 (trace slice) — reachability countertrace for a
