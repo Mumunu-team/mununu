@@ -2449,6 +2449,9 @@ fn attach_involves(
     let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
         return;
     };
+    // mununu#966 — the per-property cone slice through the model's facts memo: one slice per
+    // atom set for both facts below (and for any later reader of the same facts).
+    let facts = crate::adapter::btor2::model_facts::ModelFacts::new(&file);
     let no_source_map = report.diagnostics.trace_names.sources.is_empty() && index.is_none();
     let sources = &report.diagnostics.trace_names.sources;
     let aliases = &report.diagnostics.trace_names.aliases;
@@ -2465,7 +2468,7 @@ fn attach_involves(
         }
         // N0.1 — the cone's identity, whether or not a source map exists to name its lines. The
         // N5 census column reads the same slice: one cone per row, two facts about it.
-        let slice = crate::adapter::btor2::bit_blast::cone_slice(&file, &atoms);
+        let slice = facts.cone_slice(&atoms);
         cone_hashes.push((p.name.clone(), cone_hash(&slice, &p.formula)));
         cone_array_states.push((p.name.clone(), slice.array_state_names()));
         if no_source_map {

@@ -17,7 +17,8 @@
 //! subsumes it. A model transform (cutpoint / config-pin) produces a *new* model and
 //! hence a fresh cache, so the memo never goes stale.
 
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::adapter::btor2::ast::{Btor2File, Nid};
 use crate::adapter::btor2::bit_blast::{MemoryCellMeta, detect_btor2_memories};
@@ -49,6 +50,12 @@ pub(crate) struct ModelFacts<'m> {
     total_bits: OnceLock<Option<u32>>,
     free_inputs: OnceLock<Vec<InputFact>>,
     stride_counters: OnceLock<Vec<(Nid, u32)>>,
+    /// mununu#966 — the per-property cones, keyed by seed atoms: the leaf cone every
+    /// atom-keyed fact filters by, and the BTOR2 slice the shape and row facts read. Each is
+    /// computed once per atom set for the lifetime of the value (three accessors and two
+    /// callers used to recompute them per row).
+    cones: Mutex<HashMap<Vec<String>, Arc<HashSet<Nid>>>>,
+    slices: Mutex<HashMap<Vec<String>, Arc<Btor2File>>>,
 }
 
 /// mununu#929 — the narrowest counter the diameter proxy reports. A `W`-bit counter bounds the
@@ -148,7 +155,45 @@ impl<'m> ModelFacts<'m> {
             total_bits: OnceLock::new(),
             free_inputs: OnceLock::new(),
             stride_counters: OnceLock::new(),
+            cones: Mutex::new(HashMap::new()),
+            slices: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// mununu#966 — the leaf cone of `seed_atoms` (`cone_leaf_nids`), computed once per atom
+    /// set: `cone_bits`, the diameter proxy and the pinnable-input filter all read it. A
+    /// poisoned memo (a panic while filling it) falls back to computing the cone uncached.
+    pub(crate) fn leaf_cone(&self, seed_atoms: &[String]) -> Arc<HashSet<Nid>> {
+        if let Ok(m) = self.cones.lock()
+            && let Some(c) = m.get(seed_atoms)
+        {
+            return Arc::clone(c);
+        }
+        let cone = Arc::new(cone_leaf_nids(self.model, seed_atoms));
+        if let Ok(mut m) = self.cones.lock() {
+            m.entry(seed_atoms.to_vec())
+                .or_insert_with(|| Arc::clone(&cone));
+        }
+        cone
+    }
+
+    /// mununu#966 — the BTOR2 slice of `seed_atoms`' cone (`bit_blast::cone_slice`: data flow
+    /// plus constraint / fairness coupling, NIDs preserved), computed once per atom set: the
+    /// planner's shape facts and the row facts (cone hash, array states) read the same slice.
+    pub(crate) fn cone_slice(&self, seed_atoms: &[String]) -> Arc<Btor2File> {
+        if let Ok(m) = self.slices.lock()
+            && let Some(s) = m.get(seed_atoms)
+        {
+            return Arc::clone(s);
+        }
+        let slice = Arc::new(crate::adapter::btor2::bit_blast::cone_slice(
+            self.model, seed_atoms,
+        ));
+        if let Ok(mut m) = self.slices.lock() {
+            m.entry(seed_atoms.to_vec())
+                .or_insert_with(|| Arc::clone(&slice));
+        }
+        slice
     }
 
     /// The design's state + input leaf cells (canonical seam `BtorSts::leaf_cells`), or an
@@ -183,7 +228,8 @@ impl<'m> ModelFacts<'m> {
     /// register names from
     /// [`crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms`]) — the register+input
     /// bits it must bit-blast. Mirrors the engine's keep-set cone (`cone_leaf_nids`); an
-    /// empty atom set ⇒ the whole design (`keep = None`). Not memoized (varies per atom set).
+    /// empty atom set ⇒ the whole design (`keep = None`). The leaf cone is memoized per atom
+    /// set ([`Self::leaf_cone`]).
     pub(crate) fn cone_bits(&self, seed_atoms: &[String]) -> Option<u32> {
         if seed_atoms.is_empty() {
             return self.total_bits();
@@ -197,7 +243,7 @@ impl<'m> ModelFacts<'m> {
         {
             return Some(crate::adapter::btor2::dep_graph::bit_cone_bits(&cone));
         }
-        let cone = cone_leaf_nids(self.model, seed_atoms);
+        let cone = self.leaf_cone(seed_atoms);
         Some(
             self.leaf_cells()?
                 .iter()
@@ -260,7 +306,7 @@ impl<'m> ModelFacts<'m> {
         if seed_atoms.is_empty() {
             return counters.iter().map(|&(_, w)| w).max();
         }
-        let cone = cone_leaf_nids(self.model, seed_atoms);
+        let cone = self.leaf_cone(seed_atoms);
         counters
             .iter()
             .filter(|(nid, _)| cone.contains(nid))
@@ -314,7 +360,7 @@ impl<'m> ModelFacts<'m> {
         if seed_atoms.is_empty() {
             return self.free_inputs().to_vec();
         }
-        let cone = cone_leaf_nids(self.model, seed_atoms);
+        let cone = self.leaf_cone(seed_atoms);
         self.free_inputs()
             .iter()
             .filter(|i| cone.contains(&i.nid))
@@ -352,6 +398,42 @@ impl<'m> ModelFacts<'m> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#966 — the per-property cone and slice are computed once per atom set: a second
+    /// call for the same atoms returns the same allocation, a different atom set its own, and
+    /// the memoized cone is what `cone_leaf_nids` computes.
+    #[test]
+    fn the_cone_and_the_slice_are_memoized_per_atom_set() {
+        let file = crate::adapter::btor2::parser::parse(
+            "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 state 1 a\n5 init 1 4 3\n\
+             6 state 1 b\n7 init 1 6 3\n8 one 1\n9 add 1 4 8\n10 next 1 4 9\n11 add 1 6 8\n\
+             12 next 1 6 11\n13 ones 1\n14 eq 2 4 13\n15 bad 14\n",
+        )
+        .expect("parses");
+        let facts = ModelFacts::new(&file);
+        let a = vec!["a".to_string()];
+        let b = vec!["b".to_string()];
+        let c1 = facts.leaf_cone(&a);
+        let c2 = facts.leaf_cone(&a);
+        assert!(
+            Arc::ptr_eq(&c1, &c2),
+            "the same atoms, the same memoized cone"
+        );
+        assert_eq!(*c1, cone_leaf_nids(&file, &a));
+        assert!(
+            !Arc::ptr_eq(&c1, &facts.leaf_cone(&b)),
+            "another atom set, its own cone"
+        );
+        let s1 = facts.cone_slice(&a);
+        let s2 = facts.cone_slice(&a);
+        assert!(
+            Arc::ptr_eq(&s1, &s2),
+            "the same atoms, the same memoized slice"
+        );
+        assert!(!Arc::ptr_eq(&s1, &facts.cone_slice(&b)));
+        // The atom-keyed facts read the memo, not a fresh cone: `b`'s width is out of `a`'s cone.
+        assert_eq!(facts.cone_bits(&a), Some(2));
+    }
     use crate::adapter::btor2::parser;
 
     #[test]

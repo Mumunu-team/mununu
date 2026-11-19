@@ -663,22 +663,23 @@ pub fn annotate_routing_explained(
             diameter_log2,
             predicted_engine,
             why,
-            shape: shape_facts(&file, &formula, &atoms),
+            shape: shape_facts(&facts, &formula, &atoms),
         });
     }
     (out, misses)
 }
 
 /// Roadmap J2 — the static shape of one property: its cone's multipliers / dividers, memories and
-/// inputs (from the same cone slice the row facts read), and its formula's alternation and
-/// constancy. No solving.
+/// inputs (from the same cone slice the row facts read — mununu#966: the facts' memoized slice,
+/// so the planner and the row facts of one run compute it once per property), and its
+/// formula's alternation and constancy. No solving.
 fn shape_facts(
-    file: &crate::adapter::btor2::ast::Btor2File,
+    facts: &crate::adapter::btor2::model_facts::ModelFacts<'_>,
     formula: &crate::mu_calculus::Formula,
     atoms: &[String],
 ) -> ShapeFacts {
     use crate::adapter::btor2::ast::{Node, Op};
-    let slice = crate::adapter::btor2::bit_blast::cone_slice(file, atoms);
+    let slice = facts.cone_slice(atoms);
     let arith_ops = slice
         .lines
         .iter()
@@ -1526,20 +1527,21 @@ mod tests {
                            9 state 3 m\n10 state 1 r\n11 read 1 9 4\n12 next 1 10 11\n\
                            13 state 2 q\n14 next 2 13 13\n";
         let file = crate::adapter::btor2::parser::parse(SRC).expect("parses");
+        let facts = crate::adapter::btor2::model_facts::ModelFacts::new(&file);
         let f = |s: &str| crate::mu_calculus::parser::parse(s).expect("formula");
-        let mul = super::shape_facts(&file, &f("nu X. ((p != 3) && [] X)"), &["p".to_string()]);
+        let mul = super::shape_facts(&facts, &f("nu X. ((p != 3) && [] X)"), &["p".to_string()]);
         assert_eq!(mul.arith_ops, 1, "{mul:?}");
         assert_eq!(mul.inputs, 2, "{mul:?}");
         assert_eq!(mul.alternation, 1);
         assert!(!mul.constant);
         let mem = super::shape_facts(
-            &file,
+            &facts,
             &f("nu X. ((r == p) && [] X)"),
             &["r".to_string(), "p".to_string()],
         );
         assert_eq!(mem.array_states, 1, "{mem:?}");
         assert_eq!(mem.relational_atoms, 1, "`r == p` is a register comparison");
-        let none = super::shape_facts(&file, &f("nu X. ((q == 0) && [] X)"), &["q".to_string()]);
+        let none = super::shape_facts(&facts, &f("nu X. ((q == 0) && [] X)"), &["q".to_string()]);
         assert_eq!(
             (
                 none.arith_ops,
@@ -1550,12 +1552,12 @@ mod tests {
             (0, 0, 0, 0)
         );
         let rec = super::shape_facts(
-            &file,
+            &facts,
             &f("nu Y. ((mu Z. ((q == 0) || <> Z)) && [] Y)"),
             &["q".to_string()],
         );
         assert_eq!(rec.alternation, 2);
-        let k = super::shape_facts(&file, &f("nu X. ((!(false)) && [] X)"), &[]);
+        let k = super::shape_facts(&facts, &f("nu X. ((!(false)) && [] X)"), &[]);
         assert!(k.constant);
     }
 
