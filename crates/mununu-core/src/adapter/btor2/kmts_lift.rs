@@ -710,13 +710,80 @@ pub enum InitialCubeDoubt {
     /// The design did not encode for the query, so no cube was queried.
     DesignNotEncoded(String),
     /// A memory `init` did not encode, so the query ran with the memory free at cycle 0: a `Sat`
-    /// admits cycle-0 states the design never occupies.
-    MemoryInitNotEncoded(String),
+    /// admits cycle-0 states the design never occupies. `cause` says whose gap it is
+    /// (mununu#1106 item 6), since the remedy differs.
+    MemoryInitNotEncoded {
+        /// The encoder's own words.
+        detail: String,
+        cause: MemoryInitGap,
+    },
     /// Every candidate proved empty, so the whole product was kept (an empty initial set reads as
     /// a vacuous Holds in every consumer).
     EveryCandidateProvedEmpty,
     /// No candidate at all; `cube_0` was kept so the Clts has an initial state.
     NoCandidate,
+}
+
+/// Whose gap a memory `init` that did not encode is (mununu#1106 item 6): the remedy for a
+/// construct the predicate-image encoder does not take yet is another engine; the remedy for an
+/// `init` the lift produced malformed is a report, since nothing the user writes changes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryInitGap {
+    /// The encoder has no rule for an operator the `init` uses — a mununu limitation.
+    UnsupportedOperator { op: &'static str },
+    /// The `init` term is not what the lift promised (a width mismatch, a constant outside its
+    /// sort, a memory without an array sort, an array under a bit-vector-only theory) — a lift
+    /// defect, to report.
+    LiftDefect,
+}
+
+impl MemoryInitGap {
+    /// Classify the encoder's error by whose gap it is.
+    pub fn from_encode_error(
+        e: &crate::adapter::sidecar::predicate_image::btor2_encode::EncodeError,
+    ) -> Self {
+        use crate::adapter::sidecar::predicate_image::btor2_encode::EncodeError;
+        match e {
+            // The encoder files a malformed term under `UnsupportedOperator` with a sentence for
+            // `op_name` ("array init on a state without an array sort", "<missing-nid>"); an
+            // operator it has no rule for is a bare BTOR2 keyword.
+            EncodeError::UnsupportedOperator { op_name, .. }
+                if op_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+            {
+                Self::UnsupportedOperator { op: op_name }
+            }
+            EncodeError::UnsupportedOperator { .. }
+            | EncodeError::ArraySortUnsupportedInBvOnly { .. }
+            | EncodeError::WidthMismatch { .. }
+            | EncodeError::ConstantOutOfRange { .. }
+            | EncodeError::MemoryWithoutArraySort { .. } => Self::LiftDefect,
+        }
+    }
+
+    /// What the user can do — or that there is nothing to do but report.
+    pub fn remedy(&self) -> String {
+        match self {
+            Self::UnsupportedOperator { op } => format!(
+                "a mununu limitation: the cycle-0 encoder has no rule for `{op}` yet (mununu#1106); \
+                 the exact engine reads the memory itself when the cone fits its bit cap — \
+                 decide the row with `--engine exact-symbolic`, or supply an `init` without `{op}`"
+            ),
+            Self::LiftDefect => "a lift defect, not something the source can change: please \
+                                 report it with the BTOR2 (mununu#1106)"
+                .to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryInitGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedOperator { op } => write!(f, "operator `{op}` is outside the encoder"),
+            Self::LiftDefect => f.write_str("the lift's `init` term is malformed"),
+        }
+    }
 }
 
 impl InitialCubeDoubt {
@@ -729,25 +796,28 @@ impl InitialCubeDoubt {
 
     /// What decides a cube kept on this doubt — one sentence per cause, since the causes
     /// have different remedies (a clock is re-run; an encoding gap is not).
-    pub fn remedy(&self) -> &'static str {
+    pub fn remedy(&self) -> String {
         match self {
             Self::QueryInconclusive => {
                 "a re-run with a larger `MUNUNU_CUBE_SMT_RLIMIT` or query clock may decide it"
+                    .to_string()
             }
-            Self::BudgetExpired => "a re-run with a larger run budget may decide it",
+            Self::BudgetExpired => "a re-run with a larger run budget may decide it".to_string(),
             Self::DesignNotEncoded(_) => {
                 "the design is outside the cycle-0 encoder; decide the row with another engine"
+                    .to_string()
             }
-            Self::MemoryInitNotEncoded(_) => {
-                "supply a memory `init` the encoder takes, or decide the row with another engine"
-            }
+            // mununu#1106 item 6 — whose gap it is decides what the user can do about it.
+            Self::MemoryInitNotEncoded { cause, .. } => cause.remedy(),
             Self::EveryCandidateProvedEmpty => {
                 "no candidate start cell is inhabited: check the `init` lines and the pins \
                  against the predicates"
+                    .to_string()
             }
             Self::NoCandidate => {
                 "no start cell is consistent with the `init` lines and the pins: check them \
                  against the predicates"
+                    .to_string()
             }
         }
     }
@@ -759,10 +829,10 @@ impl std::fmt::Display for InitialCubeDoubt {
             Self::QueryInconclusive => f.write_str("the cycle-0 query was inconclusive"),
             Self::BudgetExpired => f.write_str("the run budget expired before its cycle-0 query"),
             Self::DesignNotEncoded(e) => write!(f, "the design did not encode for the query ({e})"),
-            Self::MemoryInitNotEncoded(e) => {
+            Self::MemoryInitNotEncoded { detail, cause } => {
                 write!(
                     f,
-                    "a memory `init` did not encode, the memory was free at cycle 0 ({e})"
+                    "a memory `init` did not encode, the memory was free at cycle 0 ({detail}; {cause})"
                 )
             }
             Self::EveryCandidateProvedEmpty => {
@@ -896,7 +966,10 @@ pub(crate) fn cycle_zero_feasible_cubes(
                     );
                     (
                         HashMap::new(),
-                        Some(InitialCubeDoubt::MemoryInitNotEncoded(e.to_string())),
+                        Some(InitialCubeDoubt::MemoryInitNotEncoded {
+                            detail: e.to_string(),
+                            cause: MemoryInitGap::from_encode_error(&e),
+                        }),
                     )
                 }
             };
@@ -5787,6 +5860,98 @@ mod tests {
     const MEMORY_READ_AT_RESET_BTOR2: &str = "1 sort bitvec 1\n2 sort array 1 1\n3 zero 1\n\
 4 state 2 v\n5 init 2 4 3\n6 state 1 ptr\n7 init 1 6 3\n8 read 1 4 6\n9 output 8 out_valid\n\
 10 state 1 fresh\n11 init 1 10 3\n12 next 2 4 4\n13 next 1 6 6\n14 next 1 10 10\n";
+
+    /// mununu#1106 item 6 — REPRODUCER: a memory `init` the lift produced malformed (here a
+    /// 2-bit value for a 1-bit-element memory, a `WidthMismatch`) is a lift defect, and the doubt
+    /// says so: "please report", not "supply an init the encoder takes" (nothing the source
+    /// writes changes a malformed lift term). Names no API this change adds; on the parent the
+    /// remedy was the generic sentence, so the assertion fails there.
+    #[test]
+    fn x1106_a_malformed_memory_init_is_reported_as_a_lift_defect_not_as_the_users_gap() {
+        let btor2 = "1 sort bitvec 1\n2 sort array 1 1\n3 zero 1\n15 sort bitvec 2\n16 zero 15\n\
+4 state 2 v\n5 init 2 4 16\n6 state 1 ptr\n7 init 1 6 3\n8 read 1 4 6\n9 output 8 out_valid\n\
+10 state 1 fresh\n11 init 1 10 3\n12 next 2 4 4\n13 next 1 6 6\n14 next 1 10 10\n";
+        let file = crate::adapter::btor2::parser::parse(btor2).expect("parses");
+        let preds = vec![
+            PredicateSpec {
+                name: "out_valid".into(),
+                register: "out_valid".into(),
+                value: 1,
+            },
+            PredicateSpec {
+                name: "fresh".into(),
+                register: "fresh".into(),
+                value: 1,
+            },
+        ];
+        let none = std::collections::HashMap::new();
+        let initial = initial_cube_indices(&preds, &none, &HashMap::new(), &file);
+        assert!(
+            !initial.doubtful.is_empty(),
+            "the memory init did not encode: {initial:?}"
+        );
+        let warning = initial.warning().expect("a doubt-kept cube warns").message;
+        assert!(
+            warning.contains("a memory `init` did not encode")
+                && warning.contains("width mismatch")
+                && warning.contains("a lift defect")
+                && warning.contains("please report")
+                && !warning.contains("supply a memory `init` the encoder takes"),
+            "{warning}"
+        );
+    }
+
+    /// mununu#1106 item 6 — the seam: whose gap each encoder error is, and the remedy per cause.
+    #[test]
+    fn x1106_the_memory_init_gap_names_whose_gap_it_is_and_the_remedy_per_cause() {
+        use crate::adapter::sidecar::predicate_image::btor2_encode::EncodeError;
+        let op = MemoryInitGap::from_encode_error(&EncodeError::UnsupportedOperator {
+            nid: 7,
+            op_name: "sort",
+        });
+        assert_eq!(op, MemoryInitGap::UnsupportedOperator { op: "sort" });
+        let r = op.remedy();
+        assert!(
+            r.contains("a mununu limitation")
+                && r.contains("`sort`")
+                && r.contains("--engine exact-symbolic")
+                && !r.contains("please report"),
+            "{r}"
+        );
+        for defect in [
+            EncodeError::UnsupportedOperator {
+                nid: 4,
+                op_name: "array init on a state without an array sort",
+            },
+            EncodeError::UnsupportedOperator {
+                nid: 4,
+                op_name: "<missing-nid>",
+            },
+            EncodeError::WidthMismatch {
+                nid: 5,
+                state_width: 1,
+                operand_width: 2,
+            },
+            EncodeError::ConstantOutOfRange { nid: 3 },
+            EncodeError::MemoryWithoutArraySort { nid: 4 },
+            EncodeError::ArraySortUnsupportedInBvOnly { nid: 4 },
+        ] {
+            let gap = MemoryInitGap::from_encode_error(&defect);
+            assert_eq!(gap, MemoryInitGap::LiftDefect, "{defect}");
+            assert!(gap.remedy().contains("please report"), "{}", gap.remedy());
+        }
+        let doubt = InitialCubeDoubt::MemoryInitNotEncoded {
+            detail: "BTOR2 NID 5: width mismatch".into(),
+            cause: MemoryInitGap::LiftDefect,
+        };
+        assert!(!doubt.is_host_dependent());
+        assert!(
+            doubt
+                .to_string()
+                .contains("the lift's `init` term is malformed"),
+            "{doubt}"
+        );
+    }
 
     /// mununu#1061 — a memory's `init` line binds at cycle 0. `out_valid = v[ptr]` reads a
     /// memory whose every cell is 0 at reset, so `out_valid == 1` is not an initial cell. The
