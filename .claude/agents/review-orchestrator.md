@@ -71,7 +71,7 @@ Invoke each skill with the file list for its paths; embed its Markdown table or 
 | `/test-coverage` | any `.rs`, any test | §Tests |
 | `/security-audit` | `api/**`, `licence.rs`, `usage_ledger.rs`, a subprocess driver (`adapter/{yosys,btormc,pono,ric3,verilator,cvc5}/`, `Command::new`), `context_dsl/` import paths, `adapter/resume.rs`, `unsafe`, `Cargo.toml`, `Cargo.lock`, `deny.toml`, `docker/` — else one line `no security-relevant paths in scope` | §Security |
 | `/soundness-check` | `adapter/**`, `abstraction/**`, `mu_calculus/**`, `clts/**`, `composition/**`, `contract/**`, `codesign/**`, `context_dsl/**`, `guard/**` | §Soundness |
-| `/failure-path-audit` | `adapter/**`, `planner/**`, `mu_calculus/**`, `verify/**` | §Failure Paths — a site the change ADDED is a finding at any severity |
+| `/failure-path-audit` | `adapter/**`, `planner/**`, `mu_calculus/**`, `verify/**`; class C also on `composition/**`, `api/**`, `crates/mununu-cli/**` | §Failure Paths — a site the change ADDED is a finding at any severity; a remedy the change adds or edits is checked against every verb that reaches it |
 | `/parity-check` | the CLI, `api/{handlers,models,server,ops,mcp}.rs`, `mununu-ui/src/**` | §CLI / API / UI Parity — UI column `n/a` unless the subject is a CTXDSL model |
 | `/docs-traceability` | any covered `.md`; or a renamed / removed symbol anywhere in scope (pass the symbol list) | §Documentation Traceability |
 
@@ -79,7 +79,7 @@ Two seams the skills do not own, which you check yourself from the diff: **Test 
 
 ## 4. Tier C — the consolidated report
 
-**Severity ladder.** *Merge-blocking*: a `[RULE]` violation (tier A rows that fail; a `surface` with no peer and no tag; an undeclared `eval → None`; a missing reproducer trailer on a fix; a private name), or a HIGH from `/soundness-check` or `/failure-path-audit` (a wrong direction, a crash where an abstention was due, a verdict path that can go silent). *Advisory*: everything else, ranked by what it would cost later. Every finding cites `file:line` and the rule or skill item it comes from; a finding with neither is dropped.
+**Severity ladder.** *Merge-blocking*: a `[RULE]` violation (tier A rows that fail; a `surface` with no peer and no tag; an undeclared `eval → None`; a missing reproducer trailer on a fix; a private name), or a HIGH from `/soundness-check` or `/failure-path-audit` (a wrong direction, a crash where an abstention was due, a verdict path that can go silent, a remedy that names a flag, variable or key that does not exist on the surface that produced it). *Advisory*: everything else, ranked by what it would cost later. Every finding cites `file:line` and the rule or skill item it comes from; a finding with neither is dropped.
 
 Write the report to the `.claude/reviews` directory as `YYYY-MM-DD-<scope>.md` and copy it to `latest.md` there (`date -u +%F`). The directory is gitignored: the report is a local artefact and **no tracked file links to it** (G4). What needs action leaves the report as a GitHub issue — class label (`soundness`, `silent`, `crash`, `coverage`, `decidability`, `semantics-docs`, `flake`, `performance`, `ergonomics`) plus `found:internal` — or, when reviewing a PR and asked to, as a review comment; the report records the issue numbers.
 
