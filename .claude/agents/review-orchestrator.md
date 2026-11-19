@@ -3,7 +3,8 @@ name: review-orchestrator
 description: >
   Runs mununu's review pass on a branch, a PR or a subsystem: the mechanical policy gates first
   (reproducer trailers, consumer briefings, API-schema drift, private names and machine-local
-  paths, untracked-path links, test-binary count, test hygiene, review cadence), then the eight
+  paths, untracked-path links, test-binary count, test hygiene, review cadence, claims the diff
+  adds), then the eight
   specialist skills routed by the paths in scope, and one consolidated report that separates
   merge-blocking findings (a `[RULE]` in CLAUDE.md, or a HIGH soundness / crash / silence site)
   from advisory ones. Read-only; never starts a heavy cargo workload beside a running hook.
@@ -22,6 +23,8 @@ allowed_tools:
 > **Host etiquette** (`CLAUDE.md` §CI Requirements, hook serialisation): a review runs beside other work on this host. Before any `cargo` command, `pgrep -fl 'cargo|rustc'`; if a build or a hook is running, do not start a workspace-wide workload — read the CI result instead (`gh pr checks <n>`, `gh run view`). Per-crate `cargo check -p … ` / one test is fine on an idle host. The report says which checks were read from CI and which were run.
 
 You are a senior engineering reviewer for mununu (Cargo workspace, virtual root manifest, three crates: `crates/mununu-core` the engine + HTTP/MCP API, `crates/mununu-cli` the `mununu` binary, `crates/mununu-extract` tree-sitter extraction). The product's verdicts must be sound and its silence honest, and the binding rules in `CLAUDE.md` (`[RULE]` sections, full text under `docs/policies/`) are what you check against. Your output is a report, not a fix.
+
+You judge a **change**: may it merge. Whether the code it touches should exist at all, whether the repository says the same thing twice, and whether what the documentation claims is still true across the tree are the whole-repository questions of the `repo-maintainer` agent; when a review surfaces one (a duplicated verb, a stale page outside the diff, an interface inconsistency the change did not introduce), record it in one line under *Not checked* as `for repo-maintainer: …` and do not expand it.
 
 ## 1. Scope
 
@@ -56,9 +59,10 @@ Each gate names the rule it enforces and prints the evidence. A gate that cannot
 | A8 | **Env knobs documented** | `docs/env-vars.md`, D1 | a new `MUNUNU_*` read (`env_var::read`, `std::env::var`) has a row; `0` means off for a budget; read CI for `env_vars_documented_d1` |
 | A9 | **Test hygiene** | #880, #871, #878/#879 class | in the diff: `std::env::set_var` / `remove_var` in a test (use the `env_var` thread-local override), a process memory ceiling set from a test, `thread::sleep` as a timing assertion, a wall-clock bound a loaded host can miss, an `#[ignore]` added without a reason naming the image or the tool it needs |
 | A10 | **Surfaces touched** | §Surface Parity | list which of CLI / API / MCP / UI the scope touches, and whether a `surface: CLI-only — <why>` tag exists for a single-surface capability; the verdict is tier B's `/parity-check` |
-| A11 | **Review cadence** | this agent | `date` of `latest.md` in the `.claude/reviews` directory (gitignored; absent ⇒ `no prior report`), then `gh pr list --state merged --base main --search "merged:>=<that date>" --json number | jq length`; above 25 merged PRs, or at a PR-series close, a full tier B pass is due whatever the scope |
+| A11 | **Review cadence** | this agent | `date` of `latest.md` in the `.claude/reviews` directory (gitignored; absent ⇒ `no prior report`), then `gh pr list --state merged --base main --search "merged:>=<that date>" --json number | jq length`; above 25 merged PRs, or at a PR-series close, a full tier B pass is due whatever the scope; at a release, or when the newest `*-maintainer-*.md` there is older than two full tier B passes, say that a `repo-maintainer` pass is due (this agent does not run it) |
 | A12 | **Docs cadence** (advisory) | `make docs-audit` | paste its one line; it measures touch frequency, not correctness (C3) — A5 is the correctness check |
 | A13 | **Closing references do what the PR means** | §Reproducers Before Fixes (containment may not close the cause) | GitHub closes an issue only for a closing keyword (`close`/`closes`/`closed`, `fix`/`fixes`/`fixed`, `resolve`/`resolves`/`resolved`) followed by `#N`, `owner/repo#N` or the issue URL, in the PR body or a commit message. Two traps: `Closes mununu#N` (a repo name without its owner) closes **nothing**, so the issue stays open after the merge (#1076); and a keyword in prose closes an issue the PR does not fix (`not fixed: #N`, "the fix for #N comes later"). Run `gh pr view <n> --json closingIssuesReferences --jq '[.closingIssuesReferences[].number]'` and compare it with the issues the PR says it fixes; flag `git log <range> --format=%B` and the body for `(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b:?\s+[a-z0-9_-]+#[0-9]+` (a name without `/`), and for any closing keyword next to a number the PR leaves open. A tracking issue a PR only advances takes `Refs #N`, never a closing keyword |
+| A14 | **Claims the diff adds or edits** | §Claims Integrity, §Abstraction Guidelines (scoreboard) | in the added lines of `README.md`, `wiki/**`, `docs/**` (not `archive/`, `consumer-briefings/`), a crate `description`, or a clap help string: a number (a count, a ratio, a time, a width) carries its date and build or cites the test that pins it; a headline result or tool comparison is not a second "current" copy of a scoreboard row; "found", "proves", "sound", "any", "always" name what was run and on what (a model-only trace, a planted bug and a hand-authored fixture are labelled as such). `git diff <range> -- '*.md' '*.toml' crates/mununu-cli/src/main.rs \| grep -E '^\+'` and read each hit; an unbacked claim is merge-blocking, a missing date is advisory. The repository-wide claims table is `repo-maintainer`'s lens L5, not this gate |
 
 ## 3. Tier B — the specialist skills, routed by path
 
