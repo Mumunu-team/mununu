@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-- **Removed (mununu#1074).** Since the slang-only lift (2026-11-04) the verb lifted the design with `read_slang --ignore-assertions`, so every SystemVerilog input lifted to a model with no `bad` line and the verb refused it ("the lifted design has no `bad` line, so there is nothing to decide …") — a surface that could not succeed. Confirmed by one run in the image before the removal (a module with an immediate `assert` and a concurrent `assert property`: the refusal, nothing else). No consumer was found calling it (rosf, monono, mununu-ui).
+- **Removed (mununu#1074).** Since the slang-only lift (2026-11-04) the verb lifted the design with `read_slang --ignore-assertions`, so every SystemVerilog input lifted to a model with no `bad` line and the verb refused it ("the lifted design has no `bad` line, so there is nothing to decide …") — a surface that could not succeed. Confirmed by one run in the image before the removal (a module with an immediate `assert` and a concurrent `assert property`: the refusal, nothing else). No consumer calls it (rosf, monono); mununu-ui carried an unused typed client, removed by a companion PR.
 - **What to call instead:** for a module's assertions, `mununu sv verify-auto` / `POST /api/v1/sv/verify-auto` (the SVA property set, the portfolio, the notes); for a hand-written `bad` line, `mununu btor2 verify` / `POST /api/v1/btor2/verify` on the BTOR2.
 - **Shape change:** the route is gone (`404`); the CLI verb is gone (`mununu sv verify-bad` is an unknown subcommand, exit 64); `docs/api-schemas/sv-verify-request.schema.json` is removed. Nothing else changes.
 
@@ -16,7 +16,7 @@
 |---|---|---|
 | **rosf** | None found (no call to the verb or the route in the repository). | None. |
 | **monono** | None found. | None. |
-| **mununu-ui** | None (no client for the route). | None. |
+| **mununu-ui** | `main` carried an unused typed client (`runSvVerifyBad`, its request type, a route test); the companion PR removes them. | Merge the companion PR after this one. |
 
 ## Docker rebuild
 
