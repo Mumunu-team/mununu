@@ -70,6 +70,22 @@ pub fn counterexample_testbench(
     if states.is_empty() {
         return None;
     }
+    // Security gate: `top` and the source names are written into a Makefile that `make` runs.
+    // The lift refused anything outside the grammar before a counterexample could exist
+    // (`validate_lift_inputs`); this keeps the generator safe on its own, and says so.
+    if !crate::adapter::yosys::is_valid_module_name(design.top)
+        || !design
+            .sources
+            .iter()
+            .all(|s| crate::adapter::yosys::is_valid_source_name(s))
+    {
+        tracing::warn!(
+            top = design.top,
+            "replay bench not generated: the top module or a source name is outside the \
+             grammar the lift accepts (it would have been refused at the lift)"
+        );
+        return None;
+    }
     let top = design.top;
     // Input ports: every input name the trace drives, with `$next` stripped.
     let mut ports: std::collections::BTreeSet<String> = cex
