@@ -2128,7 +2128,10 @@ fn decide_owned_only_using(
             if hit {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("cex", OwnedReport::Verdict(if hit { Some(true) } else { None })));
+            let _ = tx.send((
+                "cex",
+                OwnedReport::Verdict(if hit { Some(true) } else { None }),
+            ));
         });
     }
     // N5.4 — the owned SAT BMC with the dynamic step, beside the z3 / Boolector deep-CEX member:
@@ -3314,7 +3317,8 @@ mod tests {
         // other's sender stays alive past the deadline.
         let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
         let _still_running = tx.clone();
-        tx.send(("native", OwnedReport::Verdict(None))).expect("send");
+        tx.send(("native", OwnedReport::Verdict(None)))
+            .expect("send");
         tx.send(("interp", OwnedReport::Died)).expect("send");
         drop(tx);
         let r = collect_owned(&rx, 3, Instant::now() + Duration::from_millis(50), grace);
@@ -3324,18 +3328,24 @@ mod tests {
         // The backstop: a sender dropped without any report (a thread that did not unwind).
         let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
         let tx_dead = tx.clone();
-        tx.send(("native", OwnedReport::Verdict(None))).expect("send");
+        tx.send(("native", OwnedReport::Verdict(None)))
+            .expect("send");
         drop(tx);
         drop(tx_dead);
         let r = collect_owned(&rx, 2, Instant::now() + Duration::from_secs(5), grace);
-        assert!(r.disconnected, "every sender gone before every member reported");
+        assert!(
+            r.disconnected,
+            "every sender gone before every member reported"
+        );
         assert_eq!(r.reported, vec!["native"]);
         assert!(r.dead.is_empty());
         // A definite verdict, then a disagreeing straggler inside the grace: both are read, and
         // the contradiction returns at once (the third member is unreported, not dead).
         let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
-        tx.send(("native", OwnedReport::Verdict(Some(true)))).expect("send");
-        tx.send(("exact", OwnedReport::Verdict(Some(false)))).expect("send");
+        tx.send(("native", OwnedReport::Verdict(Some(true))))
+            .expect("send");
+        tx.send(("exact", OwnedReport::Verdict(Some(false))))
+            .expect("send");
         drop(tx);
         let r = collect_owned(&rx, 3, Instant::now() + Duration::from_secs(5), grace);
         assert_eq!(
@@ -3355,9 +3365,12 @@ mod tests {
         let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
         spawn_owned("pono", tx.clone(), || panic!("boom"));
         spawn_owned("ric3", tx, || {});
-        let mut got: Vec<(&str, OwnedReport)> = rx.iter().collect();
-        got.sort();
-        assert_eq!(got, vec![("pono", OwnedReport::Died)], "a body that sends nothing and does not panic is silent; a panic is a death notice");
+        let got: Vec<(&str, OwnedReport)> = rx.iter().collect();
+        assert_eq!(
+            got,
+            vec![("pono", OwnedReport::Died)],
+            "a body that sends nothing and does not panic is silent; a panic is a death notice"
+        );
         let refused = std::sync::Mutex::new(Vec::new());
         let joined = std::thread::spawn(|| -> Option<bool> { panic!("boom") }).join();
         assert_eq!(settle_join(&refused, "pono", joined), None);
@@ -3365,7 +3378,11 @@ mod tests {
         assert_eq!(settle_join(&refused, "ric3", ok), Some(false));
         let got = refused.lock().expect("lock").clone();
         assert_eq!(got, vec![("pono", panicked_reason("pono"))]);
-        assert!(got[0].1.contains("it panicked") && got[0].1.contains("mununu defect"), "{}", got[0].1);
+        assert!(
+            got[0].1.contains("it panicked") && got[0].1.contains("mununu defect"),
+            "{}",
+            got[0].1
+        );
     }
 
     /// mununu#1143 — REPRODUCER through the public driver: an IC3-only portfolio on a design
