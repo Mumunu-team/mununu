@@ -24,13 +24,13 @@ CADP's industrial track record (LNT process algebra + MCL mu-calculus over the s
 
 > Source of truth: [`crate::composition::compose`](../../crates/mununu-core/src/composition/mod.rs) — surface: API
 >
-> Source of truth: [`Clts::state_valuation`](../../crates/mununu-core/src/clts/mod.rs#L1369) + [`Clts::state_3valued_predicate`](../../crates/mununu-core/src/clts/mod.rs#L1370) — surface: API
+> Source of truth: [`Clts::state_valuation`](../../crates/mununu-core/src/clts/mod.rs#L1457) + [`Clts::state_3valued_predicate`](../../crates/mununu-core/src/clts/mod.rs#L1475) — surface: API
 >
-> Source of truth: [`Transition::labels`](../../crates/mununu-core/src/clts/mod.rs#L265) — surface: API
+> Source of truth: [`Transition::labels`](../../crates/mununu-core/src/clts/mod.rs#L521) — surface: API
 >
 > Source of truth: [`CompositionSemantics`](../../crates/mununu-core/src/composition/mod.rs) — surface: API
 >
-> Source of truth: [`Tristate`](../../crates/mununu-core/src/clts/mod.rs#L278) + [`TransitionModality`](../../crates/mununu-core/src/clts/mod.rs#L311) + [`KleeneDom`](../../crates/mununu-core/src/mu_calculus/evaluator.rs) — surface: API
+> Source of truth: [`Tristate`](../../crates/mununu-core/src/clts/mod.rs#L278) + [`TransitionModality`](../../crates/mununu-core/src/clts/mod.rs#L345) + [`KleeneDom`](../../crates/mununu-core/src/mu_calculus/evaluator.rs) — surface: API
 
 Five mununu primitives sit at the root of every V.x domain claim below:
 

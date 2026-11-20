@@ -1,6 +1,6 @@
 # External Tools
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2552), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2600), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2842), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L670), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2895), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
 
 Mununu's verification engine, model checker, and synthesiser are pure Rust + the linked [Z3](https://github.com/Z3Prover/z3) library. Several pipelines also invoke external command-line tools via subprocess. Those tools are **optional** — mununu functions without them, and individual pipelines emit a structured `AdapterWarning` or `AdapterError` when invoked while a required tool is missing, never silently fail.
 
@@ -29,7 +29,7 @@ Every **discovered** tool above (all but Z3, which is linked, and circt-verilog,
 
 ## Z3 (required, linked library)
 
-> Source of truth: [`crates/mununu-core/Cargo.toml`](../crates/mununu-core/Cargo.toml#L101) — `z3 = "0.21"` — surface: build-time
+> Source of truth: [`crates/mununu-core/Cargo.toml`](../crates/mununu-core/Cargo.toml#L108) — `z3 = "0.21"` — surface: build-time
 
 Z3 is mununu's primary SMT backend, linked in-process via the `z3 = "0.21"` Rust crate. Unlike the other tools listed below, Z3 is **mandatory** — the workspace will not build without it.
 
@@ -101,7 +101,7 @@ Missing-tool behaviour: an oracle test's lift errors with an `UnsupportedConstru
 
 ## Yosys
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2552) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2600) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2842) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2895) — surface: CLI+API
 
 Yosys is the open-source synthesis suite mununu uses to lower SystemVerilog into BTOR2 — the word-level intermediate representation the KMTS lifter consumes. The RTL front end is yosys-slang's `read_slang` (N1, 2026-11-04: the only one), **built into yosys ≥ 0.67**; on an older yosys set `MUNUNU_YOSYS_SLANG_PLUGIN` to a yosys-slang plugin (loaded with `-m`). A yosys with neither (Homebrew's 0.59, Debian's 0.23) lifts **no** SystemVerilog: the error names the fix.
 
@@ -308,7 +308,7 @@ consumes, it imposes no obligation on mununu.
 
 ## slang
 
-> Source of truth: [`adapter/slang/mod.rs::locate_slang`](../crates/mununu-core/src/adapter/slang/mod.rs#L48) — surface: CLI+API
+> Source of truth: [`adapter/slang/mod.rs::locate_slang`](../crates/mununu-core/src/adapter/slang/mod.rs#L56) — surface: CLI+API
 
 [slang](https://github.com/MikePopoloski/slang) is an open-source, full-featured
 SystemVerilog-2017 compiler front-end (MIT-licensed). Mununu uses it as a **discovered

@@ -92,6 +92,7 @@ and `v6_controllability_kmts` hold hand-written fixtures; their headers say so (
 | what | where | licence |
 |---|---|---|
 | `libz3` (the Z3 theorem prover's shared library: `libz3.so.4` in the Linux archives, `libz3.<version>.dylib` in the macOS archives, `libz3.dll` in the Windows zip) | copied from the runner's Z3 package by [`.github/workflows/release.yml`](.github/workflows/release.yml) and placed beside the binaries, which load it through `$ORIGIN` / `@executable_path` | MIT, © Microsoft Corporation — [`LICENSES/Z3-MIT.txt`](LICENSES/Z3-MIT.txt), also shipped in every archive's `LICENSES/` |
+| CaDiCaL 1.9.5 (the SAT solver behind the owned SAT BMC and IC3 members), compiled from the source the `cadical` crate (0.1.16) carries and statically linked into the `mununu` binaries on every platform | built by cargo from [`crates/mununu-core/Cargo.toml`](crates/mununu-core/Cargo.toml) (`cadical = "0.1.16"`); no separate file in the archives | MIT, © Armin Biere, Mathias Fleury, Nils Froleyks, Katalin Fazekas, Florian Pollitt — [`LICENSES/CaDiCaL-MIT.txt`](LICENSES/CaDiCaL-MIT.txt), also shipped in every archive's `LICENSES/` |
 
 ## Bundled in the on-prem image, not in this repository
 

@@ -51,7 +51,7 @@ transition. Without `variables` at all, a guard over an undeclared name is refus
 
 ## 2. `effects` are simultaneous and read the pre-state
 
-> Source of truth: [`apply_effects`](../crates/mununu-core/src/abstraction/unrolling.rs#L1258)
+> Source of truth: [`apply_effects`](../crates/mununu-core/src/abstraction/unrolling.rs#L1329)
 > — every effect's right-hand side is evaluated by an `ExpressionEvaluator`
 > built on `state` (the pre-state) while writes land in `new_state`. Surface:
 > CLI+API+UI.
@@ -120,7 +120,7 @@ the documented under-approximation for an unknown predicate: assumed false.
 
 ## 4. Every unrolled copy of an initial location is marked initial
 
-> Source of truth: [`build_clts_from_unrolled`](../crates/mununu-core/src/context_dsl/realize.rs#L3017)
+> Source of truth: [`build_clts_from_unrolled`](../crates/mununu-core/src/context_dsl/realize.rs#L3344)
 > — `if initial_location_names.contains(&state.location)`. Surface: CLI+API+UI.
 
 `state S initial;` plus `var ptr : i64` unrolls to `S_ptr_0`, `S_ptr_1`,
@@ -154,8 +154,8 @@ Initial states satisfying: 0/1     ← FALSE from reset
 
 ## 5. `summarize` shows the declared automaton; `eval` runs the unrolled one
 
-> Source of truth: [`context_summarize`](../crates/mununu-cli/src/main.rs#L7464)
-> vs [`context_eval`](../crates/mununu-cli/src/main.rs#L7553) — surface: CLI.
+> Source of truth: [`context_summarize`](../crates/mununu-cli/src/main.rs#L8509)
+> vs [`context_eval`](../crates/mununu-cli/src/main.rs#L8594) — surface: CLI.
 
 `context summarize` reports `state_count` from the **declared** `states`
 block. `context eval` evaluates over the **unrolled** product of states and
@@ -187,7 +187,7 @@ expressible as a property. Prefer that.
 
 ## 7. A predicate naming an unreachable state is a hard error, not `false`
 
-> Source of truth: [`bitset_for_state`](../crates/mununu-core/src/context_dsl/realize.rs#L2277)
+> Source of truth: [`bitset_for_state`](../crates/mununu-core/src/context_dsl/realize.rs#L2597)
 > and [`StateNameMatcher::matches_pattern`](../crates/mununu-core/src/context_dsl/state_matching.rs#L23).
 > Surface: CLI+API+UI.
 
@@ -216,7 +216,7 @@ refuses to load while the broken one answers — the opposite of what you want.
 
 ## 8. Composition: declare `controllable` explicitly, or shared labels collide
 
-> Source of truth: [`classify_transition_controllability`](../crates/mununu-core/src/context_dsl/realize.rs#L3143)
+> Source of truth: [`classify_transition_controllability`](../crates/mununu-core/src/context_dsl/realize.rs#L3489)
 > — surface: CLI+API+UI.
 
 If an automaton declares **no** `controllable { … }` / `internal { … }` block,
@@ -242,9 +242,9 @@ from both members bind in formulas over the product.
 
 ## 9. `verify.toml`: template `TARGET`s are identifiers; use `formula` for expressions
 
-> Source of truth: [`validate_param_value`](../crates/mununu-core/src/adapter/templates/mod.rs#L305)
+> Source of truth: [`validate_param_value`](../crates/mununu-core/src/adapter/templates/mod.rs#L541)
 > (`ParamType::Predicate | ParamType::State` must be alphanumeric + `_`) and
-> [`PropertySpec::formula`](../crates/mununu-core/src/verify/config.rs#L307).
+> [`PropertySpec::formula`](../crates/mununu-core/src/verify/config.rs#L331).
 > Surface: CLI+API.
 
 ```toml
@@ -310,7 +310,7 @@ examples are generated with the configuration in the state name.
 An unbounded variable enumerates until it hits the state cap and answers
 nothing, so **bound every variable** with a guard on the transition that
 increments it. `i64`, `bool` and enum names are the only types
-([`parse_type_name`](../crates/mununu-core/src/context_dsl/parser.rs#L598));
+([`parse_type_name`](../crates/mununu-core/src/context_dsl/parser.rs#L636));
 there is no range-typed variable, so bounds come from guards or from
 structure.
 

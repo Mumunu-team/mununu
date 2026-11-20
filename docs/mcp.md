@@ -31,7 +31,7 @@ this server; they are not built here.
 
 ## Errors and the budget
 
-> Source of truth: [`MununuMcp`'s budgeted call](../crates/mununu-core/src/api/mcp.rs#L167) (`--request-timeout`) — surface: CLI+API
+> Source of truth: [`MununuMcp`'s budgeted call](../crates/mununu-core/src/api/mcp.rs#L177) (`--request-timeout`) — surface: CLI+API
 
 A design problem — a CTXDSL syntax error, an unknown formula or automaton, a template that does not
 instantiate — is a **tool result with `isError: true`**, never a protocol-level JSON-RPC error. Its text
@@ -78,7 +78,7 @@ instantiate, and every report the process produces carries the deployment identi
 
 ## A call, end to end
 
-> Source of truth: [`call_tool`](../crates/mununu-core/src/api/mcp.rs#L205) — surface: CLI+API
+> Source of truth: [`call_tool`](../crates/mununu-core/src/api/mcp.rs#L215) — surface: CLI+API
 
 ```json
 {

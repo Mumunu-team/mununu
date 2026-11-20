@@ -153,7 +153,7 @@ Termination is straightforward: the image computation is a fixed-point over the 
 
 ### §3d The unified lift entry (eager / lazy / compound routing)
 
-> Source of truth: [`lift_predicate_cube`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2392) + [`ensure_compound_lift_supported`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2319) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
+> Source of truth: [`lift_predicate_cube`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2695) + [`ensure_compound_lift_supported`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2619) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
 
 Both the may-mode (§3b) and must-mode (§3a) images are reached through **one** gated entry, `lift_predicate_cube(predicates, btor2, opts, lift_opts, strategy)`, which the CEGAR loop and the sv-yosys verify orchestrator call. It runs the compound soundness gate once, then dispatches:
 
@@ -264,7 +264,7 @@ The architecture doc §6.9 catalogues these as part of the broader soundness sto
 
 ### §4.9 The audited-sound cube fragment
 
-> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2440) + [`evaluate_tri`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L792) + [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L284) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
+> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2440) + [`evaluate_tri`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L882) + [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L381) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
 
 A `KleeneT` / `KleeneF` verdict on the predicate cube is only *sound* — i.e.
 guaranteed to transfer to the concrete RTL by the §4.5 preservation theorem
@@ -290,13 +290,13 @@ process-algebra world (the explicit-CLTS path), not the cube.
    modal step equals the Bruns–Godefroid 3-valued modal definition for every
    `{Sharp, MayOnly} × {T, F}` edge configuration. Established by an enumerated
    conformance test:
-   [`po5_kleene_modal_matches_bruns_godefroid_4_3`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L4950).
+   [`po5_kleene_modal_matches_bruns_godefroid_4_3`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L5673).
 3. **Compose (1) + (2)**: a sound KMTS in, §4.3 out ⇒ §4.5 transfers a definite
    cube verdict to the concrete design. This is what makes M.4 *provably* sound,
    not merely argued.
 
 **Out-of-fragment forms are gated, not silently answered.**
-[`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L284)
+[`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L381)
 (wired into the CEGAR loop at
 [`cegar.rs`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L720), surfaced
 on the `warnings` channel across all three surfaces) emits a soundness warning —

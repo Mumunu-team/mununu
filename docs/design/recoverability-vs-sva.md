@@ -68,7 +68,7 @@ the discriminating case).
 
 ### 3.1 Sound `AG EF` over a predicate abstraction
 
-> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2440) + [`cegar_refine_loop`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L697) — surface: (CLI+API+UI)
+> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2743) + [`cegar_refine_loop`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L880) — surface: (CLI+API+UI)
 
 mununu lifts a BTOR2 design into a **predicate cube** (abstract states are
 elements of `2^|P|` over a declared predicate set `P`, not the bit-blast state
@@ -82,13 +82,13 @@ The abstraction is sound for the branching property by the Bruns–Godefroid
 included. The third value (`KleeneBot`) means "the abstraction cannot decide" and
 triggers refinement rather than a wrong answer.
 
-> Source of truth: [`KleeneDom`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L1315) — surface: (CLI+API+UI)
+> Source of truth: [`KleeneDom`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L1412) — surface: (CLI+API+UI)
 
 A definite `AG EF` answer needs *must*-edges (an under-approximation of the
 transition relation) for the inner `EF`, supplied by SMT-proved must / hyper-must
 inference rather than sampling:
 
-> Source of truth: [`MustEdgeInference::SmtHyperMust`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L547) — surface: CLI (`--must-edge-inference smt-hyper-must`)
+> Source of truth: [`MustEdgeInference::SmtHyperMust`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1147) — surface: CLI (`--must-edge-inference smt-hyper-must`)
 
 The verdict, soundness, and the audited modal fragment it holds over
 (`Control::All`, bare `<>`/`[]`, unbounded) are developed in
