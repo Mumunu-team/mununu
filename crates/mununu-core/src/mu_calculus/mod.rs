@@ -394,13 +394,13 @@ pub fn cube_modality_soundness_warnings(
         if guard.control != Control::All {
             out.push(format!(
                 "{op} modality with ctrl={} over a predicate cube: the per-player \
-                 (controller × environment) 3-valued game semantics is SOUND as of \
-                 PO-3 / R.6.8 (de Alfaro–Godefroid–Jagadeesan LICS 2004; evaluate_tri \
-                 routes the controllability arms through the per-player rule). BUT over a \
+                 (controller × environment) 3-valued game semantics is SOUND \
+                 (de Alfaro–Godefroid–Jagadeesan LICS 2004; the controllability arms are \
+                 evaluated by the per-player rule). BUT over a \
                  plain *verification* cube the controllability partition is a build-time \
                  default (the lone `step` label is Controllable-by-default), so a \
                  controllability verdict is only MEANINGFUL over a controllability-aware \
-                 (R.6.6) cube with declared controllable inputs. Use a bare {op} for plain \
+                 cube with declared controllable inputs. Use a bare {op} for plain \
                  verification.",
                 guard.control.as_str()
             ));
@@ -408,7 +408,7 @@ pub fn cube_modality_soundness_warnings(
         if let Some(k) = guard.max_steps {
             out.push(format!(
                 "{op} bounded modality (steps={k}) over a predicate cube: the may/must \
-                 (3-valued) filter is NOT applied to bounded modal steps (PO-4 / R.6.3.b), \
+                 (3-valued) filter is NOT applied to bounded modal steps, \
                  so the 3-valued soundness of the bounded verdict is not established. Use an \
                  unbounded {op} for a sound cube verdict."
             ));
@@ -725,12 +725,14 @@ mod tests {
         // one advisory warning.
         let w = warn("[ (ctrl = controllable) ] p");
         assert_eq!(w.len(), 1, "one ctrl warning: {w:?}");
-        assert!(w[0].contains("SOUND") && w[0].contains("R.6.8") && w[0].contains("MEANINGFUL"));
+        assert!(
+            w[0].contains("SOUND") && w[0].contains("per-player") && w[0].contains("MEANINGFUL")
+        );
 
         // Bounded ⇒ 3-valued-blind (PO-4).
         let w = warn("< (steps = 5) > p");
         assert_eq!(w.len(), 1, "one bounded warning: {w:?}");
-        assert!(w[0].contains("steps=5") && w[0].contains("R.6.3.b"));
+        assert!(w[0].contains("steps=5") && w[0].contains("NOT applied to bounded"));
 
         // Label-specific on a non-cube label ⇒ vacuous.
         let w = warn("<foo>p");

@@ -964,10 +964,10 @@ pub fn cegar_refine_loop(
         warnings.push(crate::adapter::AdapterWarning {
             kind: crate::adapter::WarningKind::ApproximateTranslation,
             message: format!(
-                "[B.1 3c compound] {} compound predicate(s) present → forced \
-                 may_edge_inference = SmtAllPairs + lift_strategy = Eager (the only \
-                 compound-aware lift path; the sampling representative can't realise a \
-                 conjunction and the lazy body never consults the expr).",
+                "{} compound predicate(s) present: the lift switched to the all-pairs SMT \
+                 may-edge inference and the eager lift strategy (the only compound-aware \
+                 lift path; the sampling representative cannot realise a conjunction and \
+                 the lazy body never consults the expression).",
                 compound_exprs.len()
             ),
             location: None,
@@ -991,13 +991,14 @@ pub fn cegar_refine_loop(
             kind: crate::adapter::WarningKind::ApproximateTranslation,
             location: None,
             message: format!(
-                "adapter/btor2/cegar (A.4): may_edge_inference = Off (sampling) with {box_count} \
+                "adapter/btor2/cegar: `--may-edge-inference off` (sampling) with {box_count} \
                  box ([]) modality/-ies. The sampling may-relation is an UNDER-approximation \
                  (one canonical representative per cube + a capped input enumeration) that can \
                  MISS a real may-successor, so a definite HOLDS on a box property is NOT \
                  guaranteed sound — a missed successor can hide a violation. Re-run with \
                  `--may-edge-inference smt-all-pairs` for a sound over-approximating may-relation, \
-                 or use the exact-symbolic engine for an abstraction-free verdict.",
+                 or the exact engine (`--engine exact-symbolic` on `sv verify-auto`) for an \
+                 abstraction-free verdict.",
             ),
         });
     }
@@ -1040,10 +1041,9 @@ pub fn cegar_refine_loop(
             kind: crate::adapter::WarningKind::ApproximateTranslation,
             location: None,
             message: format!(
-                "adapter/btor2/cegar (Item 3 sub-item 3.4): \
-                     PredicateSource::CraigInterpolation selected but cvc5 binary \
-                     not available: {}. Falling back to WeakestPrecondition heuristic \
-                     for the duration of this run. Install cvc5 (Homebrew: \
+                "adapter/btor2/cegar: the `craig` predicate source needs cvc5, and the \
+                     cvc5 binary was not available: {}. This run uses the \
+                     weakest-precondition source (`wp`) instead. Install cvc5 (Homebrew: \
                      `brew install cvc5`; Debian: `apt install cvc5`) or set \
                      MUNUNU_CVC5_PATH to use Craig interpolation.",
                 e.message
@@ -1229,9 +1229,9 @@ pub fn cegar_refine_loop(
                 location: None,
                 message: crate::adapter::owner::mununu_limitation(
                     &format!(
-                        "adapter/btor2/cegar (B.3.b): formula has alternation depth {} but the \
-                         lifted CLTS has no MustHyperOnly (hyper-must) transitions. Refining \
-                         standard KMTS (Sharp + MayOnly only) on alternating fixpoints is \
+                        "adapter/btor2/cegar: the formula alternates fixpoints (depth {}) but \
+                         the lifted CLTS carries no hyper-must transitions. Refining a \
+                         standard KMTS (must and may-only edges) on alternating fixpoints is \
                          non-monotone per Shoham–Grumberg LMCS 2007 — verdicts may regress \
                          across CEGAR iterations, so a refined νμ verdict is soundness-tagged; \
                          the lift does not infer hyper-must edges",
@@ -1264,7 +1264,7 @@ pub fn cegar_refine_loop(
                 warnings.push(crate::adapter::AdapterWarning {
                     kind: crate::adapter::WarningKind::ApproximateTranslation,
                     location: None,
-                    message: format!("adapter/btor2/cegar (PO-2 cube-modal soundness): {msg}"),
+                    message: format!("adapter/btor2/cegar (cube-modal soundness): {msg}"),
                 });
             }
         }
@@ -1295,14 +1295,21 @@ pub fn cegar_refine_loop(
                 warnings.push(crate::adapter::AdapterWarning {
                     kind: crate::adapter::WarningKind::ApproximateTranslation,
                     location: None,
-                    message: format!(
-                        "adapter/btor2/cegar (B.4.a): smart_uf_cap reduced max_iterations from \
-                         {} to {} because the lift emitted a UF-wrap warning AND the predicate \
-                         source is WeakestPrecondition. WP heuristics cannot construct closing \
-                         predicates for UF-spurious KleeneBot cells (that needs selective UF \
-                         concretization gated on R-F3 SMT lemma cache, not shipped). To use \
-                         {} iterations literally, set `CegarOptions::smart_uf_cap = false`.",
-                        cegar_opts.max_iterations, smart_cap, cegar_opts.max_iterations
+                    message: crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "adapter/btor2/cegar: the first lift UF-wrapped an operator and the \
+                             predicate source is the weakest-precondition heuristic (`wp`), \
+                             which cannot construct closing predicates for the undecided (⊥) \
+                             cells a UF wrap leaves; the refinement-iteration cap was lowered \
+                             from {} to {} and this run stops after {} iteration(s). Running \
+                             all {} iterations despite the wrap has no switch on `btor2 cegar` \
+                             or `sv cegar`",
+                            cegar_opts.max_iterations,
+                            smart_cap,
+                            smart_cap,
+                            cegar_opts.max_iterations
+                        ),
+                        None,
                     ),
                 });
                 effective_max_iterations = smart_cap;
@@ -4364,8 +4371,9 @@ mod tests {
             trace
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("B.3.b") && w.message.contains("alternation depth")),
-            "expected a B.3.b warning naming alternation depth; got warnings: {:?}",
+                .any(|w| w.message.contains("alternates fixpoints (depth 2)")
+                    && w.message.contains("no hyper-must transitions")),
+            "expected the alternating-fixpoint warning naming the depth; got warnings: {:?}",
             trace.warnings
         );
     }
@@ -4477,9 +4485,10 @@ mod tests {
         .expect("cegar succeeds");
 
         assert!(
-            trace.warnings.iter().any(|w| {
-                w.message.contains("(A.4)") && w.message.contains("may_edge_inference = Off")
-            }),
+            trace
+                .warnings
+                .iter()
+                .any(|w| { w.message.contains("`--may-edge-inference off` (sampling)") }),
             "expected an A.4 sampling-may warning on a box formula with may=off; got: {:?}",
             trace.warnings
         );
@@ -4512,7 +4521,10 @@ mod tests {
         .expect("cegar succeeds");
 
         assert!(
-            !trace.warnings.iter().any(|w| w.message.contains("(A.4)")),
+            !trace
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("(sampling) with")),
             "A.4 warning MUST NOT fire when may=SmtAllPairs; got: {:?}",
             trace.warnings
         );
@@ -4546,7 +4558,10 @@ mod tests {
         .expect("cegar succeeds");
 
         assert!(
-            !trace.warnings.iter().any(|w| w.message.contains("(A.4)")),
+            !trace
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("(sampling) with")),
             "A.4 warning MUST NOT fire on a diamond-only formula; got: {:?}",
             trace.warnings
         );
@@ -4608,10 +4623,13 @@ mod tests {
         // `mul` Op, the source is WP, smart_uf_cap is the
         // default true.
         assert!(
-            trace.warnings.iter().any(|w| w.message.contains("B.4.a")
-                && w.message.contains("smart_uf_cap")
-                && w.message.contains("UF-wrap")),
-            "expected a B.4.a warning naming smart_uf_cap + UF-wrap; got warnings: {:?}",
+            trace
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("iteration cap was lowered")
+                    && w.message.contains("a mununu limitation")
+                    && w.message.contains("UF-wrap")),
+            "expected a B.4.a warning naming the lowered cap + UF-wrap; got warnings: {:?}",
             trace.warnings
         );
     }
@@ -4652,7 +4670,10 @@ mod tests {
         )
         .expect("cegar succeeds");
         assert!(
-            !trace.warnings.iter().any(|w| w.message.contains("B.4.a")),
+            !trace
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("iteration cap was lowered")),
             "B.4.a warning MUST NOT fire when smart_uf_cap=false; got: {:?}",
             trace.warnings
         );
@@ -4697,7 +4718,10 @@ mod tests {
         )
         .expect("cegar succeeds");
         assert!(
-            !trace.warnings.iter().any(|w| w.message.contains("B.4.a")),
+            !trace
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("iteration cap was lowered")),
             "B.4.a warning MUST NOT fire when source is Manual (not WP); got: {:?}",
             trace.warnings
         );
@@ -5052,9 +5076,9 @@ mod tests {
             trace
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("sub-item 3.4")
-                    && w.message.contains("cvc5 binary not available")),
-            "expected a sub-item-3.4 warning naming the missing CVC5 binary; got: {:?}",
+                .any(|w| w.message.contains("needs cvc5")
+                    && w.message.contains("cvc5 binary was not available")),
+            "expected a warning naming the missing CVC5 binary; got: {:?}",
             trace.warnings
         );
     }
@@ -5098,8 +5122,8 @@ mod tests {
             !trace
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("sub-item 3.4")),
-            "sub-item 3.4 warning MUST NOT fire when source != CraigInterpolation; got: {:?}",
+                .any(|w| w.message.contains("needs cvc5")),
+            "cvc5-missing warning MUST NOT fire when source != CraigInterpolation; got: {:?}",
             trace.warnings
         );
     }
@@ -5152,9 +5176,9 @@ mod tests {
             !trace
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("sub-item 3.4")
-                    && w.message.contains("cvc5 binary not available")),
-            "sub-item 3.4 warning MUST NOT fire when CVC5 is available; got: {:?}",
+                .any(|w| w.message.contains("needs cvc5")
+                    && w.message.contains("cvc5 binary was not available")),
+            "cvc5-missing warning MUST NOT fire when CVC5 is available; got: {:?}",
             trace.warnings
         );
         // The `true` formula converges immediately; no
@@ -5282,7 +5306,7 @@ mod tests {
             trace
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("[B.1 3c compound]")),
+                .any(|w| w.message.contains("compound predicate(s) present")),
             "expected the 3c force-SmtAllPairs override warning; got {:?}",
             trace
                 .warnings
@@ -5329,7 +5353,7 @@ mod tests {
             !trace
                 .warnings
                 .iter()
-                .any(|w| w.message.contains("[B.1 3c compound]")),
+                .any(|w| w.message.contains("compound predicate(s) present")),
             "no compound predicates ⇒ no 3c override warning"
         );
     }

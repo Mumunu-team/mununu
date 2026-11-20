@@ -643,7 +643,7 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "[[properties]] `{property}`: `assumptions` apply only to the fairness templates \
                  (`fair_response`, `fair_always_eventually`); an inline `formula` encodes its own \
-                 fairness (see `verify::fairness`)"
+                 fairness in the formula text"
             ),
             ConfigIssue::FairTemplateWithoutAssumptions { property, template } => write!(
                 f,

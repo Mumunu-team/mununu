@@ -761,7 +761,7 @@ pub fn to_ir(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "§Phase 10 §10.2 stage 1b: {} memor{} havoc-abstracted (reads return \
+                    "{} memor{} havoc-abstracted (reads return \
                      fresh nondeterministic values; writes/inits/nexts dropped). SOUND for \
                      safety (over-approximation of read behaviour); UNSOUND for liveness on \
                      memory contents (the concrete may reach states the abstract cannot). \
@@ -799,17 +799,15 @@ pub fn to_ir(
                 && let Some(name) = uf_memory_names.get(&arr_operand.nid())
             {
                 format!(
-                    " (§Phase 10 §10.2 stage 3.a: memory `{name}` was declared with \
-                     `abstraction: uf`; the recognition layer is shipped, but the \
-                     Z3 Array `select`/`store` encoding [stage 3.b] and the \
-                     predicate-image query integration [stage 3.c] are queued. \
-                     Until stages 3.b + 3.c ship, switch to `abstraction: havoc` \
-                     for a sound over-approximating safety verdict.)"
+                    " (memory `{name}` is declared `abstraction: uf`; that abstraction is \
+                     recognised but not lifted yet — a mununu limitation, nothing to change \
+                     in the design; switch to `abstraction: havoc` for a sound \
+                     over-approximating safety verdict.)"
                 )
             } else if matches!(op, Op::Read | Op::Write) {
-                " (§Phase 10 §10.2 stage 1 has detected memory cells in this BTOR2 \
-                 and validated the sidecar; the actual lift will succeed once \
-                 stage 3 (UF mode) or stage 4 (bounded bit-blast) ships.)"
+                " (the memory cells in this BTOR2 are declared in the sidecar, but this \
+                 lift does not carry memories yet — a mununu limitation, nothing to \
+                 change in the design.)"
                     .to_string()
             } else {
                 String::new()
@@ -1085,7 +1083,7 @@ fn try_per_cluster_blast(
     warnings.push(AdapterWarning {
         kind: WarningKind::LargeStateSpace,
         message: format!(
-            "R.4.6 per-cluster verification: joint design exceeded the state-bit cap; \
+            "per-cluster verification: joint design exceeded the state-bit cap; \
              partitioned into {} clusters and bit-blasted each restricted to its own cone",
             automata.len()
         ),
@@ -3055,7 +3053,7 @@ fn validate_sidecar_memories(
     }
 
     let mut message = String::from(
-        "§Phase 10 §10.2 stage 1 — the BTOR2 source contains memory cells that need \
+        "the BTOR2 source contains memory cells that need \
          sidecar declarations before lifting can proceed. Add the following entries to your \
          `.mununu.json` sidecar's `memories` field:\n\n",
     );
@@ -3079,9 +3077,9 @@ fn validate_sidecar_memories(
     }
     message.push_str("  ]\n\n");
     message.push_str(
-        "Currently supported abstractions: `havoc` (over-approximation; sound for safety, \
-         unsound for liveness). UF mode (stage 3) and bounded bit-blast (stage 4) are queued \
-         — track the §Phase 10 plan for shipping status.",
+        "Supported abstractions: `havoc` (over-approximation; sound for safety, unsound \
+         for liveness) — the only memory abstraction this lift carries today (a mununu \
+         limitation; nothing to change in the design).",
     );
 
     let first_line = missing
@@ -3331,16 +3329,14 @@ pub(crate) fn havoc_rewrite_memories(
             if !live.contains(&r) && dropped.contains(&r) {
                 return Err(AdapterError {
                     kind: AdapterErrorKind::UnsupportedConstruct,
-                    message: format!(
-                        "§Phase 10 §10.2 stage 1b: havoc rewrite would leave NID {} \
-                         (a {}) referencing dropped NID {} (an array-tainted node). \
-                         The stage 1b rewriter assumes array data flow is self-contained \
-                         within the memory subgraph; please file an issue with the BTOR2 \
-                         dump so we can extend the rewriter.",
+                    message: crate::adapter::owner::mununu_defect(&format!(
+                        "the havoc rewrite would leave NID {} (a {}) referencing dropped \
+                         NID {} (an array-tainted node); the rewriter assumes array data \
+                         flow stays within the memory subgraph",
                         line.nid,
                         line.node.kind_keyword(),
                         r,
-                    ),
+                    )),
                     location: Some(SourceLocation {
                         line: line.source_line,
                         column: 0,
@@ -3777,8 +3773,8 @@ fn enumerate_and_blast(
                  {names}{suffix}. SOUND only if upstream Yosys ran with \
                  `setundef -zero` (the default). Under `setundef -anyseq/-anyconst` \
                  these cells' initial values are nondeterministic; declare them in \
-                 the sidecar with `init_policy: anyconst` so Path 3 (§Phase 8 §8.2) \
-                 enumerates their admissible initial values.",
+                 the sidecar with `init_policy: anyconst` so the lift enumerates their \
+                 admissible initial values.",
                 n = uncovered_uninit_signals.len(),
                 names = shown.join(", "),
                 suffix = suffix
@@ -5517,7 +5513,7 @@ fn apply_btor2_init_smart_defaults(
     warnings.push(AdapterWarning {
         kind: WarningKind::ApproximateTranslation,
         message: format!(
-            "R-Y3: pinned {n} unsidecared state cell(s) to their BTOR2 init values \
+            "pinned {n} unsidecared state cell(s) to their BTOR2 init values \
              (smart-init-defaults policy enabled): {names}{suffix}. SOUNDNESS: \
              under-approximation — sound for liveness, unsound for safety. \
              Property violations that require these cells to deviate from their \
@@ -5721,11 +5717,11 @@ pub(crate) fn apply_simulate_reset_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S2b.6: sidecar declared `simulate_reset` but Verilator is not \
-                     discoverable ({}); skipping reset-simulation seeding. Other Phase 9 \
-                     strategies (R-S5 type-driven, R-S7 property-syntactic, R-S3 case-literal) \
-                     still apply. Install Verilator (`brew install verilator` / \
-                     `apt install verilator`) or set MUNUNU_VERILATOR_PATH to enable.",
+                    "sidecar declared `simulate_reset` but Verilator is not \
+                     discoverable ({}); skipping reset-simulation seeding. The typedef, \
+                     property-syntactic and case-literal seeding still apply. Install \
+                     Verilator (`brew install verilator` / `apt install verilator`) or set \
+                     MUNUNU_VERILATOR_PATH to enable.",
                     e.message
                 ),
                 location: None,
@@ -5740,7 +5736,7 @@ pub(crate) fn apply_simulate_reset_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S2b.6: failed to create Verilator tempdir: {}; skipping \
+                    "failed to create Verilator tempdir: {}; skipping \
                      reset-simulation seeding.",
                     e.message
                 ),
@@ -5765,8 +5761,8 @@ pub(crate) fn apply_simulate_reset_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S2b.6: reset-simulation seeded {observed} register valuation(s); \
-                     added {added} new EnumValues discriminator(s) to cell_domains \
+                    "reset-simulation seeded {observed} register valuation(s); \
+                     added {added} new value discriminator(s) to cell_domains \
                      (before={before}, after={after}).",
                     observed = valuations.len(),
                     added = after.saturating_sub(before),
@@ -5778,8 +5774,8 @@ pub(crate) fn apply_simulate_reset_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S2b.6: reset-simulation failed: {}; skipping seeding. \
-                     Other Phase 9 strategies still apply.",
+                    "reset-simulation failed: {}; skipping seeding. The typedef, \
+                     property-syntactic and case-literal seeding still apply.",
                     e.message
                 ),
                 location: None,
@@ -5969,9 +5965,10 @@ pub(crate) fn apply_vcd_trace_seeding(
         warnings.push(AdapterWarning {
             kind: WarningKind::ApproximateTranslation,
             message: format!(
-                "R-S6.6: relative VCD trace path `{}` cannot be resolved without \
-                 AdapterOptions::sidecar_path; skipping. Set the sidecar path or use \
-                 an absolute trace path.",
+                "relative VCD trace path `{}` cannot be resolved: the sidecar was given \
+                 inline, so there is no directory to resolve it against; skipping. Pass \
+                 the sidecar as a file (`--sidecar` on `btor2 cegar` and `sv cegar`) or \
+                 make the trace path absolute.",
                 trace_config.path
             ),
             location: None,
@@ -5985,7 +5982,7 @@ pub(crate) fn apply_vcd_trace_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S6.6: failed to read VCD trace at `{}`: {e}; skipping.",
+                    "failed to read VCD trace at `{}`: {e}; skipping.",
                     resolved.display()
                 ),
                 location: None,
@@ -6000,7 +5997,7 @@ pub(crate) fn apply_vcd_trace_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S6.6: VCD header parse failed for `{}`: {}; skipping.",
+                    "VCD header parse failed for `{}`: {}; skipping.",
                     resolved.display(),
                     e.message
                 ),
@@ -6016,7 +6013,7 @@ pub(crate) fn apply_vcd_trace_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "R-S6.6: VCD changes parse failed for `{}`: {}; skipping.",
+                    "VCD changes parse failed for `{}`: {}; skipping.",
                     resolved.display(),
                     e.message
                 ),
@@ -6073,7 +6070,7 @@ pub(crate) fn apply_vcd_trace_seeding(
     warnings.push(AdapterWarning {
         kind: WarningKind::ApproximateTranslation,
         message: format!(
-            "R-S6.6: VCD trace `{}` mined {signals} signals; added {added} new EnumValues \
+            "VCD trace `{}` mined {signals} signals; added {added} new value \
              discriminator(s) (before={before}, after={after}).",
             resolved.display(),
             signals = rewritten.len(),
@@ -10098,8 +10095,8 @@ mod tests {
         let err = translate(PHASE10_FIXTURE_WITH_MEMORY, &AdapterOptions::default())
             .expect_err("should error on undeclared memory");
         assert!(
-            err.message.contains("§Phase 10"),
-            "error should cite §Phase 10: {}",
+            err.message.contains("`memories`"),
+            "error should point at the sidecar's `memories` field: {}",
             err.message
         );
         assert!(
@@ -10149,13 +10146,13 @@ mod tests {
         let err = translate(PHASE10_FIXTURE_WITH_MEMORY, &opts)
             .expect_err("stage 1 still errors at Read/Write op check under non-havoc abstraction");
         assert!(
-            err.message.contains("§Phase 10"),
-            "op-check error should include the §Phase 10 hint: {}",
+            err.message.contains("a mununu limitation"),
+            "op-check error should say whose limit it is: {}",
             err.message
         );
         assert!(
-            err.message.contains("stage 3") || err.message.contains("stage 4"),
-            "op-check hint should point at stages 3/4: {}",
+            err.message.contains("`abstraction: havoc`"),
+            "op-check hint should name the abstraction the lift carries: {}",
             err.message
         );
     }
@@ -10189,8 +10186,9 @@ mod tests {
         let err = translate(PHASE10_FIXTURE_WITH_MEMORY, &opts)
             .expect_err("stage 1 still errors at Read/Write op check under uf abstraction");
         assert!(
-            err.message.contains("stage 3.a"),
-            "stage 3.a hint should appear when UF was declared: {}",
+            err.message.contains("`abstraction: uf`")
+                && err.message.contains("a mununu limitation"),
+            "the UF-specific hint should appear when UF was declared: {}",
             err.message
         );
         assert!(
@@ -10199,8 +10197,8 @@ mod tests {
             err.message
         );
         assert!(
-            err.message.contains("stage 3.b") || err.message.contains("stage 3.c"),
-            "stage 3.a hint should point at stages 3.b/3.c: {}",
+            err.message.contains("`abstraction: havoc`"),
+            "the UF hint should name the abstraction the lift carries: {}",
             err.message
         );
     }
@@ -10274,7 +10272,7 @@ mod tests {
         let havoc_warn = out
             .warnings
             .iter()
-            .find(|w| w.message.contains("§Phase 10 §10.2 stage 1b"))
+            .find(|w| w.message.contains("havoc-abstracted"))
             .expect("havoc warning should fire");
         assert!(
             havoc_warn.message.contains("rf_reg"),
@@ -10338,7 +10336,7 @@ mod tests {
         let err = translate(PHASE10_FIXTURE_WITH_MEMORY, &opts)
             .expect_err("undeclared memory should still error at stage 1a");
         assert!(
-            err.message.contains("§Phase 10"),
+            err.message.contains("`memories`"),
             "stage 1a actionable error should fire: {}",
             err.message
         );
@@ -10418,7 +10416,7 @@ mod tests {
         assert!(
             out.warnings
                 .iter()
-                .all(|w| !w.message.contains("§Phase 10"))
+                .all(|w| !w.message.contains("havoc-abstracted"))
         );
     }
 
@@ -10916,8 +10914,8 @@ mod tests {
         let warning = out
             .warnings
             .iter()
-            .find(|w| w.message.contains("R-Y3"))
-            .expect("R-Y3 warning expected");
+            .find(|w| w.message.contains("pinned"))
+            .expect("pinned-init-values warning expected");
         assert!(
             warning.message.contains("q"),
             "warning should name the pinned cell: {}",
@@ -11835,8 +11833,10 @@ mod tests {
         };
         let out = translate(src, &opts).expect("translate");
         assert!(
-            !out.warnings.iter().any(|w| w.message.contains("R-S2b.6")),
-            "no R-S2b.6 warning when sidecar omits simulate_reset; got: {:?}",
+            !out.warnings
+                .iter()
+                .any(|w| w.message.contains("reset-simulation")),
+            "no reset-simulation warning when sidecar omits simulate_reset; got: {:?}",
             out.warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
@@ -11870,8 +11870,10 @@ mod tests {
         };
         let out = translate(src, &opts).expect("translate");
         assert!(
-            !out.warnings.iter().any(|w| w.message.contains("R-S2b.6")),
-            "no R-S2b.6 warning when sv_source_path is absent; got: {:?}",
+            !out.warnings
+                .iter()
+                .any(|w| w.message.contains("reset-simulation")),
+            "no reset-simulation warning when sv_source_path is absent; got: {:?}",
             out.warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
@@ -11916,8 +11918,8 @@ mod tests {
         let r_s2b_6_warning = out
             .warnings
             .iter()
-            .find(|w| w.message.contains("R-S2b.6"))
-            .expect("R-S2b.6 must emit a warning when Verilator is absent");
+            .find(|w| w.message.contains("reset-simulation"))
+            .expect("reset-simulation seeding must emit a warning when Verilator is absent");
         assert!(
             r_s2b_6_warning.message.contains("not discoverable")
                 || r_s2b_6_warning.message.contains("Verilator"),
@@ -11952,8 +11954,10 @@ mod tests {
         let result = translate(src, &opts);
         if let Ok(out) = result {
             assert!(
-                !out.warnings.iter().any(|w| w.message.contains("R-S2b.6")),
-                "no R-S2b.6 warning on malformed sidecar"
+                !out.warnings
+                    .iter()
+                    .any(|w| w.message.contains("reset-simulation")),
+                "no reset-simulation warning on malformed sidecar"
             );
         }
     }
@@ -11981,8 +11985,8 @@ mod tests {
         };
         let out = translate(src, &opts).expect("translate");
         assert!(
-            !out.warnings.iter().any(|w| w.message.contains("R-S6.6")),
-            "no R-S6.6 warning when sidecar omits vcd_traces; got: {:?}",
+            !out.warnings.iter().any(|w| w.message.contains("VCD")),
+            "no VCD warning when sidecar omits vcd_traces; got: {:?}",
             out.warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
@@ -12013,8 +12017,8 @@ mod tests {
         let warn = out
             .warnings
             .iter()
-            .find(|w| w.message.contains("R-S6.6"))
-            .expect("R-S6.6 must emit a warning when trace file is missing");
+            .find(|w| w.message.contains("VCD"))
+            .expect("VCD mining must emit a warning when trace file is missing");
         assert!(
             warn.message.contains("failed to read") || warn.message.contains("nonexistent"),
             "warning must mention the read failure; got: {}",
@@ -12049,8 +12053,8 @@ mod tests {
         let warn = out
             .warnings
             .iter()
-            .find(|w| w.message.contains("R-S6.6"))
-            .expect("R-S6.6 must emit a warning when relative path lacks resolution context");
+            .find(|w| w.message.contains("VCD"))
+            .expect("VCD mining must emit a warning when relative path lacks resolution context");
         assert!(
             warn.message.contains("relative") || warn.message.contains("sidecar_path"),
             "warning must mention the resolution-context issue; got: {}",
@@ -12108,8 +12112,8 @@ mod tests {
         let warn = out
             .warnings
             .iter()
-            .find(|w| w.message.contains("R-S6.6"))
-            .expect("R-S6.6 must emit a summary warning for a successfully mined trace");
+            .find(|w| w.message.contains("VCD"))
+            .expect("VCD mining must emit a summary warning for a successfully mined trace");
         assert!(
             warn.message.contains("mined"),
             "warning must mention the mining summary; got: {}",

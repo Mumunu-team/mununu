@@ -7054,15 +7054,14 @@ pub(crate) fn verify_auto_impl(
     if opts.exact_symbolic && !opts.gate_reset {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
-            message:
-                "adapter/slang/verify_auto (A.6): `--engine exact-symbolic` is not sound with \
+            message: "adapter/slang/verify_auto: `--engine exact-symbolic` is not sound with \
                       `--no-gate-reset`. The exact engine models the post-reset state space (reset \
                       pinned inactive, init = the modeled reset state); with reset-gating off it \
                       starts from the illegal power-on default 0 and does not fire the freed async \
                       reset as a transition, yielding a spurious (but definite-looking) VIOLATED. \
                       For free-reset reachability, use the cube engine (drop `--engine \
                       exact-symbolic`); to use the exact engine, keep reset-gating on."
-                    .to_string(),
+                .to_string(),
             location: None,
         });
     }
@@ -16425,7 +16424,7 @@ module uart_tx(); endmodule"#;
         .expect_err("exact-symbolic + no-gate-reset must be rejected");
         assert_eq!(err.kind, AdapterErrorKind::UnsupportedConstruct);
         assert!(
-            err.message.contains("(A.6)") && err.message.contains("exact-symbolic"),
+            err.message.contains("`--no-gate-reset`") && err.message.contains("exact-symbolic"),
             "A.6 reject must name the unsound combination; got: {}",
             err.message
         );

@@ -267,9 +267,10 @@ pub fn parse_breadcrumb(
 /// placed on one side or the other.
 ///
 /// Left out, because they choose WHICH rows run, not what a row's verdict is: `skip_rows`,
-/// `only_rows`, `resume_from`, `breadcrumb_append`, and the fingerprint itself. Not covered: files
-/// reached through `extra_include_dirs` (their paths are hashed, their contents are not) and the
-/// `MUNUNU_*` budget variables, which can turn a verdict into `unknown` but never flip one.
+/// `only_rows`, `resume_from`, `breadcrumb_append`, and the fingerprint itself. The files an
+/// include directory reaches are hashed by path and content (mununu#1146 — the same walk the
+/// lift cache keys them with; an edited header is another run). Not covered: the `MUNUNU_*`
+/// budget variables, which can turn a verdict into `unknown` but never flip one.
 pub fn run_fingerprint(
     sources: &[(String, String)],
     yosys: &crate::adapter::yosys::YosysOptions,
@@ -316,6 +317,19 @@ pub fn run_fingerprint(
          {init_policy_overrides:?} per_module {per_module_btor} cutpoints {cutpoint_signals:?} \
          merge_clocks {merge_clock_domains}"
     );
+    // mununu#1146 — what the include directories hold is a verdict input (a `\`include`d header
+    // edits the design as surely as the source does); an unreadable tree is written as its error
+    // so the run that could not read it never matches one that could.
+    match crate::adapter::yosys::lift_cache::collect_include_files(extra_include_dirs) {
+        Ok(files) => {
+            for (path, key) in files {
+                let _ = writeln!(t, "include {path:?} {key}");
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(t, "include-files unreadable {e:?}");
+        }
+    }
     let crate::adapter::slang::verify_auto::VerifyAutoOptions {
         max_iterations,
         must_edge_inference,
@@ -541,6 +555,39 @@ mod tests {
             ..Default::default()
         };
         run_fingerprint(&sources, &yosys, &opts)
+    }
+
+    /// mununu#1146 — an edited header reached through an include directory is another run: the
+    /// fingerprint hashed the directory's PATH only, so a resume carried the old model's verdicts
+    /// onto the edited design. Fails on the parent: both fingerprints are equal there.
+    #[test]
+    fn x1146_an_edited_included_header_changes_the_run_fingerprint() {
+        let dir = std::env::temp_dir().join(format!("mununu1146-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let header = dir.join("w.svh");
+        let fp_with = |define: &str| {
+            std::fs::write(&header, define).expect("write the header");
+            let sources = vec![(
+                "d.sv".to_string(),
+                "`include \"w.svh\"\nmodule d; endmodule".to_string(),
+            )];
+            let yosys = crate::adapter::yosys::YosysOptions {
+                top: Some("d".to_string()),
+                extra_include_dirs: vec![dir.clone()],
+                ..Default::default()
+            };
+            run_fingerprint(
+                &sources,
+                &yosys,
+                &crate::adapter::slang::verify_auto::VerifyAutoOptions::default(),
+            )
+        };
+        let four = fp_with("`define W 4\n");
+        let same = fp_with("`define W 4\n");
+        let eight = fp_with("`define W 8\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(four, same, "the same header is the same run");
+        assert_ne!(four, eight, "an edited included header is another run");
     }
 
     /// mununu#933 — the identity must agree between two identical runs: a `HashMap`'s iteration
