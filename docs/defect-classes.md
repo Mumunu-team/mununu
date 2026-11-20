@@ -38,6 +38,20 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 **Enumerating test:** none recorded.
 
+### `lift-script-path`
+
+**What varies:** the paths the lift writes into the one yosys `-p` script, and whether the command that reads each strips quotes (yosys's own commands do; `read_slang` takes the token verbatim, measured 2026-11-20 on mununu#1138).
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| a staged source, the staging directory's `-I`, the `write_json` / `write_btor` outputs | relative to the staging directory yosys runs in; the temp dir's path never reaches the script | mununu#1138 |
+| a caller include directory (`read_slang -I`, verbatim) | refused for whitespace, quotes or `;`, the limit named | mununu#1133, mununu#1138 |
+| a persisted per-module output path (`write_btor`) | quoted as one token; refused for a `"` or a line break | mununu#1138 |
+| the dev-only oracle's `read_verilog` sources | quoted as one token | mununu#1138 |
+| a top module, parameter or signal name | validated against its grammar before the script | mununu#1133 |
+
+**Enumerating test:** none in one table; `x1138_the_lift_script_names_staged_files_relative_to_the_staging_directory` and `a_yosys_native_path_with_a_space_is_quoted_as_one_token` pin the first, third and fourth cases.
+
 ### `member-stop-reason`
 
 **What varies:** why a reach-portfolio member returned no verdict. Each reason must reach the report under its own name, with the member's progress.
