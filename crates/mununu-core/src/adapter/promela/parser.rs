@@ -106,6 +106,100 @@ enum Token {
     Eof,
 }
 
+/// A token prints as its Promela lexeme, so a parse error names what the user wrote
+/// (mununu#1121): punctuation, literals and identifiers in backticks, a keyword as itself,
+/// the end of the file as "end of input".
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (lexeme, quoted) = match self {
+            Token::LBrace => ("{", true),
+            Token::RBrace => ("}", true),
+            Token::LBracket => ("[", true),
+            Token::RBracket => ("]", true),
+            Token::LParen => ("(", true),
+            Token::RParen => (")", true),
+            Token::Semi => (";", true),
+            Token::Comma => (",", true),
+            Token::Dot => (".", true),
+            Token::Colon => (":", true),
+            Token::ColonColon => ("::", true),
+            Token::Arrow => ("->", true),
+            Token::Assign => ("=", true),
+            Token::Bang => ("!", true),
+            Token::Recv => ("?", true),
+            Token::Plus => ("+", true),
+            Token::Minus => ("-", true),
+            Token::Star => ("*", true),
+            Token::Slash => ("/", true),
+            Token::Percent => ("%", true),
+            Token::AmpAmp => ("&&", true),
+            Token::PipePipe => ("||", true),
+            Token::Amp => ("&", true),
+            Token::Pipe => ("|", true),
+            Token::Caret => ("^", true),
+            Token::Tilde => ("~", true),
+            Token::EqEq => ("==", true),
+            Token::BangEq => ("!=", true),
+            Token::Lt => ("<", true),
+            Token::Le => ("<=", true),
+            Token::Gt => (">", true),
+            Token::Ge => (">=", true),
+            Token::Shl => ("<<", true),
+            Token::Shr => (">>", true),
+            Token::At => ("@", true),
+            Token::Always => ("[]", true),
+            Token::Eventually => ("<>", true),
+            Token::Iff => ("<->", true),
+            Token::Active => ("active", false),
+            Token::Proctype => ("proctype", false),
+            Token::Init => ("init", false),
+            Token::If => ("if", false),
+            Token::Fi => ("fi", false),
+            Token::Do => ("do", false),
+            Token::Od => ("od", false),
+            Token::Atomic => ("atomic", false),
+            Token::DStep => ("d_step", false),
+            Token::Goto => ("goto", false),
+            Token::Break => ("break", false),
+            Token::Skip => ("skip", false),
+            Token::Assert => ("assert", false),
+            Token::Printf => ("printf", false),
+            Token::Provided => ("provided", false),
+            Token::Chan => ("chan", false),
+            Token::Of => ("of", false),
+            Token::Mtype => ("mtype", false),
+            Token::Typedef => ("typedef", false),
+            Token::Ltl => ("ltl", false),
+            Token::Inline => ("inline", false),
+            Token::Unless => ("unless", false),
+            Token::DProctype => ("d_proctype", false),
+            Token::Timeout => ("timeout", false),
+            Token::Trace => ("trace", false),
+            Token::Notrace => ("notrace", false),
+            Token::Bit => ("bit", false),
+            Token::Bool => ("bool", false),
+            Token::Byte => ("byte", false),
+            Token::Short => ("short", false),
+            Token::Int => ("int", false),
+            Token::Next => ("X", false),
+            Token::Until => ("U", false),
+            Token::WeakUntil => ("W", false),
+            Token::Release => ("R", false),
+            Token::True => ("true", false),
+            Token::False => ("false", false),
+            Token::IntLit(n) => return write!(f, "`{n}`"),
+            Token::StringLit(s) => return write!(f, "`\"{s}\"`"),
+            Token::Ident(s) => return write!(f, "`{s}`"),
+            Token::Eof => return f.write_str("end of input"),
+        };
+        if quoted {
+            write!(f, "`{lexeme}`")
+        } else {
+            f.write_str(lexeme)
+        }
+    }
+}
+
 struct Lexer<'a> {
     input: &'a str,
     pos: usize,
@@ -482,7 +576,7 @@ impl<'a> PromelaParser<'a> {
         } else {
             Err(self
                 .lexer
-                .err(&format!("Expected {:?}, got {:?}", expected, self.current)))
+                .err(&format!("Expected {expected}, got {}", self.current)))
         }
     }
 
@@ -635,7 +729,7 @@ impl<'a> PromelaParser<'a> {
             _ => {
                 return Err(self
                     .lexer
-                    .err(&format!("Expected type name, got {:?}", self.current)));
+                    .err(&format!("Expected type name, got {}", self.current)));
             }
         };
         self.advance()?;
@@ -1167,7 +1261,7 @@ impl<'a> PromelaParser<'a> {
             }
             _ => Err(self
                 .lexer
-                .err(&format!("Expected expression, got {:?}", self.current))),
+                .err(&format!("Expected expression, got {}", self.current))),
         }
     }
 
@@ -1311,7 +1405,7 @@ impl<'a> PromelaParser<'a> {
             }
             _ => Err(self
                 .lexer
-                .err(&format!("Expected LTL atom, got {:?}", self.current))),
+                .err(&format!("Expected LTL atom, got {}", self.current))),
         }
     }
 
@@ -1461,5 +1555,27 @@ active proctype Receiver() {
         assert_eq!(program.channels[0].name, "ch");
         assert_eq!(program.channels[0].capacity, 2);
         assert_eq!(program.proctypes.len(), 2);
+    }
+
+    /// mununu#1121 — a token prints as its lexeme and an `expect` mismatch names both sides
+    /// that way, never as Rust variant names (`Expected Semi, got Ident("x")`).
+    #[test]
+    fn x1121_the_promela_token_displays_its_lexeme() {
+        assert_eq!(Token::Semi.to_string(), "`;`");
+        assert_eq!(Token::Proctype.to_string(), "proctype");
+        assert_eq!(Token::Always.to_string(), "`[]`");
+        assert_eq!(Token::IntLit(3).to_string(), "`3`");
+        assert_eq!(Token::Ident("x".into()).to_string(), "`x`");
+        assert_eq!(Token::Eof.to_string(), "end of input");
+        let mut parser = PromelaParser::new("x");
+        let err = parser
+            .expect(&Token::Semi)
+            .expect_err("an identifier is not `;`");
+        assert_eq!(err.message, "Expected `;`, got `x`");
+        let mut parser = PromelaParser::new("");
+        let err = parser
+            .expect(&Token::RBrace)
+            .expect_err("the end of the file is not `}`");
+        assert_eq!(err.message, "Expected `}`, got end of input");
     }
 }

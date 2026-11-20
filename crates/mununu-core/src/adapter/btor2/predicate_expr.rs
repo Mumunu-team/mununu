@@ -48,6 +48,20 @@ pub enum CmpOp {
     Ge,
 }
 
+impl CmpOp {
+    /// The comparison as the sidecar writes it (`==`, `!=`, `<`, `<=`, `>`, `>=`).
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+}
+
 /// A compound predicate expression: a boolean combination of register
 /// comparisons. The leaf is a single `register <op> value` comparison; the
 /// internal nodes are `And` / `Or` / `Not`. No arithmetic — that is the
@@ -558,6 +572,32 @@ enum Token {
     RBracket,
 }
 
+/// A token prints as its source lexeme in backticks, so a parse error names what the user
+/// wrote (mununu#1121), never the Rust `Debug` form (`Some(Ident("x"))`).
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Token::Ident(s) => write!(f, "`{s}`"),
+            Token::Int(v) => write!(f, "`{v}`"),
+            Token::Op(op) => write!(f, "`{}`", op.symbol()),
+            Token::And => f.write_str("`&&`"),
+            Token::Or => f.write_str("`||`"),
+            Token::Not => f.write_str("`!`"),
+            Token::Plus => f.write_str("`+`"),
+            Token::LParen => f.write_str("`(`"),
+            Token::RParen => f.write_str("`)`"),
+            Token::LBracket => f.write_str("`[`"),
+            Token::RBracket => f.write_str("`]`"),
+        }
+    }
+}
+
+/// The token a parse error points at: its lexeme, or "end of input" when the expression
+/// ended early.
+fn found(token: Option<&Token>) -> String {
+    token.map_or_else(|| "end of input".to_string(), Token::to_string)
+}
+
 fn tokenize(s: &str) -> Result<Vec<Token>, PredicateExprParseError> {
     let chars: Vec<char> = s.chars().collect();
     let mut tokens = Vec::new();
@@ -733,8 +773,8 @@ impl Parser<'_> {
             }
             Some(Token::Ident(_)) => self.parse_atom(),
             other => Err(perr(format!(
-                "expected an atom or `(`, found {:?}",
-                other.cloned()
+                "expected an atom or `(`, found {}",
+                found(other)
             ))),
         }
     }
@@ -742,7 +782,12 @@ impl Parser<'_> {
     fn parse_atom(&mut self) -> Result<PredicateExpr, PredicateExprParseError> {
         let register = match self.next() {
             Some(Token::Ident(s)) => s,
-            other => return Err(perr(format!("expected a register name, found {other:?}"))),
+            other => {
+                return Err(perr(format!(
+                    "expected a register name, found {}",
+                    found(other.as_ref())
+                )));
+            }
         };
         // SEL — `array[index] <op> value` (array-content atom). An `[` after the
         // first identifier means it names an array; parse the index register + `]`,
@@ -753,7 +798,8 @@ impl Parser<'_> {
                 Some(Token::Ident(s)) => s,
                 other => {
                     return Err(perr(format!(
-                        "expected an index register in `{register}[…]`, found {other:?}"
+                        "expected an index register in `{register}[…]`, found {}",
+                        found(other.as_ref())
                     )));
                 }
             };
@@ -761,7 +807,8 @@ impl Parser<'_> {
                 Some(Token::RBracket) => {}
                 other => {
                     return Err(perr(format!(
-                        "expected `]` after `{register}[{index}`, found {other:?}"
+                        "expected `]` after `{register}[{index}`, found {}",
+                        found(other.as_ref())
                     )));
                 }
             }
@@ -769,7 +816,8 @@ impl Parser<'_> {
                 Some(Token::Op(o)) => o,
                 other => {
                     return Err(perr(format!(
-                        "expected a comparison operator after `{register}[{index}]`, found {other:?}"
+                        "expected a comparison operator after `{register}[{index}]`, found {}",
+                        found(other.as_ref())
                     )));
                 }
             };
@@ -777,7 +825,8 @@ impl Parser<'_> {
                 Some(Token::Int(v)) => v,
                 other => {
                     return Err(perr(format!(
-                        "expected an integer value after `{register}[{index}] <op>`, found {other:?}"
+                        "expected an integer value after `{register}[{index}] <op>`, found {}",
+                        found(other.as_ref())
                     )));
                 }
             };
@@ -792,7 +841,8 @@ impl Parser<'_> {
             Some(Token::Op(o)) => o,
             other => {
                 return Err(perr(format!(
-                    "expected a comparison operator after `{register}`, found {other:?}"
+                    "expected a comparison operator after `{register}`, found {}",
+                    found(other.as_ref())
                 )));
             }
         };
@@ -819,7 +869,8 @@ impl Parser<'_> {
                             width: 0,
                         }),
                         other => Err(perr(format!(
-                            "expected an integer addend after `{register} <op> {rhs} +`, found {other:?}"
+                            "expected an integer addend after `{register} <op> {rhs} +`, found {}",
+                            found(other.as_ref())
                         ))),
                     }
                 } else {
@@ -831,7 +882,8 @@ impl Parser<'_> {
                 }
             }
             other => Err(perr(format!(
-                "expected an integer value or a register after `{register} <op>`, found {other:?}"
+                "expected an integer value or a register after `{register} <op>`, found {}",
+                found(other.as_ref())
             ))),
         }
     }
@@ -860,8 +912,8 @@ pub fn parse_predicate_expr(s: &str) -> Result<PredicateExpr, PredicateExprParse
     let expr = parser.parse_or()?;
     if parser.pos != tokens.len() {
         return Err(perr(format!(
-            "unexpected trailing tokens starting at {:?}",
-            tokens.get(parser.pos)
+            "unexpected trailing tokens starting at {}",
+            found(tokens.get(parser.pos))
         )));
     }
     Ok(expr)
@@ -1544,5 +1596,33 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// mununu#1121 — REPRODUCER: a parse error names the token the user wrote, or "end of
+    /// input"; on the parent it printed the Rust `Debug` form (`found None` / `found
+    /// Some(RParen)`).
+    #[test]
+    fn x1121_a_predicate_expr_parse_error_names_the_token_not_its_debug_form() {
+        let err = parse_predicate_expr("x ==").expect_err("a dangling operator is refused");
+        assert!(err.message.contains("end of input"), "{}", err.message);
+        assert!(!err.message.contains("None"), "{}", err.message);
+        assert!(!err.message.contains("Some("), "{}", err.message);
+        let err = parse_predicate_expr("x == )").expect_err("a stray `)` is refused");
+        assert!(err.message.contains("found `)`"), "{}", err.message);
+        assert!(!err.message.contains("RParen"), "{}", err.message);
+    }
+
+    /// mununu#1121 — every token prints as its lexeme; the comparison operators print as
+    /// the sidecar writes them.
+    #[test]
+    fn x1121_the_predicate_token_displays_its_lexeme() {
+        assert_eq!(Token::Ident("cnt".into()).to_string(), "`cnt`");
+        assert_eq!(Token::Int(7).to_string(), "`7`");
+        assert_eq!(Token::Op(CmpOp::Le).to_string(), "`<=`");
+        assert_eq!(Token::Op(CmpOp::Ne).to_string(), "`!=`");
+        assert_eq!(Token::And.to_string(), "`&&`");
+        assert_eq!(Token::LBracket.to_string(), "`[`");
+        assert_eq!(found(None), "end of input");
+        assert_eq!(found(Some(&Token::Plus)), "`+`");
     }
 }

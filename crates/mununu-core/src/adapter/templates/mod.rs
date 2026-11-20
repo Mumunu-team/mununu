@@ -51,6 +51,20 @@ pub enum TemplateDomain {
     Universal,
 }
 
+impl TemplateDomain {
+    /// The domain's name as `templates --domain` reads it (`rtl`, `agentic`, `software`,
+    /// `synthesis`, `universal`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TemplateDomain::Rtl => "rtl",
+            TemplateDomain::Agentic => "agentic",
+            TemplateDomain::Software => "software",
+            TemplateDomain::Synthesis => "synthesis",
+            TemplateDomain::Universal => "universal",
+        }
+    }
+}
+
 impl std::str::FromStr for TemplateDomain {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -1089,5 +1103,19 @@ mod layer_tests {
     fn domains_parse_and_unknown_ones_are_refused() {
         assert_eq!("RTL".parse::<TemplateDomain>(), Ok(TemplateDomain::Rtl));
         assert!("hardware".parse::<TemplateDomain>().is_err());
+    }
+
+    /// mununu#1121 — a domain's name is the spelling the domain filter parses.
+    #[test]
+    fn x1121_the_template_domain_name_round_trips_through_the_parser() {
+        for d in [
+            TemplateDomain::Rtl,
+            TemplateDomain::Agentic,
+            TemplateDomain::Software,
+            TemplateDomain::Synthesis,
+            TemplateDomain::Universal,
+        ] {
+            assert_eq!(d.as_str().parse::<TemplateDomain>(), Ok(d));
+        }
     }
 }

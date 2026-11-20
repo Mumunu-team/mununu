@@ -45,8 +45,9 @@ impl FormatAdapter for PromelaAdapter {
                 warnings.push(AdapterWarning {
                     kind: WarningKind::ApproximateTranslation,
                     message: format!(
-                        "Variable '{}' ({:?}) auto-bounded via static analysis",
-                        g.name, g.typename
+                        "Variable '{}' ({}) auto-bounded via static analysis",
+                        g.name,
+                        g.typename.keyword()
                     ),
                     location: None,
                 });

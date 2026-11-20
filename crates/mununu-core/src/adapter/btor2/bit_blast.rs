@@ -817,8 +817,9 @@ pub fn to_ir(
             return Err(AdapterError {
                 kind: AdapterErrorKind::UnsupportedConstruct,
                 message: format!(
-                    "BTOR2 operator '{op:?}' at NID {} is not supported by the Phase 1 bit-blaster.{uf_memory_hint} \
+                    "BTOR2 operator '{}' at NID {} is not supported by the Phase 1 bit-blaster.{uf_memory_hint} \
                      Hand the BTOR2 to an external symbolic engine (Phase 3 hand-off) instead.",
+                    op.keyword(),
                     line.nid
                 ),
                 location: Some(SourceLocation {
@@ -3307,11 +3308,13 @@ pub(crate) fn havoc_rewrite_memories(
                     kind: AdapterErrorKind::UnsupportedConstruct,
                     message: format!(
                         "§Phase 10 §10.2 stage 1b: havoc rewrite would leave NID {} \
-                         (a {:?}) referencing dropped NID {} (an array-tainted node). \
+                         (a {}) referencing dropped NID {} (an array-tainted node). \
                          The stage 1b rewriter assumes array data flow is self-contained \
                          within the memory subgraph; please file an issue with the BTOR2 \
                          dump so we can extend the rewriter.",
-                        line.nid, line.node, r,
+                        line.nid,
+                        line.node.kind_keyword(),
+                        r,
                     ),
                     location: Some(SourceLocation {
                         line: line.source_line,
@@ -6867,7 +6870,8 @@ fn eval_op(
         // Arrays (`read` / `write`) are the one shape left: the simulator carries bit-vector
         // cells only, and the engines refuse array designs before a trace exists.
         _ => Err(format!(
-            "operator {op:?} unsupported in Phase 1 bit-blaster"
+            "operator {} unsupported in Phase 1 bit-blaster",
+            op.keyword()
         )),
     }
 }

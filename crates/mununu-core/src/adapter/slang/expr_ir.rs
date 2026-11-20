@@ -168,9 +168,13 @@ fn same_width(what: &str, want: u32, parts: &[&ExprIr]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "unexpected width mismatch in `{what}`: result {want} bits, operands {:?} — refusing \
+            "unexpected width mismatch in `{what}`: result {want} bits, operands {} — refusing \
              to guess the conversion",
-            parts.iter().map(|p| p.width()).collect::<Vec<_>>()
+            parts
+                .iter()
+                .map(|p| p.width().to_string())
+                .collect::<Vec<_>>()
+                .join("/")
         ))
     }
 }

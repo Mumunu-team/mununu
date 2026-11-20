@@ -71,6 +71,12 @@ fn err(message: String) -> AdapterError {
     }
 }
 
+/// A bit width for a message: the number, or "unknown width" when the sort is not a
+/// bit-vector (mununu#1121 — never `Some(8)` / `None`).
+fn width_or_unknown(width: Option<u32>) -> String {
+    width.map_or_else(|| "unknown width".to_string(), |w| w.to_string())
+}
+
 /// BTOR2 keyword for an *unsigned* comparison (the internal oracle compares
 /// `u128`, so unsigned is the matching semantics).
 pub(crate) fn btor2_cmp_keyword(op: CmpOp) -> &'static str {
@@ -786,7 +792,9 @@ pub(crate) fn compile_boolean_subtree(
                 if lw.is_none() || lw != rw {
                     return Err(err(format!(
                         "adapter/btor2/bad_monitor: relational leaf `{atom}` compares widths \
-                         {lw:?} and {rw:?}; only same-width operands are compiled"
+                         {} and {}; only same-width operands are compiled",
+                        width_or_unknown(lw),
+                        width_or_unknown(rw)
                     )));
                 }
                 let cmp_kw = btor2_cmp_keyword(op);
@@ -801,12 +809,13 @@ pub(crate) fn compile_boolean_subtree(
             ))),
             Err(e) => Err(err(format!(
                 "adapter/btor2/bad_monitor: leaf atom `{atom}` did not parse as a predicate \
-                 expression: {e:?}"
+                 expression: {e}"
             ))),
         },
         other => Err(err(format!(
-            "adapter/btor2/bad_monitor: compound safety monitor accepts \
-             And/Or/Not/True/False/Predicate only; found {other:?}"
+            "adapter/btor2/bad_monitor: compound safety monitor accepts `REG op VALUE` atoms, \
+             `&&`, `||`, `!`, `true` and `false` only; found {}",
+            other.kind_name()
         ))),
     }
 }
@@ -1403,7 +1412,8 @@ pub fn emit_bounded_chain_monitor(
                 }
                 other => Err(err(format!(
                     "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, `||`, \
-                     boxes and `e throughout b[->1]` blocks only; found {other:?}"
+                     boxes and `e throughout b[->1]` blocks only; found {}",
+                    other.kind_name()
                 ))),
             }
         }
@@ -1711,5 +1721,13 @@ mod tests {
     #[test]
     fn non_state_signal_is_rejected() {
         assert!(emit_ag_state_atom_monitor(CYCLE_FSM, "nope", CmpOp::Eq, 0, false).is_err());
+    }
+
+    /// mununu#1121 — a width prints as the number or as "unknown width", never as an
+    /// `Option`.
+    #[test]
+    fn x1121_a_width_prints_as_a_number_or_unknown_width() {
+        assert_eq!(width_or_unknown(Some(8)), "8");
+        assert_eq!(width_or_unknown(None), "unknown width");
     }
 }

@@ -1166,14 +1166,16 @@ pub fn verify_recoverability_explained(
     // Validate the atom up front for a target-specific error message (the µ-parser
     // would otherwise report it as a formula-syntax error).
     parse_predicate_expr(good).map_err(|e| {
-        format!("recoverability target `{good}` is not a register-comparison atom (`REG op VALUE`): {e:?}")
+        format!(
+            "recoverability target `{good}` is not a register-comparison atom (`REG op VALUE`): {e}"
+        )
     })?;
 
     // AG EF good = nu Y. ((mu X. (good || <> X)) && [] Y). The exact engine reads the
     // raw `REG == VALUE` atom directly.
     let formula_str = format!("nu Y. ((mu X. (({good}) || <> X)) && [] Y)");
     let formula = mu_parser::parse(&formula_str)
-        .map_err(|e| format!("building the AG EF formula for `{good}`: {e:?}"))?;
+        .map_err(|e| format!("building the AG EF formula for `{good}`: {e}"))?;
 
     // P3 — the exact rung is the planner's LADDER (unrestricted short → reach-restricted →
     // unrestricted remainder); the request's `time_budget_ms` is the ladder's whole clock.
@@ -2351,7 +2353,9 @@ pub fn verify_recoverability_spcr_only(
     good: &str,
 ) -> Result<PropertyVerdict, String> {
     parse_predicate_expr(good).map_err(|e| {
-        format!("recoverability target `{good}` is not a register-comparison atom (`REG op VALUE`): {e:?}")
+        format!(
+            "recoverability target `{good}` is not a register-comparison atom (`REG op VALUE`): {e}"
+        )
     })?;
     let file0 = crate::adapter::btor2::parser::parse(btor2_content)
         .map_err(|e| format!("SPCR-only: parsing BTOR2: {}", e.message))?;
@@ -2359,9 +2363,8 @@ pub fn verify_recoverability_spcr_only(
         Some(af) => {
             let src = crate::adapter::btor2::emit::emit_btor2(&af);
             let formula_str = format!("nu Y. ((mu X. (({good}) || <> X)) && [] Y)");
-            let formula = mu_parser::parse(&formula_str).map_err(|e| {
-                format!("SPCR-only: building the AG EF formula for `{good}`: {e:?}")
-            })?;
+            let formula = mu_parser::parse(&formula_str)
+                .map_err(|e| format!("SPCR-only: building the AG EF formula for `{good}`: {e}"))?;
             match crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict(&src, &formula) {
                 Ok(v) => Ok(PropertyVerdict::from(v)),
                 // SPCR applied (array dropped) but the array-free cone is still too wide for exact.
@@ -2704,7 +2707,9 @@ pub fn verify_recoverability_scalable_with_source(
 ) -> Result<PropertyVerdict, String> {
     // Parse `good` and require a `REG == VALUE` equality atom.
     let good_expr = parse_predicate_expr(good).map_err(|e| {
-        format!("recoverability target `{good}` is not a register-comparison atom (`REG op VALUE`): {e:?}")
+        format!(
+            "recoverability target `{good}` is not a register-comparison atom (`REG op VALUE`): {e}"
+        )
     })?;
     // The good atom may be a simple `REG == VALUE` OR a relational `REG == REG`. The latter enables
     // relational recoverability targets — e.g. a FIFO's `AG EF (wptr == rptr)` ("always able to drain to
@@ -2819,7 +2824,7 @@ pub fn verify_recoverability_scalable_with_source(
         None => {
             let expr_str = format!("{} == {}", good_registers[0], good_registers[1]);
             let expr = parse_predicate_expr(&expr_str)
-                .map_err(|e| format!("relational recoverability good `{expr_str}`: {e:?}"))?;
+                .map_err(|e| format!("relational recoverability good `{expr_str}`: {e}"))?;
             Some(("good".to_string(), expr_str, expr))
         }
     };
@@ -3084,7 +3089,7 @@ pub fn verify_recoverability_scalable_with_source(
     // AG EF good, over the PREDICATE-NAME atom (the cube path resolves `good` to the
     // `good` predicate's 3-valued label, not a raw register comparison).
     let formula = mu_parser::parse("nu Y. ((mu X. (good || <> X)) && [] Y)")
-        .map_err(|e| format!("building the AG EF cube formula: {e:?}"))?;
+        .map_err(|e| format!("building the AG EF cube formula: {e}"))?;
 
     // SOUNDNESS: pin each predicate's register to its BTOR2 reset value via
     // `config_values`, so the cube lift's initial cube is the design's reset state.
@@ -3626,7 +3631,7 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
 
     // AG ¬bad, over the `bad` derived-predicate atom.
     let formula = mu_parser::parse("nu X. ((not bad) and [] X)")
-        .map_err(|e| format!("safety cube path: building the AG ¬bad formula: {e:?}"))?;
+        .map_err(|e| format!("safety cube path: building the AG ¬bad formula: {e}"))?;
 
     // Pin each seed predicate's register to its reset value (mandatory — an unpinned initial cube
     // defaults to all-false, not the reset state, and can falsely report Violated).

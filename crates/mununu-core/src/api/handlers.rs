@@ -2784,7 +2784,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
         .collect();
 
     let formula = mu_parser::parse(params.formula).map_err(|e| ApiError::BadRequest {
-        message: format!("formula parse error: {e:?}"),
+        message: format!("formula parse error: {e}"),
         details: None,
     })?;
 
@@ -4087,7 +4087,7 @@ fn codesign_verify_handler_impl(
         })?;
 
     let context_doc = parse(&composed.ctxdsl).map_err(|e| ApiError::Internal {
-        message: format!("composed CTXDSL failed to parse: {e:?}"),
+        message: format!("composed CTXDSL failed to parse: {e}"),
         source: None,
     })?;
     let realized = realize_context(&context_doc, &[]).map_err(|e| ApiError::Internal {

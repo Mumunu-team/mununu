@@ -88,6 +88,58 @@ enum Token {
     Eof,
 }
 
+/// A token prints as its TLSF lexeme, so a parse error names what the user wrote
+/// (mununu#1121): punctuation, operators and identifiers in backticks, a section keyword as
+/// itself, the end of the file as "end of input".
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (lexeme, quoted) = match self {
+            Token::LBrace => ("{", true),
+            Token::RBrace => ("}", true),
+            Token::LParen => ("(", true),
+            Token::RParen => (")", true),
+            Token::Semi => (";", true),
+            Token::Comma => (",", true),
+            Token::Colon => (":", true),
+            Token::Not => ("!", true),
+            Token::And => ("&&", true),
+            Token::Or => ("||", true),
+            Token::Implies => ("->", true),
+            Token::Iff => ("<->", true),
+            Token::Next => ("X", true),
+            Token::Always => ("G", true),
+            Token::Finally => ("F", true),
+            Token::Until => ("U", true),
+            Token::WeakUntil => ("W", true),
+            Token::Release => ("R", true),
+            Token::True => ("true", true),
+            Token::False => ("false", true),
+            Token::Info => ("INFO", false),
+            Token::Main => ("MAIN", false),
+            Token::Global => ("GLOBAL", false),
+            Token::Title => ("TITLE", false),
+            Token::Description => ("DESCRIPTION", false),
+            Token::Semantics => ("SEMANTICS", false),
+            Token::Target => ("TARGET", false),
+            Token::Inputs => ("INPUTS", false),
+            Token::Outputs => ("OUTPUTS", false),
+            Token::Assumptions => ("ASSUMPTIONS", false),
+            Token::Invariants => ("INVARIANTS", false),
+            Token::Guarantees => ("GUARANTEES", false),
+            Token::Mealy => ("Mealy", false),
+            Token::Moore => ("Moore", false),
+            Token::Ident(s) => return write!(f, "`{s}`"),
+            Token::StringLit(s) => return write!(f, "`\"{s}\"`"),
+            Token::Eof => return f.write_str("end of input"),
+        };
+        if quoted {
+            write!(f, "`{lexeme}`")
+        } else {
+            f.write_str(lexeme)
+        }
+    }
+}
+
 struct Lexer<'a> {
     input: &'a str,
     pos: usize,
@@ -325,7 +377,7 @@ impl<'a> TlsfParser<'a> {
         } else {
             Err(self
                 .lexer
-                .err(&format!("Expected {:?}, got {:?}", expected, self.current)))
+                .err(&format!("Expected {expected}, got {}", self.current)))
         }
     }
 
@@ -514,7 +566,7 @@ impl<'a> TlsfParser<'a> {
                 }
                 other => {
                     return Err(self.lexer.err(&format!(
-                        "unexpected {other:?} in MAIN: expected a section (INPUTS, OUTPUTS, \
+                        "unexpected {other} in MAIN: expected a section (INPUTS, OUTPUTS, \
                          ASSUMPTIONS, INVARIANTS, GUARANTEES) or the closing brace"
                     )));
                 }
@@ -734,7 +786,7 @@ impl<'a> TlsfParser<'a> {
             }
             _ => Err(self
                 .lexer
-                .err(&format!("Expected LTL atom, got {:?}", self.current))),
+                .err(&format!("Expected LTL atom, got {}", self.current))),
         }
     }
 }
@@ -900,5 +952,26 @@ MAIN {
             ),
             (1, 1, 1, 1, 1)
         );
+    }
+
+    /// mununu#1121 — a token prints as its lexeme and an `expect` mismatch names both sides
+    /// that way, never as Rust variant names (`Expected RBrace, got Eof`).
+    #[test]
+    fn x1121_the_tlsf_token_displays_its_lexeme() {
+        assert_eq!(Token::Semi.to_string(), "`;`");
+        assert_eq!(Token::Guarantees.to_string(), "GUARANTEES");
+        assert_eq!(Token::Always.to_string(), "`G`");
+        assert_eq!(Token::Ident("req".into()).to_string(), "`req`");
+        assert_eq!(Token::Eof.to_string(), "end of input");
+        let mut parser = TlsfParser::new("req");
+        let err = parser
+            .expect(&Token::Semi)
+            .expect_err("an identifier is not `;`");
+        assert_eq!(err.message, "Expected `;`, got `req`");
+        let mut parser = TlsfParser::new("");
+        let err = parser
+            .expect(&Token::RBrace)
+            .expect_err("the end of the file is not `}`");
+        assert_eq!(err.message, "Expected `}`, got end of input");
     }
 }

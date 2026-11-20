@@ -274,7 +274,7 @@ fn encode_op(
         // conventions that differ; `read`/`write` are array ops (also excluded via
         // the array-sort guard, handled here defensively).
         Op::Rol | Op::Ror | Op::Read | Op::Write => {
-            return Err(BoolectorError::UnsupportedOp(format!("{op:?}")));
+            return Err(BoolectorError::UnsupportedOp(op.keyword().to_string()));
         }
     };
     Ok(bv)

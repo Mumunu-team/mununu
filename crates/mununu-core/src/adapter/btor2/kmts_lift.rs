@@ -2541,10 +2541,16 @@ fn resolve_predicate_registers(
                     kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                     location: None,
                     message: format!(
-                        "adapter/btor2/predicate_cube_lift: predicate `{}` references unknown register `{}` (known: {:?})",
+                        "adapter/btor2/predicate_cube_lift: predicate `{}` references unknown register `{}` (known: {})",
                         pred.name,
                         pred.register,
-                        symbols.values().collect::<std::collections::BTreeSet<_>>()
+                        symbols
+                            .values()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .map(|s| format!("`{s}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 });
             }

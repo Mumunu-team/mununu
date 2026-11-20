@@ -595,8 +595,9 @@ fn predict_engine(
         PropertyClass::Mixed | PropertyClass::Propositional => (
             "exact-symbolic",
             format!(
-                "{class:?} property, cone {cone_bits}b → routed to exact-symbolic (admissible; \
-                 convergence is a budget question, not a width one)"
+                "{} property, cone {cone_bits}b → routed to exact-symbolic (admissible; \
+                 convergence is a budget question, not a width one)",
+                class.name()
             ),
         ),
     }
@@ -739,8 +740,15 @@ fn routing_rationale_note(r: &RoutingRationale) -> VerificationNote {
         kind: "plan-cost".into(),
         level: NoteLevel::Info,
         summary: format!(
-            "`{}` ({:?}, cone {}b {} {}b cap{}) → predicted `{}`: {}",
-            r.property, r.class, r.cone_bits, cmp, r.cap, diam, r.predicted_engine, r.why
+            "`{}` ({}, cone {}b {} {}b cap{}) → predicted `{}`: {}",
+            r.property,
+            r.class.name(),
+            r.cone_bits,
+            cmp,
+            r.cap,
+            diam,
+            r.predicted_engine,
+            r.why
         ),
         detail: format!(
             "The planner's per-property cost prediction (telemetry, NOT a verdict): from the \

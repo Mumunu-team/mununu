@@ -2123,7 +2123,7 @@ impl AbstractRelation {
             MuNode::Variable(v) => bindings
                 .get(v)
                 .cloned()
-                .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
+                .ok_or_else(|| format!("unbound fixpoint variable #{}", v.index()))?,
             MuNode::Not(n) => self.eval_node(f, *n, names, r_must, bindings)?.not(),
             MuNode::And(a, b) => {
                 let av = self.eval_node(f, *a, names, r_must, bindings)?;
@@ -2669,7 +2669,8 @@ impl BvTermBackend for BddBitBlaster {
             // Out of R-F5.3a scope — later slices / never in the FSM+counter core.
             other => {
                 return Err(format!(
-                    "operator {other:?} not yet supported in the R-F5.3a BDD bit-blaster"
+                    "operator {} not yet supported in the R-F5.3a BDD bit-blaster",
+                    other.keyword()
                 ));
             }
         };
@@ -5106,7 +5107,7 @@ impl ExactModel {
             MuNode::Variable(v) => bindings
                 .get(v)
                 .cloned()
-                .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
+                .ok_or_else(|| format!("unbound fixpoint variable #{}", v.index()))?,
             MuNode::Not(n) => {
                 self.tick(1);
                 // mununu#730 — `not` copies the operand's DAG (no complement edges), so it can
@@ -6096,7 +6097,7 @@ pub fn exact_two_player_reach_realizable(
 ) -> Result<bool, String> {
     let formula_str = format!("mu X. (({good}) || <(ctrl = controllable)> X)");
     let formula = crate::mu_calculus::parser::parse(&formula_str)
-        .map_err(|e| format!("exact two-player reach: parsing `{formula_str}`: {e:?}"))?;
+        .map_err(|e| format!("exact two-player reach: parsing `{formula_str}`: {e}"))?;
     Ok(exact_two_player_verdict(btor2_content, &formula, controllable)? == ExactVerdict::Holds)
 }
 
@@ -6122,7 +6123,7 @@ pub fn exact_two_player_buchi_realizable(
         "nu Z. (mu Y. ((({good}) && <(ctrl = controllable)> Z) || <(ctrl = controllable)> Y))"
     );
     let formula = crate::mu_calculus::parser::parse(&formula_str)
-        .map_err(|e| format!("exact two-player recurrence: parsing `{formula_str}`: {e:?}"))?;
+        .map_err(|e| format!("exact two-player recurrence: parsing `{formula_str}`: {e}"))?;
     Ok(exact_two_player_verdict(btor2_content, &formula, controllable)? == ExactVerdict::Holds)
 }
 
@@ -6167,7 +6168,7 @@ pub fn exact_two_player_gr1_realizable(
          || (({latch} == 0) && <(ctrl = controllable)> X))))"
     );
     let formula = crate::mu_calculus::parser::parse(&formula_str)
-        .map_err(|e| format!("exact two-player GR(1): parsing `{formula_str}`: {e:?}"))?;
+        .map_err(|e| format!("exact two-player GR(1): parsing `{formula_str}`: {e}"))?;
     Ok(exact_two_player_verdict(&latched, &formula, controllable)? == ExactVerdict::Holds)
 }
 
@@ -6217,9 +6218,8 @@ pub fn exact_two_player_gr1_conjunction_realizable(
         ));
     }
     let formula_str = format!("nu Z. (mu Y. ({}))", disjuncts.join(" || "));
-    let formula = crate::mu_calculus::parser::parse(&formula_str).map_err(|e| {
-        format!("exact two-player GR(1) conjunction: parsing `{formula_str}`: {e:?}")
-    })?;
+    let formula = crate::mu_calculus::parser::parse(&formula_str)
+        .map_err(|e| format!("exact two-player GR(1) conjunction: parsing `{formula_str}`: {e}"))?;
     Ok(exact_two_player_verdict(&content, &formula, controllable)? == ExactVerdict::Holds)
 }
 
@@ -6624,7 +6624,7 @@ impl ExactSession {
                 let havoc: std::collections::HashSet<Nid> =
                     memories.iter().map(|m| m.nid).collect();
                 crate::adapter::btor2::bit_blast::havoc_rewrite_memories(&file, &havoc)
-                    .map_err(|e| format!("exact MC: out-of-cone memory havoc: {e:?}"))?
+                    .map_err(|e| format!("exact MC: out-of-cone memory havoc: {e}"))?
             } else {
                 file
             }
@@ -6794,10 +6794,12 @@ impl ExactSession {
                 let mut inputs: Vec<&str> = input_leaf_names.iter().map(String::as_str).collect();
                 inputs.sort_unstable();
                 return Err(format!(
-                    "exact two-player MC: declared controllable input(s) {unknown:?} are not primary \
-                 inputs of the design (primary inputs: {inputs:?}). Declare a real top-level input; \
+                    "exact two-player MC: declared controllable input(s) {} are not primary \
+                 inputs of the design (primary inputs: {}). Declare a real top-level input; \
                  for a multi-module design ensure it is a top input, not one driven by another \
-                 module's output (which flatten resolves to an internal signal, not a free input)."
+                 module's output (which flatten resolves to an internal signal, not a free input).",
+                    unknown.join(", "),
+                    inputs.join(", ")
                 ));
             }
         }
@@ -7825,8 +7827,10 @@ pub fn exact_two_player_strategy(
             let mut names: Vec<&str> = inputs.iter().map(String::as_str).collect();
             names.sort_unstable();
             return Err(format!(
-                "exact two-player strategy: declared controllable input(s) {unknown:?} are not primary \
-                 inputs of the design (primary inputs: {names:?})"
+                "exact two-player strategy: declared controllable input(s) {} are not primary \
+                 inputs of the design (primary inputs: {})",
+                unknown.join(", "),
+                names.join(", ")
             ));
         }
     }
@@ -7900,8 +7904,10 @@ pub fn exact_two_player_buchi_strategy(
             let mut names: Vec<&str> = inputs.iter().map(String::as_str).collect();
             names.sort_unstable();
             return Err(format!(
-                "exact two-player recurrence strategy: declared controllable input(s) {unknown:?} are \
-                 not primary inputs of the design (primary inputs: {names:?})"
+                "exact two-player recurrence strategy: declared controllable input(s) {} are \
+                 not primary inputs of the design (primary inputs: {})",
+                unknown.join(", "),
+                names.join(", ")
             ));
         }
     }
@@ -7984,8 +7990,10 @@ pub fn exact_two_player_recurrence_stall_lasso(
             let mut names: Vec<&str> = inputs.iter().map(String::as_str).collect();
             names.sort_unstable();
             return Err(format!(
-                "exact recurrence stall lasso: declared controllable input(s) {unknown:?} are not \
-                 primary inputs of the design (primary inputs: {names:?})"
+                "exact recurrence stall lasso: declared controllable input(s) {} are not \
+                 primary inputs of the design (primary inputs: {})",
+                unknown.join(", "),
+                names.join(", ")
             ));
         }
     }
@@ -16141,5 +16149,33 @@ mod open_items_tests {
         const PLAIN_INIT: &str =
             "1 sort bitvec 1\n2 zero 1\n3 state 1 s\n4 init 1 3 2\n5 next 1 3 3\n6 bad 3\n";
         assert_eq!(exact_bad_reachable(PLAIN_INIT), Ok(false));
+    }
+
+    /// mununu#1121 — REPRODUCER: a declared controllable input that is not a primary input
+    /// is refused naming the unknown name and the primary inputs plainly; on the parent both
+    /// lists were the Rust `Debug` form (`["nope"]` / `["go"]`).
+    #[test]
+    fn x1121_an_unknown_controllable_input_lists_the_primary_inputs_by_name() {
+        let src = "1 sort bitvec 1\n2 sort bitvec 3\n3 input 1 go\n4 state 2 a\n5 state 1 b\n6 zero 2\n\
+                   7 zero 1\n8 init 2 4 6\n9 init 1 5 7\n10 one 2\n11 add 2 4 10\n12 ite 2 3 11 4\n\
+                   13 next 2 4 12\n14 constd 2 7\n15 eq 1 4 14\n16 not 1 5\n17 ite 1 15 16 5\n18 next 1 5 17\n";
+        let formula =
+            crate::mu_calculus::parser::parse("nu X. ((a == 0) && [] X)").expect("parses");
+        let controllable: std::collections::HashSet<String> =
+            ["nope".to_string()].into_iter().collect();
+        let err = ExactSession::prepare(
+            src,
+            &formula,
+            &controllable,
+            &ExactSymbolicOptions::default(),
+        )
+        .err()
+        .expect("an unknown controllable input is refused");
+        assert!(
+            err.contains("declared controllable input(s) nope are not primary inputs"),
+            "{err}"
+        );
+        assert!(err.contains("(primary inputs: go)"), "{err}");
+        assert!(!err.contains("[\""), "{err}");
     }
 }
