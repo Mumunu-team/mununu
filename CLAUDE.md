@@ -22,13 +22,15 @@
 14. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
 15. [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in) `[RULE]`
 16. [Failure Paths](#failure-paths) `[RULE]`
-17. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
-18. [Private Files Policy](#private-files-policy) `[RULE]`
-19. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-20. [Falsifier First](#falsifier-first) `[RULE]`
-21. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-22. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
-23. [Environment Variables](#environment-variables) `[REFERENCE]`
+17. [Fix the Class](#fix-the-class) `[RULE]`
+18. [Cross-Host Review](#cross-host-review) `[RULE]`
+19. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
+20. [Private Files Policy](#private-files-policy) `[RULE]`
+21. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
+22. [Falsifier First](#falsifier-first) `[RULE]`
+23. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+24. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+25. [Environment Variables](#environment-variables) `[REFERENCE]`
 
 ---
 
@@ -181,6 +183,18 @@ Full text and incidents: [`docs/policies/failure-paths.md`](docs/policies/failur
 - **A remedy is something the user can do, or it says there is none** (2026-11-19, mununu#1106). A refusal, abstention or warning names only a fix that exists on the surface that produced it — a flag of *that* verb, a variable in `docs/env-vars.md`, a key the parser takes — in the user's own names: no Rust identifier, `{:?}` output, roadmap step or tier. With no fix, it says which of three it is: a limit of the technique, a mununu limitation (nothing to change in the design), or a mununu defect (please report). An "unknown X" lists the candidates. The PR that adds a remedy follows it once; the commit that retires a mechanism removes the messages that recommend it.
 - **Read the tool's diagnostics before bisecting sources.** `diagnostics.frontend` / `lift_retry` / `bottom_reason` / the notes first, a hand replay of the failing stage second, an input bisect last (the csrng "INC_ASSERT loop" of 2026-10-22 cost a day and was a yosys backend artifact).
 
+## Fix the Class
+
+Full text and incidents: [`docs/policies/fix-the-class.md`](docs/policies/fix-the-class.md) (2026-11-20, from four chains each fixed one case at a time).
+
+A pull request that fixes a defect declares, in its description, exactly one of `Class: <slug>` (an entry of [`docs/defect-classes.md`](docs/defect-classes.md), which the same PR may add) · `Class: none — <why this is a single site>`. **Before writing the fix:** name what varies (the dimension the failing input is one value of), enumerate its other values from the code that produces them, and say what this code does on each — fixed here, already correct (name the test), refused with a reason, or open (file it). The fix covers the cases; one test enumerates them, exhaustively over the enum when there is one; the catalogue entry is updated by every fix in the class. A reproducer pins one case — it is not the scope of the fix. The `review-gate` status checks the declaration's form; the reviewer checks the case table against the producer.
+
+## Cross-Host Review
+
+Full text: [`docs/policies/cross-host-review.md`](docs/policies/cross-host-review.md) (2026-11-20: two three-deep fix chains whose review arrived after the merge).
+
+A **sensitive** pull request — at least `min-changed-lines` lines under the prefixes of `scripts/review-sensitive-paths.txt`, or the `soundness` label — merges only after a session on **another machine** has reviewed its current head. The author's session writes `Authored-on: <machine>` in the description; the reviewing session runs `review-orchestrator` on the PR and comments `Cross-review: approve — host <machine>, head <sha>` (or `changes-requested`). `<machine>` is `MUNUNU_MACHINE_NICK`, never a hostname. A push after the review needs a new review. A session that starts or finishes a task runs `gh pr list --label needs-cross-review` and reviews the other machine's PRs before new work of its own. Never write a review line for a PR authored on this machine; `Cross-review: waived by the founder — <reason>, head <sha>` only on the founder's instruction in the session. `scripts/pr_review_gate.py --pr N` prints the verdict; the `review-gate` status enforces it.
+
 ## Available Agents and Skills
 
 Under `.claude/skills/**` (invoke as `/<name>`) and `.claude/agents/**` (spawn by name). Invoke them rather than reproducing their logic inline.
@@ -227,7 +241,7 @@ Every proposed experiment, approach, design or implementation states which engin
 ## Reference Docs Index
 
 - [`docs/env-vars.md`](docs/env-vars.md) — every `MUNUNU_*` variable the code reads, one line each.
-- [`docs/policies/`](docs/policies/) — the full policies: `ci-and-hooks.md`, `reproducers-before-fixes.md`, `documentation-traceability.md`, `claims-integrity.md`, `cross-repo-impact.md`, `failure-paths.md`, `private-files.md`.
+- [`docs/policies/`](docs/policies/) — the full policies: `ci-and-hooks.md`, `reproducers-before-fixes.md`, `documentation-traceability.md`, `claims-integrity.md`, `cross-repo-impact.md`, `failure-paths.md`, `private-files.md`, `fix-the-class.md`, `cross-host-review.md`; the class catalogue is [`docs/defect-classes.md`](docs/defect-classes.md).
 - [`docs/dev-container.md`](docs/dev-container.md) · [`docs/build-recipes.md`](docs/build-recipes.md) · [`docs/toolchain.md`](docs/toolchain.md) · [`docs/docker.md`](docs/docker.md) — building and running.
 - [`docs/cli-cookbook.md`](docs/cli-cookbook.md) — common `mununu` invocations.
 - [`docs/ctxdsl-modelling-guide.md`](docs/ctxdsl-modelling-guide.md) — hand-authoring CTXDSL: boolean `guard`s and the undecidable-guard error, pre-state `effects`, where `var == value` binds vs silently evaluates true. Read before writing a model with `variables`.

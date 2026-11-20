@@ -1,0 +1,41 @@
+# Path prefixes whose change makes a pull request "sensitive" for the cross-host review gate
+# (docs/policies/cross-host-review.md). One prefix per line; a changed file is sensitive when its
+# path starts with one. Read by scripts/pr_review_gate.py. A pull request labelled `soundness`
+# is sensitive whatever it touches.
+#
+# The threshold: a pull request is sensitive when it adds or removes at least this many lines
+# under the prefixes. Measured 2026-11-20 on the 150 pull requests merged since 2026-11-06: at 100
+# it gates 71 of them and catches 10 of the 11 that started a fix-of-fix chain; at 250 it gates
+# 35 and catches 5.
+min-changed-lines: 100
+#
+# What decides or reports a verdict:
+crates/mununu-core/src/mu_calculus/
+crates/mununu-core/src/clts/
+crates/mununu-core/src/composition/
+crates/mununu-core/src/abstraction/
+crates/mununu-core/src/verify/
+crates/mununu-core/src/planner/
+crates/mununu-core/src/verdict.rs
+crates/mununu-core/src/adapter/btor2/
+crates/mununu-core/src/adapter/slang/
+crates/mununu-core/src/adapter/yosys/
+crates/mununu-core/src/adapter/ric3/
+crates/mununu-core/src/adapter/btormc/
+crates/mununu-core/src/adapter/pono/
+crates/mununu-core/src/adapter/reach_portfolio.rs
+crates/mununu-core/src/adapter/reach_rescue.rs
+crates/mununu-core/src/adapter/justice.rs
+crates/mununu-core/src/adapter/liveness_rescue.rs
+crates/mununu-core/src/adapter/recoverability.rs
+crates/mununu-core/src/adapter/resume.rs
+crates/mununu-core/src/adapter/run_budget.rs
+crates/mununu-core/src/adapter/sts_ir.rs
+# What a server reads or runs on a caller's behalf, and the licence check:
+crates/mununu-core/src/deployment.rs
+crates/mununu-core/src/codesign/include_scan.rs
+crates/mununu-core/src/licence.rs
+# The gates themselves:
+.github/workflows/
+scripts/pr_review_gate.py
+scripts/review-sensitive-paths.txt
