@@ -223,6 +223,12 @@ pub struct UnsupportedAssertion {
     pub reason: String,
 }
 
+/// mununu#1121 U2.10 — an SVA shape this translator does not carry (it would need a sequence
+/// automaton or length composition): a mununu limitation, nothing to change in the design.
+fn not_carried(what: impl std::fmt::Display) -> String {
+    crate::adapter::owner::mununu_limitation(&what.to_string(), None)
+}
+
 /// XL.3 (Tier-2): a base signal whose previous-cycle value a translated
 /// assertion needs. The BTOR2 model-augmentation step (XL.3b) must synthesise a
 /// `depth`-stage shadow shift chain for it — `next(<base>__past) = <base>`,
@@ -2128,8 +2134,11 @@ fn translate_one(
         SvaKind::Cover => format!("mu X. (({body}) || <> X)"),
     };
     // Safety net: only ship formulas the evaluator's parser accepts.
-    crate::mu_calculus::parser::parse(&formula)
-        .map_err(|e| format!("emitted formula failed to parse ({e}): {formula}"))?;
+    crate::mu_calculus::parser::parse(&formula).map_err(|e| {
+        crate::adapter::owner::mununu_defect(&format!(
+            "the translator emitted a formula the evaluator rejects ({e}): {formula}"
+        ))
+    })?;
     Ok(formula)
 }
 
@@ -2143,8 +2152,12 @@ fn translate_one(
 /// only carries a companion the evaluator can actually run.
 fn recoverability_companion_formula(ef_formula: &str) -> Result<String, String> {
     let companion = format!("nu Y. (({ef_formula}) && [] Y)");
-    crate::mu_calculus::parser::parse(&companion)
-        .map_err(|e| format!("recoverability companion failed to parse ({e}): {companion}"))?;
+    crate::mu_calculus::parser::parse(&companion).map_err(|e| {
+        crate::adapter::owner::mununu_defect(&format!(
+            "the translator emitted a recoverability companion the evaluator rejects ({e}): \
+                 {companion}"
+        ))
+    })?;
     Ok(companion)
 }
 
@@ -2276,7 +2289,15 @@ fn property_body(
             let conseq = match op {
                 "OverlappedImplication" => conseq,
                 "NonOverlappedImplication" => format!("[] {conseq}"),
-                other => return Err(format!("unsupported property operator: {other}")),
+                other => {
+                    return Err(crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "property operator `{other}` is not translated; the translator \
+                             takes `|->`, `|=>` and `and`"
+                        ),
+                        None,
+                    ));
+                }
             };
             antecedent_implies_any(child(spec, "left")?, &conseq)
         }
@@ -2289,7 +2310,14 @@ fn property_body(
         // it holds at a start iff the sequence matches from there, which is how a consequent
         // reads it. Bounded sequences only (`consequent_expr` refuses the rest).
         "SequenceConcat" => consequent_expr(spec),
-        other => Err(format!("unsupported property kind: {other}")),
+        other => Err(crate::adapter::owner::mununu_limitation(
+            &format!(
+                "property kind `{other}` is not translated; the translator takes an implication \
+                 (`|->`, `|=>`), a property `and`, a boolean, a temporal operator (`s_eventually`, \
+                 `nexttime`, `s_nexttime`, `always`, `strong`, `weak`) and a bounded sequence"
+            ),
+            None,
+        )),
     }
 }
 
@@ -2332,10 +2360,10 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
             let rep = spec.get("repetition").expect("guarded");
             let min = rep.get("min").and_then(Value::as_u64).unwrap_or(0);
             if rep.get("kind").and_then(Value::as_str) != Some("Consecutive") || min == 0 {
-                return Err(format!(
+                return Err(not_carried(format!(
                     "unbounded repetition `[*{min}:$]` other than a consecutive `[*n:$]` with \
-                     n >= 1 needs a sequence automaton — Tier-3b"
-                ));
+                     n >= 1 needs a sequence automaton"
+                )));
             }
             let fixed = serde_json::json!({"kind": "Consecutive", "min": min, "max": min});
             lower_repetition(&bool_expr(child(spec, "expr")?)?, &fixed)
@@ -2378,11 +2406,11 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                 if o.get("kind").and_then(Value::as_str) != Some("Simple")
                     || o.get("repetition").is_some()
                 {
-                    return Err(format!(
+                    return Err(not_carried(format!(
                         "the operands of `{}` must be booleans (a sequence operand needs a \
-                         sequence automaton — Tier-3b)",
+                         sequence automaton)",
                         until_spelling(op)
-                    ));
+                    )));
                 }
                 bool_expr(child(o, "expr")?)
             };
@@ -2444,10 +2472,11 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                 for (i, el) in elements.iter().enumerate() {
                     if el.get("max").and_then(Value::as_str) == Some("$") {
                         if i != last || i == 0 {
-                            return Err("an unbounded `##[m:$]` gap is supported only before \
-                                 the last element of a chain (`b ##[1:$] c`); elsewhere it \
-                                 needs a sequence automaton — Tier-3b"
-                                .into());
+                            return Err(not_carried(
+                                "an unbounded `##[m:$]` gap is supported only before the last \
+                                 element of a chain (`b ##[1:$] c`); elsewhere it needs a \
+                                 sequence automaton",
+                            ));
                         }
                         let seq = el
                             .get("sequence")
@@ -2461,10 +2490,11 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                     if seq.get("kind").and_then(Value::as_str) != Some("Simple")
                         || seq.get("repetition").is_some()
                     {
-                        return Err("a multi-element `##` chain element must be a length-1 \
-                             boolean (a repetition or nested sub-sequence inside a chain \
-                             needs length composition — Tier-3b)"
-                            .into());
+                        return Err(not_carried(
+                            "a multi-element `##` chain element must be a length-1 boolean (a \
+                             repetition or nested sub-sequence inside a chain needs length \
+                             composition)",
+                        ));
                     }
                     leaves.push(bool_expr(child(seq, "expr")?)?);
                     delays.push(elem_delay(el)?);
@@ -2485,11 +2515,11 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                 Ok(delayed(&s, min0, max0))
             }
         }
-        other => Err(format!(
+        other => Err(not_carried(format!(
             "unsupported implication consequent (expected a boolean, a `##k`/`##[m:n]` \
              delayed boolean, a `b[*n]` repetition, or a `##` chain of booleans, got {})",
             other.unwrap_or("<missing>")
-        )),
+        ))),
     }
 }
 
@@ -2499,19 +2529,16 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
 /// it waits through. Unbounded sequences and nested sub-sequences are refused.
 fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
     if uses_eventuality(spec) {
-        return Err(
-            "`throughout` over an unbounded sequence (`##[m:$]`, `[*n:$]`) needs a \
-                    sequence automaton — Tier-3b"
-                .into(),
-        );
+        return Err(not_carried(
+            "`throughout` over an unbounded sequence (`##[m:$]`, `[*n:$]`) needs a sequence \
+             automaton",
+        ));
     }
     let leaf = |seq: &Value| -> Result<String, String> {
         if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
-            return Err(
-                "a nested sub-sequence under `throughout` needs length composition — \
-                        Tier-3b"
-                    .into(),
-            );
+            return Err(not_carried(
+                "a nested sub-sequence under `throughout` needs length composition",
+            ));
         }
         let b = format!("({e} && {})", bool_expr(child(seq, "expr")?)?);
         match seq.get("repetition") {
@@ -2546,9 +2573,10 @@ fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
                     .get("sequence")
                     .ok_or("sequence element without a `sequence`")?;
                 if elements.len() > 1 && seq.get("repetition").is_some() {
-                    return Err("a repetition inside a `##` chain under `throughout` needs \
-                                length composition — Tier-3b"
-                        .into());
+                    return Err(not_carried(
+                        "a repetition inside a `##` chain under `throughout` needs length \
+                         composition",
+                    ));
                 }
                 leaves.push(leaf(seq)?);
                 delays.push(elem_delay(el)?);
@@ -2562,11 +2590,11 @@ fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
             let (min0, max0) = delays[0];
             Ok(delayed_with(&s, min0, max0, e))
         }
-        other => Err(format!(
+        other => Err(not_carried(format!(
             "unsupported operand of `throughout` (expected a bounded sequence of booleans, got \
              {})",
             other.unwrap_or("<missing>")
-        )),
+        ))),
     }
 }
 
@@ -2605,11 +2633,10 @@ fn eventually(f: &str) -> String {
 fn unbounded_delay(el: &Value, seq: &Value) -> Result<String, String> {
     if seq.get("kind").and_then(Value::as_str) != Some("Simple") || seq.get("repetition").is_some()
     {
-        return Err(
-            "`##[m:$]` is supported only before a boolean (`##[1:$] b`); a sequence \
-                    after an unbounded gap needs a sequence automaton — Tier-3b"
-                .into(),
-        );
+        return Err(not_carried(
+            "`##[m:$]` is supported only before a boolean (`##[1:$] b`); a sequence after an \
+             unbounded gap needs a sequence automaton",
+        ));
     }
     let min = el.get("min").and_then(Value::as_u64).unwrap_or(0);
     if min > MAX_SEQ_UNROLL {
@@ -2639,10 +2666,9 @@ fn unary_temporal(spec: &Value) -> Result<String, String> {
         if inner.get("kind").and_then(Value::as_str) != Some("Simple")
             || inner.get("repetition").is_some()
         {
-            return Err(format!(
-                "`{op}` over a sequence or a property is not supported; its operand must be a \
-                 boolean"
-            ));
+            return Err(not_carried(format!(
+                "`{op}` over a sequence or a property; its operand must be a boolean"
+            )));
         }
         bool_expr(child(inner, "expr")?)
     };
@@ -2673,10 +2699,11 @@ fn unary_temporal(spec: &Value) -> Result<String, String> {
         "NextTime" | "SNextTime" if !ranged => Ok(format!("[] {}", consequent_expr(inner)?)),
         "Always" if !ranged => Ok(format!("(nu W. ({} && [] W))", consequent_expr(inner)?)),
         "Eventually" => Err("unranged weak `eventually` is not legal SVA".to_string()),
-        other => Err(format!(
-            "unsupported temporal property operator `{other}`{}",
+        other => Err(not_carried(format!(
+            "temporal property operator `{other}`{} is not translated; the translator takes \
+             `s_eventually`, unranged `nexttime` / `s_nexttime` / `always`, `strong` and `weak`",
             if ranged { " with a range" } else { "" }
-        )),
+        ))),
     }
 }
 
@@ -2685,12 +2712,13 @@ fn unary_temporal(spec: &Value) -> Result<String, String> {
 /// formula. Rejects goto / non-consecutive / range / unbounded repetition (Tier-3b).
 fn seq_leaf(seq: &Value) -> Result<String, String> {
     if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
-        return Err(format!(
-            "nested sequence element (expected a boolean leaf, got {}) — Tier-3b",
+        return Err(not_carried(format!(
+            "nested sequence element (expected a boolean leaf, got {}) needs a sequence \
+             automaton",
             seq.get("kind")
                 .and_then(Value::as_str)
                 .unwrap_or("<missing>")
-        ));
+        )));
     }
     let b = bool_expr(child(seq, "expr")?)?;
     match seq.get("repetition") {
@@ -2706,22 +2734,24 @@ fn seq_leaf(seq: &Value) -> Result<String, String> {
 fn fixed_consecutive_count(rep: &Value) -> Result<u32, String> {
     let kind = rep.get("kind").and_then(Value::as_str).unwrap_or("?");
     if kind != "Consecutive" {
-        return Err(format!(
-            "`{kind}` repetition (goto `[->n]` / non-consecutive `[=n]`) needs a \
-             sequence automaton — Tier-3b"
-        ));
+        return Err(not_carried(format!(
+            "`{kind}` repetition (goto `[->n]` / non-consecutive `[=n]`) needs a sequence \
+             automaton"
+        )));
     }
     let (Some(min), Some(max)) = (
         rep.get("min").and_then(Value::as_u64),
         rep.get("max").and_then(Value::as_u64),
     ) else {
-        return Err("unbounded repetition `[*n:$]` needs a sequence automaton — Tier-3b".into());
+        return Err(not_carried(
+            "unbounded repetition `[*n:$]` needs a sequence automaton",
+        ));
     };
     if min != max {
-        return Err(format!(
-            "range repetition `[*{min}:{max}]` needs a sequence automaton — Tier-3b; \
-             a fixed `[*n]` is supported"
-        ));
+        return Err(not_carried(format!(
+            "range repetition `[*{min}:{max}]` needs a sequence automaton; a fixed `[*n]` is \
+             supported"
+        )));
     }
     if min == 0 {
         return Err("empty repetition `[*0]` is out of fragment".into());
@@ -2753,7 +2783,9 @@ fn elem_delay(el: &Value) -> Result<(u32, u32), String> {
         el.get("min").and_then(Value::as_u64),
         el.get("max").and_then(Value::as_u64),
     ) else {
-        return Err("unbounded `##[m:$]` delay needs a sequence automaton — Tier-3b".into());
+        return Err(not_carried(
+            "unbounded `##[m:$]` delay needs a sequence automaton",
+        ));
     };
     if max < min {
         return Err(format!("sequence delay range max {max} < min {min}"));
@@ -2877,18 +2909,17 @@ fn repeated_implies(b: &str, rlo: u32, rhi: u32, next: &str) -> String {
 fn consecutive_range(rep: &Value) -> Result<(u32, u32), String> {
     let kind = rep.get("kind").and_then(Value::as_str).unwrap_or("?");
     if kind != "Consecutive" {
-        return Err(format!(
-            "`{kind}` repetition (goto `[->n]` / non-consecutive `[=n]`) needs a \
-             sequence automaton — Tier-3b"
-        ));
+        return Err(not_carried(format!(
+            "`{kind}` repetition (goto `[->n]` / non-consecutive `[=n]`) needs a sequence \
+             automaton"
+        )));
     }
     let min = rep.get("min").and_then(Value::as_u64);
     let Some(max) = rep.get("max").and_then(Value::as_u64) else {
-        return Err(
-            "unbounded repetition `[*n:$]` in an ANTECEDENT has unboundedly many match \
-                    ends; it needs a sequence automaton — Tier-3b"
-                .into(),
-        );
+        return Err(not_carried(
+            "unbounded repetition `[*n:$]` in an ANTECEDENT has unboundedly many match ends; \
+             it needs a sequence automaton",
+        ));
     };
     let min = min.unwrap_or(0);
     if min == 0 {
@@ -2909,13 +2940,12 @@ fn consecutive_range(rep: &Value) -> Result<(u32, u32), String> {
 fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
     let leaf = |seq: &Value, gap: (u32, u32)| -> Result<AntecedentLink, String> {
         if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
-            return Err(format!(
-                "a nested sub-sequence in an antecedent (got {}) needs length composition — \
-                 Tier-3b",
+            return Err(not_carried(format!(
+                "a nested sub-sequence in an antecedent (got {}) needs length composition",
                 seq.get("kind")
                     .and_then(Value::as_str)
                     .unwrap_or("<missing>")
-            ));
+            )));
         }
         let rep = match seq.get("repetition") {
             None => (1, 1),
@@ -2940,11 +2970,10 @@ fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
                     .get("sequence")
                     .ok_or("sequence element without a `sequence`")?;
                 if el.get("max").and_then(Value::as_str) == Some("$") {
-                    return Err(
-                        "an unbounded `##[m:$]` gap in an ANTECEDENT has unboundedly \
-                                many match ends; it needs a sequence automaton — Tier-3b"
-                            .into(),
-                    );
+                    return Err(not_carried(
+                        "an unbounded `##[m:$]` gap in an ANTECEDENT has unboundedly many match \
+                         ends; it needs a sequence automaton",
+                    ));
                 }
                 v.push(leaf(seq, elem_delay(el)?)?);
             }
@@ -2954,11 +2983,11 @@ fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
             v
         }
         other => {
-            return Err(format!(
+            return Err(not_carried(format!(
                 "unsupported implication antecedent (expected a boolean, a repeated boolean or \
                  a bounded `##` chain of them, got {})",
                 other.unwrap_or("<missing>")
-            ));
+            )));
         }
     };
     let alternatives: u64 = links
@@ -3128,7 +3157,10 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
                     "reduction-{} (parity) is not expressible as a propositional atom",
                     if op == "BitwiseXor" { "xor" } else { "xnor" }
                 )),
-                other => Err(format!("unsupported unary op: {other}")),
+                other => Err(not_carried(format!(
+                    "unary op `{other}` is not translated; the translator takes `!`, `~` on \
+                     one bit, and the `&` / `|` / `~&` / `~|` reductions"
+                ))),
             }
         }
         "BinaryOp" => {
@@ -3184,7 +3216,11 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
                 "GreaterThan" => compare(expr, ">"),
                 "LessThanEqual" => compare(expr, "<="),
                 "GreaterThanEqual" => compare(expr, ">="),
-                other => Err(format!("unsupported binary op: {other}")),
+                other => Err(not_carried(format!(
+                    "binary op `{other}` is not translated; the translator takes `&&`, `||`, \
+                     `->`, `<->`, `==`, `===`, `!=`, `!==`, `<`, `>`, `<=`, `>=` and the \
+                     expression compiler's arithmetic / bitwise forms"
+                ))),
             }
         }
         // `sig[i]` — three distinct refusals, never silently dropped. mununu#514: this used to
@@ -3249,9 +3285,13 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
                     match sub {
                         "$stable" => Ok(format!("({now} == {then})")),
                         "$changed" => Ok(format!("({now} != {then})")),
-                        _ if msb != lsb => Err(format!(
-                            "{sub}(<{}-bit slice>) — Tier-2 supports {sub} on a single bit only",
-                            msb - lsb + 1
+                        _ if msb != lsb => Err(crate::adapter::owner::mununu_limitation(
+                            &format!(
+                                "{sub}(<{}-bit slice>); the translator carries {sub} on a \
+                                 single bit only",
+                                msb - lsb + 1
+                            ),
+                            Some("select one bit"),
                         )),
                         "$rose" => Ok(format!("({now} && (!({then})))")),
                         _ => Ok(format!("((!({now})) && {then})")),
@@ -3266,9 +3306,12 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
                 "$rose" | "$fell" => {
                     let (sig, w) = call_arg_signal(expr)?;
                     if w != 1 {
-                        return Err(format!(
-                            "{sub}(<{w}-bit>) needs a bit-select; Tier-2 supports \
-                             {sub} on 1-bit signals only"
+                        return Err(crate::adapter::owner::mununu_limitation(
+                            &format!(
+                                "{sub}(<{w}-bit>) needs a bit-select; the translator carries \
+                                 {sub} on 1-bit signals only"
+                            ),
+                            Some("select one bit"),
                         ));
                     }
                     let shadow = past_shadow_name(sig, 1);
@@ -3347,10 +3390,11 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
                     Some(Err(e)) => Err(e),
                     None => unreachable!("guarded by the subroutine match"),
                 },
-                other => Err(format!(
-                    "system/subroutine call `{other}` (e.g. `$countones`) \
-                     is not in the Tier-1c/Tier-2 fragment"
-                )),
+                other => Err(not_carried(format!(
+                    "system/subroutine call `{other}` is not translated; the translator takes \
+                     `$past`, `$stable`, `$changed`, `$rose`, `$fell`, `$countones`, `$onehot`, \
+                     `$onehot0`, `$signed`, `$unsigned` and a single-return user function"
+                ))),
             }
         }
         // `x inside {v1, v2, [lo:hi], …}` — expand to the already-supported comparison
@@ -3365,11 +3409,10 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
             // SOUNDNESS — `inside` ranges lower to `>=` / `<=` atoms, which are unsigned; a signed
             // left operand would invert them (see `signed_comparison_guard`).
             if typed_signed(child(expr, "left")?) || typed_signed(unwrap(child(expr, "left")?)) {
-                return Err(
-                    "`inside` over a signed operand: its ranges would be compared \
-                            unsigned; not supported yet"
-                        .to_string(),
-                );
+                return Err(crate::adapter::owner::mununu_limitation(
+                    "`inside` over a signed operand: its ranges would be compared unsigned",
+                    Some("cast the operand unsigned, or rewrite the `inside` as comparisons"),
+                ));
             }
             let atom = |e: &Value| -> Option<String> {
                 cmp_signal_atom(e).or_else(|| sv_integer(e).map(|n| n.to_string()))
@@ -3425,7 +3468,11 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
             }
             Ok(format!("({})", terms.join(" || ")))
         }
-        other => Err(format!("unsupported expression kind: {other}")),
+        other => Err(not_carried(format!(
+            "expression kind `{other}` is not translated; the translator takes a signal, a \
+             literal, a conversion, a unary or binary operator, a bit / range / member select, a \
+             call and `inside`"
+        ))),
     }
 }
 
@@ -3892,10 +3939,10 @@ fn index_positions(
         (vec![(i64::from(w) - 1, 0)], "logic".to_string())
     } else {
         let (head, dims) = packed_dims(ty).ok_or_else(|| {
-            format!(
+            not_carried(format!(
                 "cannot map an index of `{name}` to a bit position: its type `{ty}` is not a plain \
                  packed vector (`logic [hi:lo]`), a packed array or a packed struct"
-            )
+            ))
         })?;
         (dims, head)
     };
@@ -4201,11 +4248,11 @@ fn call_arg_signal(call: &Value) -> Result<(&str, u32), String> {
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{sub} without an argument list"))?;
     if args.len() != 1 {
-        return Err(format!(
-            "{sub} with {} arguments; this Tier-2 call takes a single signal \
-             (only `$past` carries a depth argument)",
+        return Err(not_carried(format!(
+            "{sub} with {} arguments; this call takes a single signal (only `$past` carries a \
+             depth argument)",
             args.len()
-        ));
+        )));
     }
     let arg = unwrap(&args[0]);
     let sig = signal_name(arg).map_err(|_| format!("{sub} argument is not a plain signal"))?;
@@ -4371,10 +4418,13 @@ fn signed_comparison_guard(left: &Value, right: &Value, op: &str) -> Result<(), 
         let w = signal_width(unwrap(sig));
         let half = 1i64.checked_shl(w.saturating_sub(1)).unwrap_or(i64::MAX);
         if w < 63 && (v >= half || v < -half) {
-            return Err(format!(
-                "signed equality `{name} {op} {v}`: {v} is outside the signed range of the \
-                 {w}-bit `{name}`, where sign extension makes SV's answer differ from the bit \
-                 pattern; not supported yet"
+            return Err(crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "signed equality `{name} {op} {v}`: {v} is outside the signed range of the \
+                     {w}-bit `{name}`, where sign extension makes SV's answer differ from the \
+                     bit pattern"
+                ),
+                Some("compare against a value inside the range, or against the bit pattern"),
             ));
         }
     }
@@ -4730,7 +4780,7 @@ mod tests {
         }));
         let err = property_body(&unb, &TranslateOptions::default(), &mut Vec::new())
             .expect_err("unbounded must reject");
-        assert!(err.contains("Tier-3b"), "got: {err}");
+        assert!(err.contains("a mununu limitation"), "got: {err}");
         // Range repetition `c[*1:3]` — Tier-3b.
         let rng = mk(serde_json::json!({
             "kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 c"},
@@ -4738,7 +4788,7 @@ mod tests {
         }));
         let err = property_body(&rng, &TranslateOptions::default(), &mut Vec::new())
             .expect_err("range repetition must reject");
-        assert!(err.contains("Tier-3b"), "got: {err}");
+        assert!(err.contains("a mununu limitation"), "got: {err}");
         // A repetition INSIDE a multi-element chain — length composition, Tier-3b.
         let chain_rep = mk(serde_json::json!({
             "kind": "SequenceConcat", "elements": [
@@ -4749,7 +4799,7 @@ mod tests {
         }));
         let err = property_body(&chain_rep, &TranslateOptions::default(), &mut Vec::new())
             .expect_err("repetition in a chain must reject");
-        assert!(err.contains("Tier-3b"), "got: {err}");
+        assert!(err.contains("a mununu limitation"), "got: {err}");
     }
 
     #[test]
@@ -7619,7 +7669,7 @@ mod tests {
                         (simple(sig("c")), n(1), n(1)),
                     ]),
                 ),
-                Rejected("Tier-3b"),
+                Rejected("a mununu limitation"),
             ),
             (
                 "a |-> b[*2:$] — unbounded repetition as the whole consequent ≡ b[*2] (2026-10-15)",
@@ -7662,17 +7712,17 @@ mod tests {
                     simple(sig("a")),
                     rep(sig("b"), "Consecutive", n(1), n(3)),
                 ),
-                Rejected("Tier-3b"),
+                Rejected("a mununu limitation"),
             ),
             (
                 "a |-> b[->2] — goto repetition",
                 imp(ov, simple(sig("a")), rep(sig("b"), "GoTo", n(2), n(2))),
-                Rejected("Tier-3b"),
+                Rejected("a mununu limitation"),
             ),
             (
                 "a |-> b[->1] — a bare goto consequent is weak-vacuous without `throughout`",
                 imp(ov, simple(sig("a")), rep(sig("b"), "GoTo", n(1), n(1))),
-                Rejected("Tier-3b"),
+                Rejected("a mununu limitation"),
             ),
             (
                 "a |-> (c throughout b[->1]) — c until and including the first b, c forever if none (2026-10-18)",
@@ -7692,7 +7742,7 @@ mod tests {
                     simple(sig("a")),
                     rep(sig("b"), "Nonconsecutive", n(2), n(2)),
                 ),
-                Rejected("Tier-3b"),
+                Rejected("a mununu limitation"),
             ),
             (
                 "s_eventually b — AG AF b (2026-10-15)",

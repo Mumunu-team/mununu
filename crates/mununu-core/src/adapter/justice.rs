@@ -235,8 +235,11 @@ fn exact_rung(
         .collect();
     // ¬E_C G true: holds at EVERY initial state ⇔ no fair path from any of them.
     let formula_str = format!("!({})", fair_eg("true", &assumptions));
-    let formula = crate::mu_calculus::parser::parse(&formula_str)
-        .map_err(|e| format!("exact: fair-EG formula did not parse: {e}"))?;
+    let formula = crate::mu_calculus::parser::parse(&formula_str).map_err(|e| {
+        crate::adapter::owner::mununu_defect(&format!(
+            "exact: the fair-EG formula mununu built did not parse: {e}"
+        ))
+    })?;
     let out = exact_ladder(
         named,
         &formula,

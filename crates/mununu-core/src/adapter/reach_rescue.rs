@@ -826,7 +826,12 @@ pub fn safety_witness_by(
             } else {
                 "search"
             },
-            reason: reason.unwrap_or_else(|| "no trace and no reason (a defect)".to_string()),
+            reason: reason.unwrap_or_else(|| {
+                crate::adapter::owner::mununu_defect(&format!(
+                    "member `{}` reported a violation without a trace or a reason",
+                    shipped.by.unwrap_or("native-bmc")
+                ))
+            }),
             contradicted_by: Vec::new(),
         }),
     }

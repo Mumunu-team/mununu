@@ -3088,8 +3088,11 @@ pub fn verify_recoverability_scalable_with_source(
 
     // AG EF good, over the PREDICATE-NAME atom (the cube path resolves `good` to the
     // `good` predicate's 3-valued label, not a raw register comparison).
-    let formula = mu_parser::parse("nu Y. ((mu X. (good || <> X)) && [] Y)")
-        .map_err(|e| format!("building the AG EF cube formula: {e}"))?;
+    let formula = mu_parser::parse("nu Y. ((mu X. (good || <> X)) && [] Y)").map_err(|e| {
+        crate::adapter::owner::mununu_defect(&format!(
+            "the AG EF cube formula mununu built did not parse: {e}"
+        ))
+    })?;
 
     // SOUNDNESS: pin each predicate's register to its BTOR2 reset value via
     // `config_values`, so the cube lift's initial cube is the design's reset state.
@@ -3630,8 +3633,11 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
         .collect();
 
     // AG ¬bad, over the `bad` derived-predicate atom.
-    let formula = mu_parser::parse("nu X. ((not bad) and [] X)")
-        .map_err(|e| format!("safety cube path: building the AG ¬bad formula: {e}"))?;
+    let formula = mu_parser::parse("nu X. ((not bad) and [] X)").map_err(|e| {
+        crate::adapter::owner::mununu_defect(&format!(
+            "safety cube path: the AG ¬bad formula mununu built did not parse: {e}"
+        ))
+    })?;
 
     // Pin each seed predicate's register to its reset value (mandatory — an unpinned initial cube
     // defaults to all-false, not the reset state, and can falsely report Violated).

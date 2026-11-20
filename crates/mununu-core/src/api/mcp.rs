@@ -137,7 +137,10 @@ fn tool_error(error: &ApiError) -> CallToolResult {
     let value = serde_json::to_value(&body).unwrap_or_else(|e| {
         serde_json::json!({
             "success": false,
-            "error": { "code": "INTERNAL_ERROR", "message": format!("the error body did not serialize: {e}") }
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": crate::adapter::owner::mununu_defect(&format!("the error body did not serialize: {e}")),
+            }
         })
     });
     let text = value.to_string();

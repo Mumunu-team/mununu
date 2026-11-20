@@ -136,6 +136,15 @@ impl Gr1Spec {
         Ok(spec)
     }
 
+    /// mununu#1121 U2.10 — a clause outside the GR(1) fragment: a limit of the technique, with
+    /// the full μ-calculus mode as the way out.
+    fn outside_fragment(what: &str) -> String {
+        crate::adapter::owner::technique_limit(
+            &format!("{what} is outside the GR(1) fragment this mode decides"),
+            "`--controller-mode product-game` on `context synth` decides the full μ-calculus",
+        )
+    }
+
     fn classify_one(&mut self, f: &LtlFormula, is_guarantee: bool) -> Result<(), String> {
         use LtlFormula::*;
         match f {
@@ -148,7 +157,7 @@ impl Gr1Spec {
             {
                 self.push_response(trigger, response, is_guarantee)
             }
-            other => Err(format!("unsupported GR(1) clause: {other}")),
+            other => Err(Self::outside_fragment(&format!("clause `{other}`"))),
         }
     }
 
@@ -171,14 +180,16 @@ impl Gr1Spec {
                 Eventually(resp) if is_propositional(resp) => {
                     self.push_response(pre, resp, is_guarantee)
                 }
-                other => Err(format!("unsupported G(pre -> {other})")),
+                other => Err(Self::outside_fragment(&format!(
+                    "clause `G(pre -> {other})`"
+                ))),
             },
             // G(prop) → invariant
             p if is_propositional(p) => {
                 self.safety.push(SafetyClause::Invariant(p.clone()));
                 Ok(())
             }
-            other => Err(format!("unsupported G({other})")),
+            other => Err(Self::outside_fragment(&format!("clause `G({other})`"))),
         }
     }
 
@@ -189,15 +200,24 @@ impl Gr1Spec {
             let mut ps = Vec::new();
             predicates_of(prop, &mut ps);
             if ps.iter().any(|p| self.outputs.contains(p)) {
-                return Err(format!(
-                    "GF guarantee over outputs not yet supported: {prop} \
-                     (needs a last-output monitor)"
+                return Err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "GF guarantee over outputs (`{prop}`) is inside the fragment but this \
+                         mode does not build the last-output monitor it needs"
+                    ),
+                    Some("`--controller-mode product-game` on `context synth`"),
                 ));
             }
             // GF over inputs as a *guarantee* is degenerate but harmless — treat
             // like an env recurrence the controller cannot influence. Reject to
             // stay honest.
-            return Err(format!("GF guarantee over non-output signals: {prop}"));
+            return Err(crate::adapter::owner::technique_limit(
+                &format!(
+                    "GF guarantee over non-output signals (`{prop}`) is not a controller \
+                     obligation, since the controller drives no signal in it"
+                ),
+                "move it to the assumptions",
+            ));
         }
         self.env_fair.push(prop.clone());
         Ok(())
@@ -210,10 +230,14 @@ impl Gr1Spec {
         is_guarantee: bool,
     ) -> Result<(), String> {
         if !is_guarantee {
-            return Err("response as an assumption is not supported".to_string());
+            return Err(Self::outside_fragment(
+                "a `G(a -> F b)` response as an assumption",
+            ));
         }
         if !is_propositional(trigger) || !is_propositional(response) {
-            return Err("response with temporal trigger/response is unsupported".to_string());
+            return Err(Self::outside_fragment(
+                "a response whose trigger or response is temporal",
+            ));
         }
         self.responses.push(ResponseClause {
             trigger: trigger.clone(),
@@ -982,6 +1006,10 @@ mod tests {
         )
         .err()
         .expect("an until clause is outside the fragment");
-        assert_eq!(err, "unsupported GR(1) clause: p U q");
+        assert!(
+            err.starts_with("clause `p U q` is outside the GR(1) fragment")
+                && err.contains("a limit of the technique"),
+            "{err}"
+        );
     }
 }

@@ -167,15 +167,15 @@ fn same_width(what: &str, want: u32, parts: &[&ExprIr]) -> Result<(), String> {
     if parts.iter().all(|p| p.width() == want) {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::adapter::owner::mununu_defect(&format!(
             "unexpected width mismatch in `{what}`: result {want} bits, operands {} — refusing \
-             to guess the conversion",
+             to guess the conversion (slang supplies the widths; the expression lift disagrees)",
             parts
                 .iter()
                 .map(|p| p.width().to_string())
                 .collect::<Vec<_>>()
                 .join("/")
-        ))
+        )))
     }
 }
 
@@ -268,9 +268,13 @@ pub fn build_expr(node: &Value, cx: &mut BuildCtx) -> Result<ExprIr, String> {
                 ));
             }
             if is_unpacked_array(node) {
-                return Err(format!(
-                    "`{}` is an unpacked array; an expression over array content is not supported",
-                    signal_name(node).unwrap_or("?")
+                return Err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "`{}` is an unpacked array; the expression lift does not read array \
+                         content",
+                        signal_name(node).unwrap_or("?")
+                    ),
+                    None,
                 ));
             }
             let name = signal_name(node)?.to_string();
@@ -357,8 +361,13 @@ pub fn build_expr(node: &Value, cx: &mut BuildCtx) -> Result<ExprIr, String> {
             Ok(e)
         }
         "Call" => build_call(node, cx),
-        other => Err(format!(
-            "expression kind `{other}` is not supported in an expression"
+        other => Err(crate::adapter::owner::mununu_limitation(
+            &format!(
+                "expression kind `{other}` is not translated; the expression lift takes a \
+                 conversion, an integer literal, a signal, an element / range / member select, \
+                 a unary or binary operator, `?:`, a concatenation, a replication and a call"
+            ),
+            None,
         )),
     }
 }
@@ -405,10 +414,11 @@ fn build_select(node: &Value, cx: &mut BuildCtx) -> Result<ExprIr, String> {
     }
     let base_node = node.get("value").ok_or("ElementSelect without value")?;
     if is_unpacked_array(base_node) {
-        return Err(
-            "an element of an unpacked array (array content) is not supported in an expression"
-                .to_string(),
-        );
+        return Err(crate::adapter::owner::mununu_limitation(
+            "an element of an unpacked array (array content) in an expression; the expression \
+             lift does not read array content",
+            None,
+        ));
     }
     let ty = base_node.get("type").and_then(Value::as_str).unwrap_or("");
     let Some((_, dims)) = packed_dims(ty) else {
@@ -476,11 +486,12 @@ fn build_binary(node: &Value, cx: &mut BuildCtx) -> Result<ExprIr, String> {
     let cmp = |cop: CmpOp, cx: &mut BuildCtx| -> Result<ExprIr, String> {
         let (a, b) = (build_expr(ln, cx)?, build_expr(rn, cx)?);
         if a.width() != b.width() {
-            return Err(format!(
-                "unexpected width mismatch in `{op}`: operands {} and {} bits",
+            return Err(crate::adapter::owner::mununu_defect(&format!(
+                "unexpected width mismatch in `{op}`: operands {} and {} bits (slang supplies \
+                 the widths; the expression lift disagrees)",
                 a.width(),
                 b.width()
-            ));
+            )));
         }
         Ok(ExprIr::Cmp {
             op: cop,
@@ -600,9 +611,13 @@ fn build_call(node: &Value, cx: &mut BuildCtx) -> Result<ExprIr, String> {
     match sub {
         "$past" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(format!(
-                    "$past with {} arguments (a gated or clocked $past is not supported)",
-                    args.len()
+                return Err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "$past with {} arguments; the expression lift takes `$past(expr)` and \
+                         `$past(expr, depth)` only, not a gated or clocked `$past`",
+                        args.len()
+                    ),
+                    None,
                 ));
             }
             let depth = match args.get(1) {
@@ -732,8 +747,13 @@ fn build_call(node: &Value, cx: &mut BuildCtx) -> Result<ExprIr, String> {
             Ok(resize(e, w, false))
         }
         s if !s.starts_with('$') => inline_call(node, s, args, w, cx),
-        other => Err(format!(
-            "system call `{other}` is not supported in an expression"
+        other => Err(crate::adapter::owner::mununu_limitation(
+            &format!(
+                "system call `{other}` is not translated in an expression; the expression lift \
+                 takes `$past`, `$signed`, `$unsigned`, `$stable`, `$changed`, `$rose`, `$fell`, \
+                 `$countones`, `$onehot` and `$onehot0`"
+            ),
+            None,
         )),
     }
 }
@@ -768,7 +788,13 @@ fn inline_call(
         _ => None,
     }
     .ok_or_else(|| {
-        format!("`{name}`'s body is not a single `return <expr>;`, so it cannot be inlined")
+        crate::adapter::owner::mununu_limitation(
+            &format!(
+                "`{name}`'s body is not a single `return <expr>;`; the expression lift inlines \
+                 single-return functions only"
+            ),
+            None,
+        )
     })?;
     let formals = def
         .get("arguments")

@@ -983,11 +983,12 @@ fn read_lift_snapshot(path: &Path, what: &str) -> Result<String, AdapterError> {
 fn lift_snapshot_error(path: &Path, what: &str, why: &str) -> AdapterError {
     AdapterError {
         kind: AdapterErrorKind::ParseError,
-        message: format!(
+        message: crate::adapter::owner::mununu_defect(&format!(
             "adapter/yosys: yosys ran but its {what} snapshot {} cannot be used ({why}); without \
-             it the multi-clock refusal and the black-box scan would be skipped",
+             it the multi-clock refusal and the black-box scan would be skipped (please include \
+             the yosys log)",
             path.display()
-        ),
+        )),
         location: None,
     }
 }

@@ -884,10 +884,10 @@ impl BddBitBlaster {
         // as ARENA exhaustion — the wrong budget, and a knob that cannot help. Check first and
         // abstain with the real reason; a malformed model is never something a retry fixes.
         if let Err(e) = crate::adapter::btor2::parser::check_sorts(file) {
-            return Err(format!(
-                "exact bit-blaster: the prepared model is ill-sorted ({e}) — an internal rewrite \
-                 defect, not a property of the design; abstained"
-            ));
+            return Err(crate::adapter::owner::mununu_defect(&format!(
+                "exact bit-blaster: the prepared model is ill-sorted ({e}), an internal rewrite \
+                 defect and not a property of the design, so the engine abstained"
+            )));
         }
         let build_passes =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
@@ -1412,16 +1412,17 @@ impl BddBitBlaster {
                 let b = self.zero_extend(&sum, w);
                 self.cmp_bits(&a, *op, &b, w as u32)
             }
-            PredicateExpr::And(a, b) => {
-                oom(self.predicate_bdd(a)?.and(&self.predicate_bdd(b)?))
-            }
+            PredicateExpr::And(a, b) => oom(self.predicate_bdd(a)?.and(&self.predicate_bdd(b)?)),
             PredicateExpr::Or(a, b) => oom(self.predicate_bdd(a)?.or(&self.predicate_bdd(b)?)),
             PredicateExpr::Not(a) => oom(self.predicate_bdd(a)?.not()),
-            PredicateExpr::Select { .. } => Err(
-                "exact-symbolic ROBDD cannot bit-blast an array-content (Select) predicate — it is \
-                 SMT-only (predicate-cube path); the exact engine abstains on it"
-                    .to_string(),
-            ),
+            PredicateExpr::Select { .. } => Err(crate::adapter::owner::mununu_limitation(
+                "exact-symbolic ROBDD cannot bit-blast an array-content (Select) predicate, so the \
+                 exact engine abstains on it",
+                Some(
+                    "the predicate-cube engine decides array-content atoms through SMT \
+                     (`--engine symbolic` on `sv verify-auto` or `sv cegar`)",
+                ),
+            )),
         }
     }
 
@@ -2104,8 +2105,10 @@ impl AbstractRelation {
     /// `R_must`).
     pub fn evaluate(&self, formula: &Formula, pred_names: &[String]) -> Result<TritBdd, String> {
         let r_must = self.r_must.as_ref().ok_or_else(|| {
-            "AbstractRelation::evaluate requires a must relation — build with a MustSemantics"
-                .to_string()
+            crate::adapter::owner::mununu_defect(
+                "the symbolic cube evaluator was asked to evaluate a formula over an abstract \
+                 relation built without its must relation",
+            )
         })?;
         let name_to_idx: HashMap<&str, usize> = pred_names
             .iter()
@@ -2133,10 +2136,12 @@ impl AbstractRelation {
                 Some(&i) => TritBdd::from_parts(self.present[i].clone(), self.present[i].clone()),
                 None => self.tb_bot(),
             },
-            MuNode::Variable(v) => bindings
-                .get(v)
-                .cloned()
-                .ok_or_else(|| format!("unbound fixpoint variable #{}", v.index()))?,
+            MuNode::Variable(v) => bindings.get(v).cloned().ok_or_else(|| {
+                crate::adapter::owner::mununu_defect(&format!(
+                    "formula variable #{} is unbound in the symbolic cube evaluator",
+                    v.index()
+                ))
+            })?,
             MuNode::Not(n) => self.eval_node(f, *n, names, r_must, bindings)?.not(),
             MuNode::And(a, b) => {
                 let av = self.eval_node(f, *a, names, r_must, bindings)?;
@@ -2187,10 +2192,13 @@ impl AbstractRelation {
                     });
                 }
                 if guard.max_steps.is_some() {
-                    return Err(
-                        "symbolic cube evaluator: step-bounded modalities (`steps`) unsupported"
-                            .into(),
-                    );
+                    return Err(crate::adapter::owner::mununu_limitation(
+                        "symbolic cube evaluator: step-bounded modalities (`steps`) are not \
+                         carried over a predicate cube",
+                        Some(
+                            "`--engine explicit` on `sv verify-auto` or `sv cegar` evaluates them",
+                        ),
+                    ));
                 }
                 if !guard.labels.is_empty() {
                     return Err(
@@ -2681,9 +2689,15 @@ impl BvTermBackend for BddBitBlaster {
 
             // Out of R-F5.3a scope — later slices / never in the FSM+counter core.
             other => {
-                return Err(format!(
-                    "operator {} not yet supported in the R-F5.3a BDD bit-blaster",
-                    other.keyword()
+                return Err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "operator {} is not carried by the exact engine's BDD bit-blaster",
+                        other.keyword()
+                    ),
+                    Some(
+                        "the other engines take it (`--engine symbolic` on `sv verify-auto` or \
+                         `sv cegar`; the SAT and SMT members of the `btor2 verify` portfolio)",
+                    ),
                 ));
             }
         };
@@ -5117,10 +5131,12 @@ impl ExactModel {
                     .cloned()
                     .unwrap_or_else(|| self.ff.clone()),
             )?,
-            MuNode::Variable(v) => bindings
-                .get(v)
-                .cloned()
-                .ok_or_else(|| format!("unbound fixpoint variable #{}", v.index()))?,
+            MuNode::Variable(v) => bindings.get(v).cloned().ok_or_else(|| {
+                crate::adapter::owner::mununu_defect(&format!(
+                    "formula variable #{} is unbound in the exact engine's evaluator",
+                    v.index()
+                ))
+            })?,
             MuNode::Not(n) => {
                 self.tick(1);
                 // mununu#730 — `not` copies the operand's DAG (no complement edges), so it can
@@ -7586,14 +7602,17 @@ pub fn exact_env_strategy_exists(
 }
 
 /// Shared setup for the env-strategy witness: parse + resolve `good` to a state-atom BDD (via the sound
-/// Strict alias resolution) + build the cone-restricted exact bit-blaster. `None` when `good` is not a
-/// resolvable `REG op VALUE` atom or the model cannot be built (over-cap / array / input-atom).
+/// Strict alias resolution) + build the cone-restricted exact bit-blaster. `Err` says which of the
+/// three happened (mununu#1121 U2.10): the BTOR2 or `good` does not parse (the input), the exact model
+/// could not be built (the engine's own abstention, with its owner: the bit cap, an array, an
+/// input-atom), or the atom does not resolve over the model.
 fn build_atom_model(
     btor2_content: &str,
     good: &str,
-) -> Option<(BddBitBlaster, Btor2File, BDDFunction)> {
+) -> Result<(BddBitBlaster, Btor2File, BDDFunction), String> {
     use crate::adapter::btor2::parser;
-    let file = parser::parse(btor2_content).ok()?;
+    let file =
+        parser::parse(btor2_content).map_err(|e| format!("the BTOR2 does not parse: {e}"))?;
     let resolve = |name: &str| -> String {
         parser::resolve_to_canonical_name(
             &file,
@@ -7604,15 +7623,20 @@ fn build_atom_model(
         )
         .unwrap_or_else(|| name.to_string())
     };
-    let expr = resolve_predicate_expr_registers(&parse_predicate_atom_bool(good).ok()?, &resolve);
+    let atom = parse_predicate_atom_bool(good)
+        .map_err(|e| format!("`{good}` is not a `REG op VALUE` state atom: {e}"))?;
+    let expr = resolve_predicate_expr_registers(&atom, &resolve);
     let mut seed: std::collections::HashSet<String> = std::collections::HashSet::new();
     collect_predicate_registers(&expr, &mut seed);
     let seed_atoms: Vec<String> = seed.into_iter().collect();
     let keep_set = (!seed_atoms.is_empty())
         .then(|| crate::adapter::btor2::dep_graph::cone_leaf_nids(&file, &seed_atoms));
-    let bb = BddBitBlaster::build_with_keep(&file, keep_set.as_ref()).ok()?;
-    let good_bdd = bb.predicate_bdd(&expr).ok()?;
-    Some((bb, file, good_bdd))
+    let bb = BddBitBlaster::build_with_keep(&file, keep_set.as_ref())
+        .map_err(|e| format!("the exact model could not be built: {e}"))?;
+    let good_bdd = bb
+        .predicate_bdd(&expr)
+        .map_err(|e| format!("`{good}` does not resolve over the model: {e}"))?;
+    Ok((bb, file, good_bdd))
 }
 
 /// P2.5-E T2 — extract a concrete env-strategy WITNESS for `AG EF good`: the positional input discipline
@@ -7623,7 +7647,7 @@ fn build_atom_model(
 ///
 /// **Engine (§16):** `exact-symbolic` ROBDD — the `EF(good)` attractor + concrete minterm descent.
 pub fn exact_env_strategy_witness(btor2_content: &str, good: &str) -> Option<StallLasso> {
-    let (bb, file, good_bdd) = build_atom_model(btor2_content, good)?;
+    let (bb, file, good_bdd) = build_atom_model(btor2_content, good).ok()?;
     bb.reach_good_play(&file, &good_bdd)
         .unwrap_or_else(|reason| {
             tracing::warn!(%reason, "exact: the winning play could not be extracted — omitted");
@@ -7674,7 +7698,9 @@ pub fn exact_env_positional_strategy(
     good: &str,
 ) -> Option<PositionalStrategy> {
     use crate::adapter::btor2::parser;
-    let (bb, file, good_bdd) = build_atom_model(btor2_content, good)?;
+    // An `Option` entry point: the model's own reason is logged by the `Result` callers; here a
+    // failure is "no strategy" (mununu#1121 — the three causes are named on the strategy verbs).
+    let (bb, file, good_bdd) = build_atom_model(btor2_content, good).ok()?;
     let resolve = |name: &str| -> String {
         parser::resolve_to_canonical_name(
             &file,
@@ -7814,12 +7840,8 @@ pub fn exact_two_player_strategy(
     controllable: &[&str],
 ) -> Result<TwoPlayerStrategy, String> {
     use crate::adapter::btor2::parser;
-    let (bb, file, good_bdd) = build_atom_model(btor2_content, good).ok_or_else(|| {
-        format!(
-            "exact two-player strategy: `{good}` is not a resolvable `REG op VALUE` state atom, or the \
-             model can't be built (over the exact cap / array / input-atom)"
-        )
-    })?;
+    let (bb, file, good_bdd) = build_atom_model(btor2_content, good)
+        .map_err(|e| format!("exact two-player strategy: {e}"))?;
     // Validate the partition: every declared controllable input must be a real primary input, else it
     // would fall back SILENTLY to the environment (the same rule + rationale as `exact_two_player_verdict`).
     if !controllable.is_empty() {
@@ -7891,12 +7913,8 @@ pub fn exact_two_player_buchi_strategy(
     controllable: &[&str],
 ) -> Result<Option<TwoPlayerStrategy>, String> {
     use crate::adapter::btor2::parser;
-    let (bb, file, good_bdd) = build_atom_model(btor2_content, good).ok_or_else(|| {
-        format!(
-            "exact two-player recurrence strategy: `{good}` is not a resolvable `REG op VALUE` state \
-             atom, or the model can't be built (over the exact cap / array / input-atom)"
-        )
-    })?;
+    let (bb, file, good_bdd) = build_atom_model(btor2_content, good)
+        .map_err(|e| format!("exact two-player recurrence strategy: {e}"))?;
     // Validate the partition: every declared controllable input must be a real primary input (same rule +
     // rationale as `exact_two_player_strategy` — else it would fall back SILENTLY to the environment).
     if !controllable.is_empty() {
@@ -7977,12 +7995,8 @@ pub fn exact_two_player_recurrence_stall_lasso(
     good: &str,
     controllable: &[&str],
 ) -> Result<Option<StallLasso>, String> {
-    let (bb, file, good_bdd) = build_atom_model(btor2_content, good).ok_or_else(|| {
-        format!(
-            "exact recurrence stall lasso: `{good}` is not a resolvable `REG op VALUE` state atom, or \
-             the model can't be built (over the exact cap / array / input-atom)"
-        )
-    })?;
+    let (bb, file, good_bdd) = build_atom_model(btor2_content, good)
+        .map_err(|e| format!("exact recurrence stall lasso: {e}"))?;
     // Validate the partition: every declared controllable input must be a real primary input, else it
     // would fall back SILENTLY to the environment (the same rule + rationale as `exact_two_player_verdict`).
     if !controllable.is_empty() {
