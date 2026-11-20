@@ -18,6 +18,8 @@
 > [`proof-by-fire-findings.md`](proof-by-fire-findings.md) — this doc
 > grounds the "next concrete step" decision after Phase 1.6's runtime-
 > performance finding.
+>
+> Note (2026-11-20): `adapter/systemverilog/kripke.rs` and `kripke_smt.rs` were removed with the native SystemVerilog parser (commit 4f81f897); the references to them below are historical and no longer link to a file.
 
 ## Why this doc exists
 
@@ -60,13 +62,13 @@ The sidecar's `SignalAbstraction::Discover` is **not a runtime primitive** — i
 
 ### 1.2 — Enumeration: abstract cross-product vs concrete bit-blast
 
-The custom SV adapter's Kripke builder ([`adapter/systemverilog/kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs)) enumerates **the cross product of per-signal `FieldDomain` value sets** ([`adapter/state_enum.rs:14`](../../crates/mununu-core/src/adapter/state_enum.rs#L14)), not the cross product of raw bit vectors. For each abstract `(state, input)` pair it runs `compute_next_state()` over the parsed AST.
+The custom SV adapter's Kripke builder (`adapter/systemverilog/kripke.rs`) enumerates **the cross product of per-signal `FieldDomain` value sets** ([`adapter/state_enum.rs:14`](../../crates/mununu-core/src/adapter/state_enum.rs#L14)), not the cross product of raw bit vectors. For each abstract `(state, input)` pair it runs `compute_next_state()` over the parsed AST.
 
 The BTOR2 bit-blaster ([`adapter/btor2/bit_blast.rs`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs)) — after Phases 1.5 + 1.6 — *also* uses cross-product-over-per-cell-value-sets (`CellEnumeration` for states, `InputCellEnumeration` for inputs), driven by the same `FieldDomain` types resolved from the same sidecar shape. **The difference between the two enumerators is the front-end (parsed SV AST vs Yosys-emitted BTOR2), not the abstraction algebra.**
 
 ### 1.3 — SMT-based discovery (`mununu sv discover`)
 
-Source of truth: [`adapter/systemverilog/kripke_smt.rs:19-155`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L19). Requires `--features smt` (Z3 bitvector theory). CLI handler at [`crates/mununu-cli/src/main.rs`](../../crates/mununu-cli/src/main.rs) (search for `sv_discover`).
+Source of truth: `adapter/systemverilog/kripke_smt.rs:19-155`. Requires `--features smt` (Z3 bitvector theory). CLI handler at [`crates/mununu-cli/src/main.rs`](../../crates/mununu-cli/src/main.rs) (search for `sv_discover`).
 
 Algorithm:
 
@@ -84,9 +86,9 @@ Cross-module variant `sv_discover_multi` covers connected signals across module 
 | `FieldDomain` cross-product enumeration | ✓ via `kripke::build_kripke_with_config` | ✓ via `CellEnumeration` (state) + `InputCellEnumeration` (input) | **Yes** — already wired Phase 1.5 + 1.6 | [`bit_blast.rs` state side](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs); input side added 2026-05-18 |
 | `Boolean` / `BoundedCounter` / `EnumValues` / `Ignored` from sidecar | ✓ via `resolve_to_field_domain` | ✓ via `build_field_domains_for_btor2` + `build_input_field_domains` | **Yes** | [`sidecar/btor2_resolver.rs`](../../crates/mununu-core/src/adapter/sidecar/btor2_resolver.rs) |
 | `discover` → `EnumValues` conversion (when `discovered_values` is populated) | ✓ via [`sidecar/mod.rs:130-154`](../../crates/mununu-core/src/adapter/sidecar/mod.rs#L130) | **✓ — same resolver** (format-agnostic) | **Yes, latent.** Resolver fires for any caller; BTOR2 reader was wired in Phase 1.5/1.6 but never exercised on a `discover`-mode design. | The resolver function is shared; the path is reachable but unused in any shipped example |
-| SMT discovery of significant values (`mununu sv discover`) | ✓ via Z3 on the parsed SV AST | **✗ — discovery requires the custom SV parser** | **Partially.** The discovery step needs the SV adapter's AST. The *output* (`discovered_values` in sidecar) is consumable by the BTOR2 path via 1.3 above. | [`kripke_smt.rs:86`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L86) requires `&Module` (SV AST) |
+| SMT discovery of significant values (`mununu sv discover`) | ✓ via Z3 on the parsed SV AST | **✗ — discovery requires the custom SV parser** | **Partially.** The discovery step needs the SV adapter's AST. The *output* (`discovered_values` in sidecar) is consumable by the BTOR2 path via 1.3 above. | `kripke_smt.rs:86` requires `&Module` (SV AST) |
 | Cross-module discovery | ✓ for SV multi-module composition | ✗ N/A | n/a | Multi-module BTOR2 is a separate Yosys flow |
-| State-space ceiling check | ✓ at [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) line ~207 | ✓ `MAX_STATE_BITS` / `MAX_INPUT_BITS` caps in `bit_blast.rs` | **Yes, but value differs.** Custom SV checks abstract-state product against a soft ceiling; BTOR2 checks raw + effective bit width. | — |
+| State-space ceiling check | ✓ at `kripke.rs` line ~207 | ✓ `MAX_STATE_BITS` / `MAX_INPUT_BITS` caps in `bit_blast.rs` | **Yes, but value differs.** Custom SV checks abstract-state product against a soft ceiling; BTOR2 checks raw + effective bit width. | — |
 
 **Key reusability finding.** The BTOR2 path **already** honours every `FieldDomain` shape the SV adapter produces, including the `discover → EnumValues` derivation. *If* the user runs `mununu sv discover` and the resulting `discovered_values` are written into the same `.mununu.json` the BTOR2 reader auto-loads, those discovered values flow through to BTOR2 state / input enumeration with zero new code.
 

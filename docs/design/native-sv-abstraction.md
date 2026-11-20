@@ -1,6 +1,8 @@
 # Native SV → KMTS Architecture
 
 > **Status: planning.** This document describes a unified replacement for mununu's SystemVerilog extraction pipeline. The current native-parser path (§2) is documented here for context and slated for removal (§9). The proposed pipeline (§3–§7) and the validation milestones (§10) are not yet implemented; planning sub-sections do not carry `> Source of truth:` anchors. Sections that document existing code (§2, §5.1 baseline, §9 removal inventory) do anchor live symbols. Companion docs once shipped: [`kmts-theory.md`](kmts-theory.md), [`predicate-abstraction-recipe.md`](predicate-abstraction-recipe.md), [`abstraction-literature.md`](abstraction-literature.md), [`post-rf5-architecture.md`](post-rf5-architecture.md) (the end-to-end engine picture: explicit vs symbolic, IR layering, may/must + over/under/⊥ approximation).
+>
+> Note (2026-11-20): `adapter/systemverilog/kripke.rs` and `kripke_smt.rs` were removed with the native SystemVerilog parser (commit 4f81f897); the references to them below are historical and no longer link to a file.
 
 ## §1 Context
 
@@ -69,8 +71,8 @@ Multi-module (mununu_sv_multi_v1):
 - [`mod.rs`](../../crates/mununu-core/src/adapter/systemverilog/mod.rs) (~2 348 lines). `SystemVerilogAdapter` adapter struct; three entry points (`translate_with_path`, `translate_multi_module`, `translate_multi_module_content`); sidecar discovery; multi-module orchestration; [`annotate_driving_output_labels`](../../crates/mununu-core/src/adapter/systemverilog/mod.rs#L511) shim for shared-label connectivity.
 - [`parser.rs`](../../crates/mununu-core/src/adapter/systemverilog/parser.rs) (~2 539 lines). Hand-rolled recursive-descent parser. No tree-sitter, no `sv-parser`. Tracks `packages`, `type_scope`, `var_struct_types`, `warnings`. Recognises `package`/`typedef enum`/`typedef struct packed`, modules + ports + parameters, `always_ff`/`always_comb`, continuous `assign`, `if`/`case`/`casez`/`casex`, multi-precedence expressions. Skips with `UnsupportedConstruct` warnings: `generate`, `for`/`while`/`repeat`/`forever`, `function`/`task` definitions, `bind`, interfaces, `defparam`, `(* … *)` attributes (other than `keep`), `randc`/`rand`, `$past`/`$rose`/`$fell`/`$stable`, SVA `assert property`/`assume property`/`cover property`, immediate `assert`, real/shortreal, unpacked arrays, memories.
 - [`ast.rs`](../../crates/mununu-core/src/adapter/systemverilog/ast.rs) (~272 lines). `Module`, `Port`, `Parameter`, `Declaration { Enum | Logic }`, `AlwaysBlock { AlwaysFF | AlwaysComb }`, `Statement { If | Case | Block | NonblockingAssign | BlockingAssign }`, `Expr { Ident | Number | BinOp | Ternary | BitSelect | BitSlice | Concat | Not | Bool }`, `MununuProperty`, `MununuDomainAnnotation`, `ModuleInstantiation`.
-- [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) (~2 705 lines). [`build_kripke_with_config`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L126) is the top-level builder. Register extraction (~L132), syntactic-constant scan (~L135), COI prune (~L164–216), state-space cap check (errors at ≥ 2^18; warns at ≥ 2^12, ~L218–254), input-domain construction (~L257), cross-product enumeration (~L260–283), [`extract_initial_state`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L2205) (reset-branch scan), [`compute_next_state`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L1900) per (state, input), OOB sentinel routing, [`prune_unreachable_states`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L440) BFS prune, automaton-spec assembly. Carries 15+ `// SOUNDNESS:` annotations on its over-approximation decisions.
-- [`kripke_smt.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs) (~969 lines). [`discover_significant_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L20) — z3 BV per-guard *constant* enumeration: for each signal marked `abstraction: "discover"`, gather all guard expressions mentioning that signal, run z3 to enumerate up to 32 satisfying values. This is **not** predicate-image computation — it discovers per-signal constants in guards, not lifted predicates. Cross-module variant at L165–340.
+- `kripke.rs` (~2 705 lines). `build_kripke_with_config` is the top-level builder. Register extraction (~L132), syntactic-constant scan (~L135), COI prune (~L164–216), state-space cap check (errors at ≥ 2^18; warns at ≥ 2^12, ~L218–254), input-domain construction (~L257), cross-product enumeration (~L260–283), `extract_initial_state` (reset-branch scan), `compute_next_state` per (state, input), OOB sentinel routing, `prune_unreachable_states` BFS prune, automaton-spec assembly. Carries 15+ `// SOUNDNESS:` annotations on its over-approximation decisions.
+- `kripke_smt.rs` (~969 lines). `discover_significant_values` — z3 BV per-guard *constant* enumeration: for each signal marked `abstraction: "discover"`, gather all guard expressions mentioning that signal, run z3 to enumerate up to 32 satisfying values. This is **not** predicate-image computation — it discovers per-signal constants in guards, not lifted predicates. Cross-module variant at L165–340.
 - [`annotation.rs`](../../crates/mununu-core/src/adapter/systemverilog/annotation.rs) (~1 545 lines). `mununu_sv_annotation_v1` and `mununu_sv_multi_v1` sidecar schemas. `SignalAnnotation` per signal: `name`, `preserve`, `abstraction ∈ { Boolean | BitBlast | BoundedCounter | Enum | Discover | Ignored }`, `bound`, `variants`, `value_map`, `combinational`, `note`. Multi-module schema adds `connections`, `composition`, `blackbox_modules`.
 - [`fsm.rs`](../../crates/mununu-core/src/adapter/systemverilog/fsm.rs) (~319 lines). Typedef-enum FSM detection helper. `find_enum_state_var`, `extract_fsm`. Used to preserve enum-variant state names in synthesised controllers. Subsumed by predicate seeding in the new pipeline (§6.7).
 - [`emit_controller.rs`](../../crates/mununu-core/src/adapter/systemverilog/emit_controller.rs) (~312 lines). Synthesised-controller SV emission — `controller_to_systemverilog`. Synthesis-only output path; removed in §9 Tier A.
@@ -81,12 +83,12 @@ Multi-module (mununu_sv_multi_v1):
 
 | Variant | Where it lands in code | Effect |
 |---|---|---|
-| `Boolean` | `clamp_to_domain` in [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) ~L800 | 2-valued domain |
-| `BitBlast` | Per-bit eval in [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) ~L1700 | N individual 1-bit registers (capped at 4) |
+| `Boolean` | `clamp_to_domain` in `kripke.rs` ~L800 | 2-valued domain |
+| `BitBlast` | Per-bit eval in `kripke.rs` ~L1700 | N individual 1-bit registers (capped at 4) |
 | `BoundedCounter { bound }` | `clamp_to_domain` + OOB sentinel | `{0, 1, …, bound}` with overflow → sentinel |
-| `Enum { variants, value_map? }` | [`build_variant_to_numeric`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L636) | Named variant domain with bidirectional numeric binding |
-| `Discover` (default) | [`kripke_smt::discover_significant_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L20) → Enum | SMT-discovered constants become enum variants |
-| `Ignored` | COI prune in [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) ~L164 | Register dropped before enumeration |
+| `Enum { variants, value_map? }` | `build_variant_to_numeric` | Named variant domain with bidirectional numeric binding |
+| `Discover` (default) | `kripke_smt::discover_significant_values` → Enum | SMT-discovered constants become enum variants |
+| `Ignored` | COI prune in `kripke.rs` ~L164 | Register dropped before enumeration |
 
 §9 replaces `BitBlast`, `BoundedCounter`, `Enum`, and `Discover` with a single `predicates: Vec<MuFormula>` sidecar field (§6.7).
 
@@ -160,7 +162,7 @@ The mapping below is already mununu's existing convention (per [`CLAUDE.md`](../
 
 Each SV `always_ff`-driven register is persistent state. The natural per-module state space is the product of register valuations — optionally bit-blasted, optionally kept word-level when the predicate set requires word-level granularity (the predicate-abstraction §6.6 case). States are post-clock-edge configurations.
 
-Today's [`build_kripke_with_config`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L126) reads registers from `Declaration::Logic` and `Declaration::Enum` in the parsed AST. The BTOR2 lifter reads them from BTOR2 `state` nodes (which carry the named register identifier and bit width) plus `init` nodes for reset values.
+Today's `build_kripke_with_config` reads registers from `Declaration::Logic` and `Declaration::Enum` in the parsed AST. The BTOR2 lifter reads them from BTOR2 `state` nodes (which carry the named register identifier and bit width) plus `init` nodes for reset values.
 
 ### §4.2 Wires / ports → labels on transitions
 
@@ -341,7 +343,7 @@ Both audits land in the same R.1 PR as the `TransitionModality` field addition.
 
 ### §6.6 Predicate-image construction from BTOR2
 
-Extension of the existing [`kripke_smt::discover_significant_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L20) (z3 BV, per-guard constant enumeration) to *predicate* image: `∃ s. ϕ(s) ∧ p_i(s)` for each predicate `p_i ∈ P`. Per the pillow plan A.4a finding, the algorithm is correct under `setundef -anyseq`; what fails today is the *consumer* (explicit-state bit-blast cap), not the discovery. KMTS sidesteps the cap because abstract states are predicate cubes (`2^|P|`), not concrete cross-products of register valuations.
+Extension of the existing `kripke_smt::discover_significant_values` (z3 BV, per-guard constant enumeration) to *predicate* image: `∃ s. ϕ(s) ∧ p_i(s)` for each predicate `p_i ∈ P`. Per the pillow plan A.4a finding, the algorithm is correct under `setundef -anyseq`; what fails today is the *consumer* (explicit-state bit-blast cap), not the discovery. KMTS sidesteps the cap because abstract states are predicate cubes (`2^|P|`), not concrete cross-products of register valuations.
 
 Two-mode operation:
 
@@ -546,14 +548,14 @@ Inventory of code that becomes vestigial under the new pipeline. Each Tier has a
 |---|---|---|
 | [`emit_controller.rs`](../../crates/mununu-core/src/adapter/systemverilog/emit_controller.rs) | 312 | Confirm no fixture exercises `mununu synthesise --emit-sv`. Synthesised-controller emission moves to a per-pipeline post-process if any user needs it later. |
 | `AbstractionType::BitBlast` variant | ~120 (handler in `kripke.rs` + sidecar parsing in `annotation.rs`) | Cap was 4 bits — predicate abstraction subsumes it. Verify no fixture sets `BitBlast` for > 2-bit signals. |
-| OOB sentinel routing in [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) (`__mununu_oob__` construction + tied `// SOUNDNESS:` annotations at ~L343, L2067, L2117) | ~180 | Predicate abstraction handles overflow via §8.6 — UNSAT on the predicate-image query for out-of-range successors. The sentinel state, its insertion logic, its formula-evaluator masking, and its `// SOUNDNESS:` annotations all go together. |
+| OOB sentinel routing in `kripke.rs` (`__mununu_oob__` construction + tied `// SOUNDNESS:` annotations at ~L343, L2067, L2117) | ~180 | Predicate abstraction handles overflow via §8.6 — UNSAT on the predicate-image query for out-of-range successors. The sentinel state, its insertion logic, its formula-evaluator masking, and its `// SOUNDNESS:` annotations all go together. |
 
 ### §9.2 Tier B — extraction-only, removable after R.1 + R.2 + fixture-sweep verdict-baseline match
 
 | Target | Lines | Removal condition |
 |---|---|---|
 | [`fsm.rs`](../../crates/mununu-core/src/adapter/systemverilog/fsm.rs) | 319 | Predicate seeding from BTOR2 IR (§6.7) covers all current uses. Verify by running the KMTS lifter on every fixture that today exercises `fsm::extract_fsm` and confirming verdict polarity matches. |
-| `value_map` symbolic-constant binding in `SignalAnnotation` + `build_variant_to_numeric` ([`kripke.rs:L636`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L636)) | ~180 | Existed for human-readable state names in synthesised controllers. Verification doesn't need it; predicate names suffice. |
+| `value_map` symbolic-constant binding in `SignalAnnotation` + `build_variant_to_numeric` (`kripke.rs:L636`) | ~180 | Existed for human-readable state names in synthesised controllers. Verification doesn't need it; predicate names suffice. |
 | `SignalAbstraction::Enum` variant (with `variants` + `value_map`) | ~150 | Replaced by `predicates: Vec<MuFormula>` per §6.7. Migration: each `Enum { variants: [A, B, C] }` becomes three predicates `is_A`, `is_B`, `is_C`. |
 | `SignalAbstraction::BoundedCounter { bound }` variant | ~140 | Replaced by predicates `count == 0`, …, `count == bound`. Migration: each `BoundedCounter { bound: N }` becomes `N + 1` predicates. |
 
@@ -580,7 +582,7 @@ Verdict-polarity match against the R.0c baseline is necessary but **not sufficie
 |---|---|---|
 | Native SV [`parser.rs`](../../crates/mununu-core/src/adapter/systemverilog/parser.rs) | 2 539 | (1) sv2v + Yosys covers all parsed SV constructs (§3.1). (2) Verdict polarity matches the R.0c baseline on the SVA-elision-gate pass set. (3) SVA-elision gate empty for every removed-from-native fixture. |
 | Native SV [`ast.rs`](../../crates/mununu-core/src/adapter/systemverilog/ast.rs) | 272 | Goes with `parser.rs`. |
-| Bulk of [`kripke.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) — `build_kripke_with_config`, `enumerate_cross_product` consumer, `compute_next_state` | ~1 800 (of 2 705) | The KMTS lifter replaces the cross-product enumeration. Keep `kripke_smt.rs` as the predicate-image SMT helper. |
+| Bulk of `kripke.rs` — `build_kripke_with_config`, `enumerate_cross_product` consumer, `compute_next_state` | ~1 800 (of 2 705) | The KMTS lifter replaces the cross-product enumeration. Keep `kripke_smt.rs` as the predicate-image SMT helper. |
 | Multi-module entry points + `mununu_sv_multi_v1` schema | ~600 (across `mod.rs` and `annotation.rs`) | The new pipeline drives composition from the top-module BTOR2 netlist (§4), not from a separate multi-module sidecar. Migrate fixtures: `mununu_sv_multi_v1` JSONs become `verify.toml` `[[sources]]` entries with `register_map`-style bindings. |
 
 ### §9.4 Tier D — sidecar schema migration, gated on Tier B + C
