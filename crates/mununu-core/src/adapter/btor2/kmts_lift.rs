@@ -1774,7 +1774,7 @@ fn apply_sampled_must_inference(
                 warnings.push(crate::adapter::AdapterWarning {
                     kind: approx,
                     message: format!(
-                        "[R.2.5b-smt-must] {source_tag}: SmtPerTarget post-pass promoted {sharp} edge(s) to Sharp via Z3 BV-theory must-check (stronger ∀∀ form). The standard ∀∃ form may promote additional edges; see `MustEdgeInference::SmtPerTargetStandard`. Hyper-must inference: see `MustEdgeInference::SmtHyperMust`."
+                        "{source_tag}: the per-target must check (the stronger ∀∀ form, Z3 bit-vector theory) promoted {sharp} may-edge(s) to must edges. The standard ∀∃ form (`--must-edge-inference smt-per-target-standard` on `btor2 cegar` and `sv cegar`) may promote more; `smt-hyper-must` adds hyper-must edges."
                     ),
                     location: None,
                 });
@@ -1817,7 +1817,7 @@ fn apply_sampled_must_inference(
                 warnings.push(crate::adapter::AdapterWarning {
                     kind: approx,
                     message: format!(
-                        "[R.2.5b-smt-must-standard] {source_tag}: SmtPerTargetStandard post-pass promoted {sharp} edge(s) to Sharp via Z3 ∀∃ must-check (canonical KMTS form per Bruns–Godefroid CONCUR 2000). Hyper-must inference: see `MustEdgeInference::SmtHyperMust`."
+                        "{source_tag}: the per-target must check (standard ∀∃ form, the canonical KMTS form per Bruns–Godefroid CONCUR 2000) promoted {sharp} may-edge(s) to must edges. `--must-edge-inference smt-hyper-must` on `btor2 cegar` and `sv cegar` adds hyper-must edges."
                     ),
                     location: None,
                 });
@@ -1914,7 +1914,7 @@ fn apply_sampled_must_inference(
                 warnings.push(crate::adapter::AdapterWarning {
                     kind: approx,
                     message: format!(
-                        "[R.2.5b-smt-must-hyper] {source_tag}: SmtHyperMust post-pass promoted {sharp} edge(s) to Sharp + emitted {hyper} MustHyperOnly edge(s) via Z3 ∀∃ checks. Hyper-must targets = full sampled set (MVP doesn't minimize T)."
+                        "{source_tag}: the hyper-must check promoted {sharp} may-edge(s) to must edges and added {hyper} hyper-must edge(s) (Z3 ∀∃ checks). Each hyper-must target set is the full sampled successor set, not minimised."
                     ),
                     location: None,
                 });
@@ -1988,10 +1988,10 @@ fn assert_must_subset_may(
                             kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                             location: None,
                             message: crate::adapter::owner::mununu_defect(&format!(
-                                "adapter/btor2/kmts_lift: KMTS invariant R_must ⊆ R_may violated — \
-                                 the MustHyperOnly edge from state {} names hyper-target {} which is \
-                                 not a may-successor of it (a hyper-must target set must be a subset \
-                                 of the emitted may-relation, docs/design/past-shadow-soundness.md §6)",
+                                "adapter/btor2/kmts_lift: the lift emitted a hyper-must edge with no \
+                                 may counterpart — from state {} to hyper-target {}, which is not a \
+                                 may-successor of it (a hyper-must target set must be a subset of \
+                                 the emitted may-relation)",
                                 sid.index(),
                                 tgt.index()
                             )),
@@ -2662,9 +2662,10 @@ fn ensure_compound_lift_supported(
         return Err(AdapterError {
             kind: crate::adapter::AdapterErrorKind::UnsupportedConstruct,
             location: None,
-            message: "adapter/btor2/lift_predicate_cube: compound predicates require \
-                      may_edge_inference = SmtAllPairs (the sampling representative is sound \
-                      only for simple register==value atoms)"
+            message: "adapter/btor2/lift_predicate_cube: compound predicates need the \
+                      all-pairs SMT may-edge inference (`--may-edge-inference smt-all-pairs` \
+                      on `btor2 cegar` and `sv cegar`, their default); the sampling \
+                      representative is sound only for simple register==value atoms"
                 .to_string(),
         });
     }
@@ -2780,10 +2781,10 @@ pub fn predicate_cube_lift(
         // UfRepresentative::Zero and UfRepresentative::Ones per
         // (cube, input combo) → 2× may-edges in the lifted Clts.
         let message = format!(
-            "R.5b predicate-image: {} Op(s) UF-wrapped (substituted to zero AND ones via the \
-             multi-value enumeration in simulate-one-step). SOUND for safety (may-side \
-             over-approximation per §6.10); the wrapped cells' downstream cube successors may \
-             shift toward KleeneBot. To remove a wrapping, list the cell in the sidecar's \
+            "predicate-image: {} operator(s) UF-wrapped (substituted to zero AND ones via the \
+             multi-value enumeration in simulate-one-step). SOUND for safety (a may-side \
+             over-approximation); the wrapped cells' downstream cube successors may \
+             shift toward undecided (⊥). To remove a wrapping, list the cell in the sidecar's \
              `uf_unwrap` field.",
             uf_wrapped_nids.len()
         );
@@ -3199,7 +3200,7 @@ pub fn predicate_cube_lift(
                         warnings.push(crate::adapter::AdapterWarning {
                             kind: crate::adapter::WarningKind::ApproximateTranslation,
                             message: format!(
-                                "[B.2 may+hyper-must] predicate_cube_lift: SmtAllPairs may + SmtHyperMust composition promoted {promoted} ∀∃ singleton edge(s) to Sharp and emitted {emitted} MustHyperOnly edge(s) over the un-promoted sources' may-successor sets ({how}; monotone under refinement per Shoham–Grumberg LMCS 2007). Compound/νμ verdicts over this KMTS are clean-sound. Hyper-must targets = full may-successor set (not minimized)."
+                                "predicate_cube_lift: the may/must composition promoted {promoted} ∀∃ singleton edge(s) to must edges and added {emitted} hyper-must edge(s) over the un-promoted sources' may-successor sets ({how}; monotone under refinement per Shoham–Grumberg LMCS 2007). Compound/νμ verdicts over this KMTS are clean-sound. Each hyper-must target set is the full may-successor set, not minimised."
                             ),
                             location: None,
                         });
@@ -3236,7 +3237,7 @@ pub fn predicate_cube_lift(
                         warnings.push(crate::adapter::AdapterWarning {
                             kind: crate::adapter::WarningKind::ApproximateTranslation,
                             message: format!(
-                                "[P1 #3 may+must] predicate_cube_lift: SmtAllPairs may + SMT must composition promoted {promoted} edge(s) MayOnly → Sharp via the canonical ∀∃ must-relation restricted to the emitted may-edges (Z3-proved; sound under-approximation, R_must ⊆ R_may by construction). The resulting KMTS carries both may (over-approx) and must (under-approx) edges, enabling sound DEFINITE 3-valued verdicts."
+                                "predicate_cube_lift: the may/must composition promoted {promoted} may-edge(s) to must edges via the canonical ∀∃ must-relation restricted to the emitted may-edges (Z3-proved; a sound under-approximation, R_must ⊆ R_may by construction). The resulting KMTS carries both may (over-approx) and must (under-approx) edges, enabling sound DEFINITE 3-valued verdicts."
                             ),
                             location: None,
                         });
@@ -3265,8 +3266,9 @@ pub fn predicate_cube_lift(
                 location: None,
                 message: format!(
                     "adapter/btor2/predicate_cube_lift: predicate `{}` is over the combinational \
-                     signal `{}`, which the sampling may-inference cannot evaluate; use \
-                     may_edge_inference = SmtAllPairs (the uniform predicate-image)",
+                     signal `{}`, which the sampling may-inference cannot evaluate; use the \
+                     all-pairs SMT may-edge inference (`--may-edge-inference smt-all-pairs` on \
+                     `btor2 cegar` and `sv cegar`, the uniform predicate-image)",
                     comb.name, comb.register
                 ),
             });
@@ -3355,7 +3357,7 @@ pub fn predicate_cube_lift(
                         kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                         location: None,
                         message: crate::adapter::owner::mununu_defect(&format!(
-                            "adapter/btor2/predicate_cube_lift R.6.6: env label intern failed: {e}"
+                            "adapter/btor2/predicate_cube_lift: the lift could not register the environment label ({e})"
                         )),
                     })?;
                 builder.set_label_controllability(
@@ -3373,7 +3375,7 @@ pub fn predicate_cube_lift(
                         kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                         location: None,
                         message: crate::adapter::owner::mununu_defect(&format!(
-                            "adapter/btor2/predicate_cube_lift R.6.6: ctrl label intern failed: {e}"
+                            "adapter/btor2/predicate_cube_lift: the lift could not register the controller label ({e})"
                         )),
                     })?;
                 builder.set_label_controllability(
@@ -5830,7 +5832,7 @@ mod tests {
         )
         .expect_err("the sampler cannot evaluate a combinational signal");
         assert!(
-            err.message.contains("`out`") && err.message.contains("SmtAllPairs"),
+            err.message.contains("`out`") && err.message.contains("smt-all-pairs"),
             "names the signal and the path that can: {}",
             err.message
         );
@@ -6522,8 +6524,9 @@ mod tests {
         let err = predicate_cube_lift(preds, btor2, &AdapterOptions::default(), &opts)
             .expect_err("compound + sampling must error");
         assert!(
-            err.message.contains("compound predicates require"),
-            "expected the SmtAllPairs gate error; got: {}",
+            err.message
+                .contains("compound predicates need the all-pairs SMT may-edge inference"),
+            "expected the all-pairs gate error; got: {}",
             err.message
         );
     }
@@ -6947,12 +6950,12 @@ mod tests {
         // Soundness warning fires when any promotion happens.
         if result.sharp_edges_promoted > 0 {
             let any_smt_warning = result.warnings.iter().any(|w| {
-                w.message.contains("R.2.5b-smt-must")
+                w.message.contains("must check")
                     && matches!(w.kind, crate::adapter::WarningKind::ApproximateTranslation)
             });
             assert!(
                 any_smt_warning,
-                "SmtPerTarget must emit the [R.2.5b-smt-must] warning when it promotes edges; got warnings: {:?}",
+                "SmtPerTarget must emit the must-check warning when it promotes edges; got warnings: {:?}",
                 result.warnings
             );
         }
@@ -7037,12 +7040,12 @@ mod tests {
         );
         if result.sharp_edges_promoted > 0 {
             let any_smt_warning = result.warnings.iter().any(|w| {
-                w.message.contains("R.2.5b-smt-must")
+                w.message.contains("must check")
                     && matches!(w.kind, crate::adapter::WarningKind::ApproximateTranslation)
             });
             assert!(
                 any_smt_warning,
-                "Lazy SmtPerTarget must emit [R.2.5b-smt-must] when promoting; got warnings: {:?}",
+                "Lazy SmtPerTarget must emit the must-check warning when promoting; got warnings: {:?}",
                 result.warnings
             );
         }
@@ -7095,12 +7098,12 @@ mod tests {
         );
         if result.sharp_edges_promoted > 0 {
             let any_warning = result.warnings.iter().any(|w| {
-                w.message.contains("R.2.5b-smt-must-standard")
+                w.message.contains("standard ∀∃ form")
                     && matches!(w.kind, crate::adapter::WarningKind::ApproximateTranslation)
             });
             assert!(
                 any_warning,
-                "SmtPerTargetStandard must emit [R.2.5b-smt-must-standard] when promoting; \
+                "SmtPerTargetStandard must emit the standard-form warning when promoting; \
                  got warnings: {:?}",
                 result.warnings
             );
@@ -7166,12 +7169,12 @@ mod tests {
             .expect("lift succeeds");
         if result.sharp_edges_promoted > 0 || result.hyper_must_edges_emitted > 0 {
             let any_warning = result.warnings.iter().any(|w| {
-                w.message.contains("R.2.5b-smt-must-hyper")
+                w.message.contains("hyper-must check")
                     && matches!(w.kind, crate::adapter::WarningKind::ApproximateTranslation)
             });
             assert!(
                 any_warning,
-                "SmtHyperMust must emit [R.2.5b-smt-must-hyper] when promoting; \
+                "SmtHyperMust must emit the hyper-must-check warning when promoting; \
                  got warnings: {:?}",
                 result.warnings
             );
@@ -7265,8 +7268,8 @@ mod tests {
             }
             if result.sharp_edges_promoted > 0 || result.hyper_must_edges_emitted > 0 {
                 let pattern = match variant {
-                    MustEdgeInference::SmtPerTargetStandard => "R.2.5b-smt-must-standard",
-                    MustEdgeInference::SmtHyperMust => "R.2.5b-smt-must-hyper",
+                    MustEdgeInference::SmtPerTargetStandard => "standard ∀∃ form",
+                    MustEdgeInference::SmtHyperMust => "hyper-must check",
                     _ => unreachable!(),
                 };
                 let any_warning = result.warnings.iter().any(|w| {
@@ -7518,7 +7521,7 @@ mod tests {
             result.hyper_must_edges_emitted
         );
         let any_warning = result.warnings.iter().any(|w| {
-            w.message.contains("R.2.5b-smt-must-hyper")
+            w.message.contains("hyper-must check")
                 && matches!(w.kind, crate::adapter::WarningKind::ApproximateTranslation)
         });
         assert!(
@@ -8544,7 +8547,12 @@ mod tests {
             err.kind,
             crate::adapter::AdapterErrorKind::IrConsistencyError
         );
-        assert!(err.message.contains("R_must ⊆ R_may"));
+        assert!(
+            err.message
+                .contains("hyper-must edge with no may counterpart"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

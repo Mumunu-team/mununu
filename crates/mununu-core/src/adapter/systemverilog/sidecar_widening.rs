@@ -68,7 +68,7 @@ pub fn widen_sidecar(
     let widened = ann.apply_type_driven_widening(&typedefs);
     if !widened.is_empty() {
         summary.push(format!(
-            "R-S5: type-driven widening from SV typedefs: {}",
+            "type-driven widening from SV typedefs: {}",
             widened
                 .iter()
                 .map(|(s, t, n)| format!("{s}:{t}({n} variants)"))
@@ -95,7 +95,7 @@ pub fn widen_sidecar(
     let class_seeded = ann.apply_equivalence_class_seeding(&case_literals);
     if !class_seeded.is_empty() {
         summary.push(format!(
-            "R-S4: equivalence-class seeding (+OTHER catch-all): {}",
+            "equivalence-class seeding (+OTHER catch-all): {}",
             fmt_seeds(&class_seeded)
         ));
     }
@@ -103,7 +103,7 @@ pub fn widen_sidecar(
     let case_seeded = ann.apply_case_literal_seeding(&case_literals);
     if !case_seeded.is_empty() {
         summary.push(format!(
-            "R-S3: case-literal discriminators: {}",
+            "case-literal discriminators: {}",
             fmt_seeds(&case_seeded)
         ));
     }
@@ -111,7 +111,7 @@ pub fn widen_sidecar(
     let seeded = ann.apply_property_syntactic_seeding();
     if !seeded.is_empty() {
         summary.push(format!(
-            "R-S7: property-syntactic discriminators: {}",
+            "property-syntactic discriminators: {}",
             fmt_seeds(&seeded)
         ));
     }
@@ -132,7 +132,7 @@ pub fn widen_sidecar(
     let init_policy_overrides = ann.init_policy_overrides();
     if !init_policy_overrides.is_empty() {
         summary.push(format!(
-            "R-Y2: per-signal init-policy overrides: {}",
+            "per-signal init-policy overrides: {}",
             init_policy_overrides
                 .iter()
                 .map(|(n, p)| format!("{n}={}", p.as_str()))
@@ -203,10 +203,33 @@ module m(input logic clk); my_state_e st; endmodule
             "expected UNMATCHED_<n> widening; got: {json}"
         );
         assert!(
-            w.summary.iter().any(|s| s.starts_with("R-S5")),
-            "summary must record the R-S5 stage; got {:?}",
+            w.summary
+                .iter()
+                .any(|s| s.starts_with("type-driven widening")),
+            "summary must record the type-driven stage; got {:?}",
             w.summary
         );
+    }
+
+    /// mununu#1121 U2.7 — the per-stage summary the CLI prints speaks in the user's terms:
+    /// each stage is named by what it did (the typedef it widened from), never by a roadmap
+    /// tag (`R-S5:`), a tier, a phase or a Rust path.
+    #[test]
+    fn x1121_widening_summary_names_the_stage_without_a_roadmap_tag() {
+        let w = widen_sidecar(SIDECAR_TYPE_NAME, SV_WITH_ENUM, &[]);
+        assert!(
+            !w.summary.is_empty(),
+            "the typedef stage fires on this fixture"
+        );
+        for line in &w.summary {
+            assert!(
+                line.starts_with("type-driven widening from SV typedefs"),
+                "the stage is named by what it did; got: {line}"
+            );
+            for tag in ["Tier", "Phase", "R-", "::"] {
+                assert!(!line.contains(tag), "summary line carries `{tag}`: {line}");
+            }
+        }
     }
 
     #[test]

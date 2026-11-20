@@ -286,7 +286,7 @@ pub fn ag_state_atom(
         kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
         location: None,
         message: format!(
-            "concrete_oracle::ag_state_atom: `{signal}` does not resolve to a state cell \
+            "`{signal}` does not resolve to a state cell \
              (the AG(state-atom) fragment requires a state register or a value-alias of one)"
         ),
     })?;
@@ -359,7 +359,7 @@ pub fn ag_implies_next(
     // Consequent: a state cell (checked at the next state).
     let cons_cell = resolve_signal_symbol(file, &cons.signal, reset_pinned).ok_or_else(|| {
         err(format!(
-            "concrete_oracle::ag_implies_next: consequent `{}` does not resolve to a state cell",
+            "consequent `{}` does not resolve to a state cell",
             cons.signal
         ))
     })?;
@@ -369,7 +369,7 @@ pub fn ag_implies_next(
     let ante_is_input = bool_ins.iter().any(|n| n == &ante.signal);
     if ante_cell.is_none() && !ante_is_input {
         return Err(err(format!(
-            "concrete_oracle::ag_implies_next: antecedent `{}` is neither a state cell nor a \
+            "antecedent `{}` is neither a state cell nor a \
              1-bit primary input (out of the |=> fragment)",
             ante.signal
         )));

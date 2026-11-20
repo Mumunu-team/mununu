@@ -122,8 +122,8 @@ pub fn augment_with_past_shadows(
             message: format!(
                 "adapter/btor2/shadow: base signal `{base}` resolves to no unique BTOR2 state \
                  cell, primary input, output port or named net, so its `{stage1_symbol}` \
-                 shadow chain cannot be synthesised (the Tier-2 history atom would never \
-                 bind). Check the SVA signal name matches a register, an input or an output."
+                 shadow chain cannot be synthesised. Check the SVA signal name matches a \
+                 register, an input or an output."
             ),
             location: None,
         })?;
