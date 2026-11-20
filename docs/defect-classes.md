@@ -24,6 +24,20 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 **Enumerating test:** none recorded. **Open:** unqualified existential `holds` over a clock-as-data or undriven net (mununu#1126).
 
+### `clock-net-driver`
+
+**What varies:** what drives a net a flop or memory port is clocked by, after the walk through inverters and buffers (`ClockDrivers` in `adapter/yosys/mod.rs`). The BTOR2 model has one implicit clock, so every domain that is not the root is an abstraction decision the report must name.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| a top-level input | the root clock | — |
+| a `$`-cell (a divider flop, a gating `$and`) | a derived domain, refused like a second domain unless `--merge-clock-domains` | mununu#758 |
+| a black-box instance's output (a PLL, a black-boxed or stubbed clock gate) | a root clock named as rooted at the cell; a `clock-rooted-at-black-box` note on `sv verify-auto` | mununu#1148 |
+| the other edge of a net already used as a clock | its own domain | mununu#758 |
+| an undriven net | open: counted as a root with no note | — |
+
+**Enumerating test:** none in one table; `clock_domains_marks_a_gated_or_divided_clock_as_derived` and `x1148_a_clock_rooted_at_a_black_box_output_is_named_in_the_description` pin the second and third cases.
+
 ### `initial-cube-doubt`
 
 **What varies:** why the predicate-cube engine kept a candidate initial cube it could not prove infeasible at cycle 0. Keeping it is right for `holds` and wrong for `violated`.
