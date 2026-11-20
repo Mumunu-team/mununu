@@ -1,6 +1,6 @@
 # Consumer briefing — 2026-10 a synchronisation vector split across two partner automata now fires whatever the members' order or names
 
-> **Audience:** anyone composing CTXDSL automata — `mununu verify` (`verify.toml` compositions), `mununu context eval` with a `composition { … }` block, and the API peers — where a multi-label transition (`on {label a, label b}`) has its labels carried by **two or more other members**. Shinro's framework/LeKiwi models are the known case; single-partner vectors and single-label models are untouched.
+> **Audience:** anyone composing CTXDSL automata — `mununu verify` (`verify.toml` compositions), `mununu context eval` with a `composition { … }` block, and the API peers — where a multi-label transition (`on {label a, label b}`) has its labels carried by **two or more other members**. A consumer's hand-written robot-framework models are the known case; single-partner vectors and single-label models are untouched.
 >
 > **Provenance:** [mununu#589](https://github.com/Mumunu-team/mununu/issues/589); fix in `crates/mununu-core/src/composition/mod.rs` (`CompositionOptions::sync_vectors`, the rendezvous rule in `compose`) and `context_dsl/realize.rs` (the collection before the fold). Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 

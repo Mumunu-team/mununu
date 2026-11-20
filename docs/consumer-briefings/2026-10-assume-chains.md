@@ -41,7 +41,7 @@ mununu sv verify-auto sensor_frontend.sv --source sensor_rx.sv --source sensor_r
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings (segment 3: a vendor black box's datasheet restated as assumptions). Tests at the seam: `adapter::btor2::assume_monitor::tests::a_bounded_sequence_antecedent_is_a_chain` (including the translator's own spelling) and `…::a_chain_assumption_obliges_the_consequent_when_the_sequence_ends`.
+- Found preparing the tutorial recordings (segment 3: a vendor black box's datasheet restated as assumptions). Tests at the seam: `adapter::btor2::assume_monitor::tests::a_bounded_sequence_antecedent_is_a_chain` (including the translator's own spelling) and `…::a_chain_assumption_obliges_the_consequent_when_the_sequence_ends`.
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here

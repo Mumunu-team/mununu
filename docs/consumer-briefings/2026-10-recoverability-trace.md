@@ -43,7 +43,7 @@ mununu sv verify-recoverability rod_drive_ctrl.sv --top rod_drive_ctrl --target 
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings. Tests at the handler seam both surfaces share: `api::handlers::…::a_pinned_reset_decides_recoverability_out_of_reset` (the pinned refutation carries a lasso whose cycle stays in the trap; a HOLDS carries none) and `…::a_pinned_reset_starts_recoverability_from_the_reset_state` (a trap reachable only at power-up: `holds`; `violated` without the seeding).
+- Found preparing the tutorial recordings. Tests at the handler seam both surfaces share: `api::handlers::…::a_pinned_reset_decides_recoverability_out_of_reset` (the pinned refutation carries a lasso whose cycle stays in the trap; a HOLDS carries none) and `…::a_pinned_reset_starts_recoverability_from_the_reset_state` (a trap reachable only at power-up: `holds`; `violated` without the seeding).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here

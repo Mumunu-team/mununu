@@ -35,8 +35,8 @@
 | run | result |
 |---|---|
 | `an_existential_property_reads_the_sampled_cycle0_input_existentially` (`adapter/btor2/input_state.rs`) | `EF ok` on `ok = prev ∧ a`: violated on the parent, holds here (`make verify-repro` CONFIRMED against `8b98949`); `AG ok` stays violated |
-| EmTech `cmd_ctrl` reproducer (`m_legal_addr` assume + 3 covers) | parent: 3/3 covers `violated`; here: 3/3 `holds` (`exact-symbolic`) |
-| EmTech `cmd_ctrl` full SVA (5 assumes, 16 asserts, 5 covers, default `--assumes precondition`) | 16 asserts `holds` (unchanged), 5 covers `holds` (previously only under `--assumes ignore`) |
+| The tutorial `cmd_ctrl` reproducer (`m_legal_addr` assume + 3 covers) | parent: 3/3 covers `violated`; here: 3/3 `holds` (`exact-symbolic`) |
+| The tutorial `cmd_ctrl` full SVA (5 assumes, 16 asserts, 5 covers, default `--assumes precondition`) | 16 asserts `holds` (unchanged), 5 covers `holds` (previously only under `--assumes ignore`) |
 | `e2e_opentitan_sva_census` | 173 holds / 11 skipped / 7 violated / 0 unknown — identical to the baseline (the census carries no `cover` rows; the 7 violated rows are assertions) |
 
 ## Verification steps for every consumer
@@ -49,7 +49,7 @@ mununu sv verify-auto dut.sv --source dut_sva.sv --top dut --frontend slang --js
 ## Provenance
 
 - Fix commit: pending merge — branch `fix/cover-under-assume`.
-- Issue: mununu#757 (found while preparing the EmTech tutorial material).
+- Issue: mununu#757 (found while preparing the tutorial material).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here

@@ -43,7 +43,7 @@ mununu sv verify-recoverability rod_drive_ctrl.sv --top rod_drive_ctrl --target 
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings. Test at the seam both surfaces share: `api::handlers::…::a_pinned_reset_decides_recoverability_out_of_reset` (a one-bit trap only the reset clears: free → `holds`, pinned → `violated`, an unknown pin → 400).
+- Found preparing the tutorial recordings. Test at the seam both surfaces share: `api::handlers::…::a_pinned_reset_decides_recoverability_out_of_reset` (a one-bit trap only the reset clears: free → `holds`, pinned → `violated`, an unknown pin → 400).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here
