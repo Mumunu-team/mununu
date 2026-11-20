@@ -1358,7 +1358,10 @@ mod tests {
             BuildStop::Cancelled { nodes: 7 },
         ] {
             let text = stop.to_string();
-            assert!(text.starts_with("aig: ") && text.contains(" nodes"), "{text}");
+            assert!(
+                text.starts_with("aig: ") && text.contains(" nodes"),
+                "{text}"
+            );
         }
         assert!(
             BuildStop::NodeCap { nodes: 40, cap: 40 }

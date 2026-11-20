@@ -595,40 +595,44 @@ fn run_ic3(
     timed("ic3", || {
         let built = shared_aig(aig, file, deadline, &cancel);
         match ic3::ic3_built(file, built, &opts) {
-        Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
-        Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
-            // N5.4 — the engine replayed the trace already; with a witness asked for it is
-            // carried out as it is, and a design the simulator cannot carry says so.
-            match (replay, carried) {
-                (Replay::Confirmed(trace), Some(carried)) => {
-                    carried.carry("ic3", Ok(trace), None);
-                }
-                (Replay::Confirmed(_), None) => {}
-                (Replay::Unavailable(why), carried) => {
-                    tracing::info!(
-                        depth,
-                        why,
-                        "ic3: the counterexample ships without a simulator replay"
-                    );
-                    if let Some(carried) = carried {
-                        carried.carry("ic3", Err(format!("not replayed: {why}")), None);
+            Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
+            Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
+                // N5.4 — the engine replayed the trace already; with a witness asked for it is
+                // carried out as it is, and a design the simulator cannot carry says so.
+                match (replay, carried) {
+                    (Replay::Confirmed(trace), Some(carried)) => {
+                        carried.carry("ic3", Ok(trace), None);
+                    }
+                    (Replay::Confirmed(_), None) => {}
+                    (Replay::Unavailable(why), carried) => {
+                        tracing::info!(
+                            depth,
+                            why,
+                            "ic3: the counterexample ships without a simulator replay"
+                        );
+                        if let Some(carried) = carried {
+                            carried.carry("ic3", Err(format!("not replayed: {why}")), None);
+                        }
                     }
                 }
+                Ok(Some(true))
             }
-            Ok(Some(true))
-        }
-        // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
-        // reason; a cancelled one keeps the reason (the model was never built).
-        Ok(Ic3Outcome::Stopped { frames: 0, reason }) if cancelled() && reason.starts_with("aig:") => {
-            Err(MemberStop::Cancelled(format!("IC3 stopped at frame 0 ({reason})")))
-        }
-        Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
-            format!("IC3 stopped at frame {frames}"),
-        )),
-        Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
-            "IC3 stopped at frame {frames} ({reason})"
-        ))),
-        Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
+            // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
+            // reason; a cancelled one keeps the reason (the model was never built).
+            Ok(Ic3Outcome::Stopped { frames: 0, reason })
+                if cancelled() && reason.starts_with("aig:") =>
+            {
+                Err(MemberStop::Cancelled(format!(
+                    "IC3 stopped at frame 0 ({reason})"
+                )))
+            }
+            Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
+                format!("IC3 stopped at frame {frames}"),
+            )),
+            Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
+                "IC3 stopped at frame {frames} ({reason})"
+            ))),
+            Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
         }
     })
 }
@@ -4215,7 +4219,7 @@ mod tests {
         fn a_verdict_that_lands_after_the_first_is_credited_and_a_disagreement_is_the_alarm() {
             let agreeing = Runners {
                 native: |_, _, _, _| Ok(Some(true)),
-                ic3: |_, _, stop, _| {
+                ic3: |_, _, stop, _, _| {
                     until_stopped(&stop);
                     Ok(Some(true))
                 },
