@@ -5,9 +5,12 @@
 # compares the per-OS test counts: a green run that executed fewer tests than Linux is C3's bug
 # in a new coat, and `measurements/os-matrix-unix-only-tests.txt` is the only allowed difference.
 #
-# Cost: GitHub bills macOS minutes at 10x and Windows at 2x Linux, so this runs on pushes to
-# `main`, on release tags, on demand, and on a PR only when the PR touches this workflow or its
-# scripts — not on every PR.
+# It runs on every PR, on pushes to `main`, on release tags and on demand, and its four jobs
+# (`linux`, `macos`, `windows`, `same tests on every OS`) are required checks on `main`
+# (2026-11-20). Until then it ran on a PR only when the PR touched this workflow, and a
+# Windows-only failure sat red on `main` for five merges before anyone read it (mununu#1153).
+# A required check must report on every PR, so the path filter is gone. Cost: about 18 minutes
+# of wall per PR; the repository is public, so the macOS and Windows minutes are not billed.
 #
 # Z3 per OS (docs/toolchain.md § "Z3 on each OS"): apt on Linux, Homebrew on macOS, and on
 # Windows — which has no system libz3 — the Z3 project's official release zip, unpacked by this
@@ -20,11 +23,6 @@ on:
     branches: [ main ]
     tags: [ 'v*' ]
   pull_request:
-    paths:
-      - '.github/workflows/os-matrix.yml'
-      - 'scripts/os_matrix_compare.sh'
-      - 'scripts/test_count_gate.sh'
-      - 'measurements/os-matrix-unix-only-tests.txt'
   workflow_dispatch:
 permissions:
   contents: read

@@ -30,8 +30,8 @@ the pre-push check run. The library is the same on every route; none of this tou
 
 **The OS matrix** ([`.github/workflows/os-matrix.yml`](../.github/workflows/os-matrix.yml), roadmap
 I1) builds and tests the workspace natively on Linux, macOS and Windows — the engine-only tier (T2):
-no SV toolchain, no e2e — on every push to `main`, on release tags, on demand, and on a PR only when
-the PR touches the workflow or its scripts (macOS minutes cost 10× Linux). Each lane's test count
+no SV toolchain, no e2e — on every PR, on every push to `main`, on release tags and on demand. Its
+four jobs are required checks on `main` since 2026-11-20 (mununu#1153). Each lane's test count
 passes `scripts/test_count_gate.sh`, and `scripts/os_matrix_compare.sh` then requires the three
 counts to agree within the allowance of
 [`measurements/os-matrix-unix-only-tests.txt`](../measurements/os-matrix-unix-only-tests.txt) (the
