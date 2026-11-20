@@ -383,7 +383,11 @@ impl SymbolicKmts {
                     }
                     TransitionModality::MayOnly => {}
                     TransitionModality::MustHyperOnly(_) => {
-                        return Err("R-F5.2 does not yet support MustHyperOnly edges".into());
+                        return Err(crate::adapter::owner::mununu_limitation(
+                            "the symbolic evaluator does not carry hyper-must (MustHyperOnly) \
+                             transitions",
+                            Some("the explicit evaluator takes them"),
+                        ));
                     }
                 }
                 for l in &needed_labels {
@@ -561,10 +565,12 @@ impl SymbolicKmts {
                 .get(name)
                 .cloned()
                 .unwrap_or_else(|| TritBdd::all_false(&self.ctx)),
-            Node::Variable(v) => bindings
-                .get(v)
-                .cloned()
-                .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
+            Node::Variable(v) => bindings.get(v).cloned().ok_or_else(|| {
+                crate::adapter::owner::mununu_defect(&format!(
+                    "formula variable #{} is unbound in the symbolic evaluator",
+                    v.index()
+                ))
+            })?,
             Node::Not(n) => self.eval_node(f, *n, bindings)?.not(),
             Node::And(a, b) => self
                 .eval_node(f, *a, bindings)?

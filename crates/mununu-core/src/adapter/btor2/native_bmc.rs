@@ -334,7 +334,7 @@ pub enum BmcError {
 impl std::fmt::Display for BmcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BmcError::Encode(e) => write!(f, "native BMC: encode failed: {e:?}"),
+            BmcError::Encode(e) => write!(f, "native BMC: encode failed: {e}"),
             BmcError::NoBadProperty => write!(f, "native BMC: design has no `bad` property"),
             BmcError::BudgetExpired { k } => {
                 write!(f, "native BMC: the wall-clock budget expired at depth {k}")

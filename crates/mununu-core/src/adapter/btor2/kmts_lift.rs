@@ -768,7 +768,9 @@ impl MemoryInitGap {
             Self::UnsupportedOperator { op } => format!(
                 "a mununu limitation: the cycle-0 encoder has no rule for `{op}` yet (mununu#1106); \
                  the exact engine reads the memory itself when the cone fits its bit cap — \
-                 decide the row with `--engine exact-symbolic`, or supply an `init` without `{op}`"
+                 decide the row with `--engine exact-symbolic` on `sv verify-auto` (the cegar \
+                 verbs cannot select it), or give the memory an initial value without `{op}` (an \
+                 initializer in the RTL, or the `init` line of a hand-written BTOR2)"
             ),
             Self::LiftDefect => "a lift defect, not something the source can change: please \
                                  report it with the BTOR2 (mununu#1106)"
@@ -1985,14 +1987,14 @@ fn assert_must_subset_may(
                         return Err(AdapterError {
                             kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                             location: None,
-                            message: format!(
+                            message: crate::adapter::owner::mununu_defect(&format!(
                                 "adapter/btor2/kmts_lift: KMTS invariant R_must ⊆ R_may violated — \
                                  the MustHyperOnly edge from state {} names hyper-target {} which is \
-                                 not a may-successor of it. A hyper-must target set must be a subset \
-                                 of the emitted may-relation (docs/design/past-shadow-soundness.md §6).",
+                                 not a may-successor of it (a hyper-must target set must be a subset \
+                                 of the emitted may-relation, docs/design/past-shadow-soundness.md §6)",
                                 sid.index(),
                                 tgt.index()
-                            ),
+                            )),
                         });
                     }
                 }
@@ -2078,7 +2080,9 @@ pub fn materialize_clts_from_lazy(
         .map_err(|e| AdapterError {
             kind: AdapterErrorKind::IrConsistencyError,
             location: None,
-            message: format!("adapter/btor2/materialize_clts_from_lazy: label intern failed: {e}"),
+            message: crate::adapter::owner::mununu_defect(&format!(
+                "adapter/btor2/materialize_clts_from_lazy: label intern failed: {e}"
+            )),
         })?;
     for i in 0..cube_count {
         let src_id = state_ids[i];
@@ -2539,10 +2543,16 @@ fn resolve_predicate_registers(
                     kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                     location: None,
                     message: format!(
-                        "adapter/btor2/predicate_cube_lift: predicate `{}` references unknown register `{}` (known: {:?})",
+                        "adapter/btor2/predicate_cube_lift: predicate `{}` references unknown register `{}` (known: {})",
                         pred.name,
                         pred.register,
-                        symbols.values().collect::<std::collections::BTreeSet<_>>()
+                        symbols
+                            .values()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .map(|s| format!("`{s}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 });
             }
@@ -2638,11 +2648,14 @@ fn ensure_compound_lift_supported(
         return Err(AdapterError {
             kind: crate::adapter::AdapterErrorKind::UnsupportedConstruct,
             location: None,
-            message: "adapter/btor2/lift_predicate_cube: compound predicates are not supported on \
-                      the Lazy lift strategy (the lazy per-cube body samples simple \
-                      register==value atoms only); use LiftStrategy::Eager with \
-                      may_edge_inference = SmtAllPairs"
-                .to_string(),
+            message: crate::adapter::owner::mununu_limitation(
+                "adapter/btor2/lift_predicate_cube: compound predicates are not carried by the \
+                 lazy lift strategy (its per-cube body samples simple register==value atoms only)",
+                Some(
+                    "the eager lift strategy, which every verb uses by default, takes them with \
+                     the all-pairs SMT may-edge inference",
+                ),
+            ),
         });
     }
     if !matches!(lift_opts.may_edge_inference, MayEdgeInference::SmtAllPairs) {
@@ -2966,9 +2979,9 @@ pub fn predicate_cube_lift(
             .map_err(|e| AdapterError {
                 kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                 location: None,
-                message: format!(
+                message: crate::adapter::owner::mununu_defect(&format!(
                     "adapter/btor2/predicate_cube_lift MIG-3.2: label intern failed: {e}"
-                ),
+                )),
             })?;
         // P1 #2 (IR-unification track) — consume the STS-IR seam's
         // batched `SmtEncode::may_edges` instead of re-inlining the
@@ -3314,7 +3327,9 @@ pub fn predicate_cube_lift(
             .map_err(|e| AdapterError {
                 kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                 location: None,
-                message: format!("adapter/btor2/predicate_cube_lift: label intern failed: {e}"),
+                message: crate::adapter::owner::mununu_defect(&format!(
+                    "adapter/btor2/predicate_cube_lift: label intern failed: {e}"
+                )),
             })?;
 
         // R.6.6 — pre-intern the per-combo controllability-aware
@@ -3339,9 +3354,9 @@ pub fn predicate_cube_lift(
                     .map_err(|e| AdapterError {
                         kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                         location: None,
-                        message: format!(
+                        message: crate::adapter::owner::mununu_defect(&format!(
                             "adapter/btor2/predicate_cube_lift R.6.6: env label intern failed: {e}"
-                        ),
+                        )),
                     })?;
                 builder.set_label_controllability(
                     lid,
@@ -3357,9 +3372,9 @@ pub fn predicate_cube_lift(
                     .map_err(|e| AdapterError {
                         kind: crate::adapter::AdapterErrorKind::IrConsistencyError,
                         location: None,
-                        message: format!(
+                        message: crate::adapter::owner::mununu_defect(&format!(
                             "adapter/btor2/predicate_cube_lift R.6.6: ctrl label intern failed: {e}"
-                        ),
+                        )),
                     })?;
                 builder.set_label_controllability(
                     lid,
@@ -6807,7 +6822,7 @@ mod tests {
         .expect_err("Lazy + compounds must error");
         assert!(
             err.message
-                .contains("not supported on the Lazy lift strategy"),
+                .contains("not carried by the lazy lift strategy"),
             "expected the Lazy compound-gate error; got: {}",
             err.message
         );

@@ -79,9 +79,9 @@ pub fn verify_fault_reach(
             let model = emit::emit_btor2(&injected_file);
             let invariant = format!("nu Z. ((!({atom})) && [] Z)");
             let formula = crate::mu_calculus::parser::parse(&invariant)
-                .map_err(|e| format!("--target `{atom}`: {e:?}"))?;
+                .map_err(|e| format!("--target `{atom}`: {e}"))?;
             let (v, outcome) = reach_portfolio_rescue_diagnosed(&model, &formula, false)
-                .map_err(|d| format!("--target `{atom}`: the reach rescue declined ({d:?})"))?;
+                .map_err(|d| format!("--target `{atom}`: the reach rescue declined ({d})"))?;
             let (mut verdict, mut decided_by) = match v {
                 RescueVerdict::Holds => ("holds", outcome.unreachable_by.clone()),
                 RescueVerdict::Violated => ("violated", outcome.reachable_by.clone()),

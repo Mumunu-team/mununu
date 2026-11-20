@@ -51,6 +51,20 @@ pub enum TemplateDomain {
     Universal,
 }
 
+impl TemplateDomain {
+    /// The domain's name as `templates --domain` reads it (`rtl`, `agentic`, `software`,
+    /// `synthesis`, `universal`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TemplateDomain::Rtl => "rtl",
+            TemplateDomain::Agentic => "agentic",
+            TemplateDomain::Software => "software",
+            TemplateDomain::Synthesis => "synthesis",
+            TemplateDomain::Universal => "universal",
+        }
+    }
+}
+
 impl std::str::FromStr for TemplateDomain {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -267,9 +281,10 @@ pub struct InstantiatedProperty {
 /// Errors during template instantiation.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TemplateError {
-    /// Template ID not found in the registry.
-    #[error("unknown template: {0}")]
-    UnknownTemplate(String),
+    /// Template ID not found in the registry. `available` carries the registry's ids so the
+    /// message can name them (mununu#1121; nearest few when many).
+    #[error("unknown template: {id} (available: {})", crate::adapter::candidate_list(.id, .available.iter().map(String::as_str)))]
+    UnknownTemplate { id: String, available: Vec<String> },
     /// A required parameter was not provided.
     #[error("template '{template}' requires parameter '{param}'")]
     MissingParam { template: String, param: String },
@@ -422,6 +437,14 @@ impl TemplateRegistry {
         self.templates.get(id)
     }
 
+    /// Every template id in the registry, sorted — the candidates an "unknown template"
+    /// refusal names (mununu#1121).
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.templates.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     /// Return the full catalog (for API serialization), templates sorted by ID.
     pub fn catalog(&self) -> TemplateCatalog {
         let mut templates: Vec<PropertyTemplate> = self.templates.values().cloned().collect();
@@ -440,10 +463,13 @@ impl TemplateRegistry {
     /// Validates required params, applies defaults, performs `${PARAM}`
     /// substitution, and returns a ready-to-use `InstantiatedProperty`.
     pub fn instantiate(&self, tref: &TemplateRef) -> Result<InstantiatedProperty, TemplateError> {
-        let template = self
-            .templates
-            .get(&tref.template)
-            .ok_or_else(|| TemplateError::UnknownTemplate(tref.template.clone()))?;
+        let template =
+            self.templates
+                .get(&tref.template)
+                .ok_or_else(|| TemplateError::UnknownTemplate {
+                    id: tref.template.clone(),
+                    available: self.ids(),
+                })?;
 
         // Build effective args: user-provided + defaults
         let mut effective_args: HashMap<String, String> = HashMap::new();
@@ -714,7 +740,15 @@ mod tests {
             args: HashMap::new(),
         };
         let err = reg.instantiate(&tref).unwrap_err();
-        assert!(matches!(err, TemplateError::UnknownTemplate(_)));
+        assert!(matches!(err, TemplateError::UnknownTemplate { .. }));
+        // mununu#1121 — the refusal names the registry's ids (nearest few when many).
+        let text = err.to_string();
+        assert!(text.contains("unknown template: nonexistent"), "{text}");
+        assert!(text.contains("(available: "), "{text}");
+        assert!(
+            reg.ids().iter().any(|id| text.contains(id.as_str())),
+            "{text} names no registry id"
+        );
     }
 
     #[test]
@@ -1089,5 +1123,19 @@ mod layer_tests {
     fn domains_parse_and_unknown_ones_are_refused() {
         assert_eq!("RTL".parse::<TemplateDomain>(), Ok(TemplateDomain::Rtl));
         assert!("hardware".parse::<TemplateDomain>().is_err());
+    }
+
+    /// mununu#1121 — a domain's name is the spelling the domain filter parses.
+    #[test]
+    fn x1121_the_template_domain_name_round_trips_through_the_parser() {
+        for d in [
+            TemplateDomain::Rtl,
+            TemplateDomain::Agentic,
+            TemplateDomain::Software,
+            TemplateDomain::Synthesis,
+            TemplateDomain::Universal,
+        ] {
+            assert_eq!(d.as_str().parse::<TemplateDomain>(), Ok(d));
+        }
     }
 }

@@ -3156,6 +3156,19 @@ fn enforce_licence(cli: &Cli) {
     }
 }
 
+/// mununu#1121 — the formula names a realised context declares, for an "unknown formula"
+/// refusal (every name when few, the nearest to `wanted` when many).
+fn known_formulas(realized: &RealizedContext, wanted: &str) -> String {
+    mununu_core::adapter::candidate_list(wanted, realized.formulas.keys().map(String::as_str))
+}
+
+/// mununu#1121 — the automaton and composition names a realised context exposes, for an
+/// "unknown automaton" refusal.
+fn known_automata(realized: &RealizedContext, wanted: &str) -> String {
+    let names = realized.context.clts_names();
+    mununu_core::adapter::candidate_list(wanted, names.iter().map(String::as_str))
+}
+
 /// Resolve the controller mode from the CLI flags.
 ///
 /// Precedence:
@@ -3170,8 +3183,8 @@ fn parse_cli_controller_mode(
     if let Some(name) = mode {
         return ControllerMode::from_normalized_name(name).map_err(|other| {
             format!(
-                "unknown controller mode '{other}' \
-                (valid: projection, functional, permissive, signature-memory, product-game, parity-game, gr1)"
+                "unknown controller mode '{other}' (valid: {})",
+                ControllerMode::names().join(", ")
             )
         });
     }
@@ -4448,7 +4461,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                             e @ (native_bmc::BmcError::BudgetExpired { .. }
                             | native_bmc::BmcError::ResourceLimit { .. }),
                         ) => ("unknown", None, "native-bmc", Some(format!("stopped: {e}"))),
-                        Err(e) => return Err(format!("bmc-only: {e:?}")),
+                        Err(e) => return Err(format!("bmc-only: {e}")),
                     }
                 }
                 None => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
@@ -4456,7 +4469,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                         ("violated", Some(depth), "native-bmc", None)
                     }
                     Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
-                    Err(e) => return Err(format!("bmc-only: {e:?}")),
+                    Err(e) => return Err(format!("bmc-only: {e}")),
                 },
             },
             BmcEngineArg::Sat | BmcEngineArg::SatDyn => {
@@ -5814,7 +5827,7 @@ fn run_cegar_cli(
 
     // Parse the μ-calculus formula.
     let formula =
-        mu_parser::parse(params.formula).map_err(|e| format!("formula parse error: {e:?}"))?;
+        mu_parser::parse(params.formula).map_err(|e| format!("formula parse error: {e}"))?;
 
     // D1.6 — exact symbolic MC is a verify-auto-only engine: it needs the
     // reset-gated model + reset init that `sv verify-auto` builds. The raw
@@ -6693,14 +6706,17 @@ fn codesign_verify(args: CodesignVerifyArgs) -> Result<(), String> {
     // user's formula. Reuses the same path the `context eval`
     // subcommand uses.
     let context_doc = parse_context_doc(&composed.ctxdsl).map_err(|e| {
-        format!("composed CTXDSL failed to parse (this is a bug in codesign::compose): {e:?}")
+        format!("composed CTXDSL failed to parse (this is a bug in codesign::compose): {e}")
     })?;
     let sidecar_docs: Vec<ContextDoc> = Vec::new();
     let realized = realize_documents(&context_doc, &sidecar_docs)?;
-    let formula = realized
-        .formulas
-        .get(&args.formula)
-        .ok_or_else(|| format!("unknown formula '{}' in composed context", args.formula))?;
+    let formula = realized.formulas.get(&args.formula).ok_or_else(|| {
+        format!(
+            "unknown formula '{}' in composed context — expected one of: {}",
+            args.formula,
+            known_formulas(&realized, &args.formula)
+        )
+    })?;
     let clts = realized.context.clts(&automaton_name).ok_or_else(|| {
         format!(
             "unknown automaton/composition '{automaton_name}' in composed context — expected one of: {}",
@@ -8634,10 +8650,13 @@ fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
     })?;
     let mut sanity_clean = true;
     if args.sanity {
-        let clts = realized
-            .context
-            .clts(&args.automaton)
-            .ok_or_else(|| format!("unknown automaton '{}' in realised context", args.automaton))?;
+        let clts = realized.context.clts(&args.automaton).ok_or_else(|| {
+            format!(
+                "unknown automaton '{}' in realised context — expected one of: {}",
+                args.automaton,
+                known_automata(&realized, &args.automaton)
+            )
+        })?;
         let members: Vec<(String, &mununu_core::clts::Clts<_, _>)> = realized
             .members_of(&args.automaton)
             .unwrap_or(&[])
@@ -8671,10 +8690,13 @@ fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
             return Ok(());
         }
     }
-    let formula = realized
-        .formulas
-        .get(&formula_name)
-        .ok_or_else(|| format!("unknown formula '{}' in realised context", formula_name))?;
+    let formula = realized.formulas.get(&formula_name).ok_or_else(|| {
+        format!(
+            "unknown formula '{}' in realised context — expected one of: {}",
+            formula_name,
+            known_formulas(&realized, &formula_name)
+        )
+    })?;
     let clts = realized
         .context
         .clts(&args.automaton)
@@ -9219,14 +9241,18 @@ fn context_synthesize(args: ContextSynthesizeArgs) -> Result<(), String> {
         automaton: &args.automaton,
         allow_no_formula: false,
     })?;
-    let realized_formula = realized
-        .formulas
-        .get(&formula_name)
-        .ok_or_else(|| format!("unknown formula '{}' in realised context", formula_name))?;
+    let realized_formula = realized.formulas.get(&formula_name).ok_or_else(|| {
+        format!(
+            "unknown formula '{}' in realised context — expected one of: {}",
+            formula_name,
+            known_formulas(&realized, &formula_name)
+        )
+    })?;
     if realized.context.clts(&args.automaton).is_none() {
         return Err(format!(
-            "unknown automaton '{}' in realised context",
-            args.automaton
+            "unknown automaton '{}' in realised context — expected one of: {}",
+            args.automaton,
+            known_automata(&realized, &args.automaton)
         ));
     }
     let env = realized.environment_for(&args.automaton);
@@ -9469,8 +9495,9 @@ fn context_graph(args: ContextGraphArgs) -> Result<(), String> {
     if let Some(automaton_name) = &args.automaton {
         if realized.context.clts(automaton_name).is_none() {
             return Err(format!(
-                "unknown automaton '{}' in realised context",
-                automaton_name
+                "unknown automaton '{}' in realised context — expected one of: {}",
+                automaton_name,
+                known_automata(&realized, automaton_name)
             ));
         }
         automata_to_visualize.push(automaton_name.clone());
@@ -9544,14 +9571,18 @@ fn context_graph(args: ContextGraphArgs) -> Result<(), String> {
             .as_ref()
             .ok_or("--counterstrategy requires --automaton")?;
 
-        let rf = realized
-            .formulas
-            .get(formula_name)
-            .ok_or_else(|| format!("unknown formula '{formula_name}'"))?;
-        let clts = realized
-            .context
-            .clts(automaton_name)
-            .ok_or_else(|| format!("unknown automaton '{automaton_name}'"))?;
+        let rf = realized.formulas.get(formula_name).ok_or_else(|| {
+            format!(
+                "unknown formula '{formula_name}' — expected one of: {}",
+                known_formulas(&realized, formula_name)
+            )
+        })?;
+        let clts = realized.context.clts(automaton_name).ok_or_else(|| {
+            format!(
+                "unknown automaton '{automaton_name}' — expected one of: {}",
+                known_automata(&realized, automaton_name)
+            )
+        })?;
         let env = realized.environment_for(automaton_name);
         let eval_options = mununu_core::mu_calculus::EvaluationOptions::default();
 
@@ -10106,9 +10137,13 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
 
     // Show details for a single template
     if let Some(id) = &args.id {
-        let tmpl = registry
-            .get(id)
-            .ok_or_else(|| format!("unknown template '{id}'"))?;
+        let tmpl = registry.get(id).ok_or_else(|| {
+            let ids = registry.ids();
+            format!(
+                "unknown template '{id}'. Available: {}",
+                mununu_core::adapter::candidate_list(id, ids.iter().map(String::as_str))
+            )
+        })?;
         if args.json {
             let json = serde_json::to_string_pretty(tmpl).map_err(|e| e.to_string())?;
             println!("{json}");
@@ -10120,7 +10155,7 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
                 "  Domains: {}",
                 tmpl.domains
                     .iter()
-                    .map(|d| format!("{d:?}"))
+                    .map(|d| d.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -10345,7 +10380,12 @@ fn template_refs(
                 ));
             }
         };
-        let idx = idx.ok_or_else(|| format!("--template-arg '{arg}': no such --template"))?;
+        let idx = idx.ok_or_else(|| {
+            format!(
+                "--template-arg '{arg}': no such --template (the --template values are: {})",
+                templates.join(", ")
+            )
+        })?;
         // mununu#966 — a key bound twice is refused, never the later value silently kept.
         if refs[idx]
             .args
@@ -10413,8 +10453,11 @@ fn resolve_formula_name(
         "context __template_sidecar {{\n  mu_formulas {{\n    formula {formula_name} {{\n      over {automaton};\n      body = {};\n    }}\n  }}\n}}\n",
         inst.formula
     );
-    let sidecar_doc = parse_context_doc(&sidecar_ctxdsl)
-        .map_err(|e| format!("internal error: generated template CTXDSL failed to parse: {e}"))?;
+    let sidecar_doc = parse_context_doc(&sidecar_ctxdsl).map_err(|e| {
+        mununu_core::adapter::owner::mununu_defect(&format!(
+            "the template `{template_id}` expanded to CTXDSL that does not parse ({e})"
+        ))
+    })?;
     sidecar_docs.push(sidecar_doc);
 
     eprintln!(

@@ -455,8 +455,13 @@ pub enum ConfigIssue {
     /// malformed (not `<source_id>.<label>` shape).
     MalformedRenamingFrom { from: String },
     /// `[alphabet]` strategy is `renamings` and a `from` field
-    /// references a source ID that doesn't exist.
-    RenamingUnknownSource { source_id: String, from: String },
+    /// references a source ID that doesn't exist. `declared` lists the
+    /// `[[sources]]` ids, sorted (mununu#1121).
+    RenamingUnknownSource {
+        source_id: String,
+        from: String,
+        declared: Vec<String>,
+    },
     /// `[alphabet]` strategy is `register_map` but no
     /// `register_map` path is set.
     RegisterMapStrategyWithoutPath,
@@ -465,8 +470,9 @@ pub enum ConfigIssue {
     UnknownCompositionSemantics(String),
     /// `[composition].members` is empty.
     CompositionNoMembers,
-    /// `[composition].members` references an unknown source ID.
-    CompositionUnknownMember { id: String },
+    /// `[composition].members` references an unknown source ID. `declared`
+    /// lists the `[[sources]]` ids, sorted (mununu#1121).
+    CompositionUnknownMember { id: String, declared: Vec<String> },
     /// `[[properties]]` entry had both `template` and `formula` set,
     /// or neither.
     PropertyFormulaXorViolation {
@@ -485,9 +491,11 @@ pub enum ConfigIssue {
     /// mununu#595 — an `[[assumptions]]` entry's `kind` / `atom` / `labels` do not fit together.
     MalformedAssumption { name: String, kind: String },
     /// mununu#595 — a property references an assumption no `[[assumptions]]` entry declares.
+    /// `declared` lists the declared assumption names, sorted (mununu#1121).
     PropertyUnknownAssumption {
         property: String,
         assumption: String,
+        declared: Vec<String>,
     },
     /// mununu#595 — a property lists assumptions but is not a fairness template.
     PropertyAssumptionsNotApplicable { property: String },
@@ -564,9 +572,14 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "[alphabet].renamings: `from = \"{from}\"` is malformed (expected \"<source_id>.<label>\")"
             ),
-            ConfigIssue::RenamingUnknownSource { source_id, from } => write!(
+            ConfigIssue::RenamingUnknownSource {
+                source_id,
+                from,
+                declared,
+            } => write!(
                 f,
-                "[alphabet].renamings: `from = \"{from}\"` references unknown source id `{source_id}`"
+                "[alphabet].renamings: `from = \"{from}\"` references unknown source id `{source_id}` (the [[sources]] ids are: {})",
+                crate::adapter::candidate_list(source_id, declared.iter().map(String::as_str))
             ),
             ConfigIssue::RegisterMapStrategyWithoutPath => write!(
                 f,
@@ -580,9 +593,11 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "[composition].members is empty; at least one member is required"
             ),
-            ConfigIssue::CompositionUnknownMember { id } => {
-                write!(f, "[composition].members: unknown source id `{id}`")
-            }
+            ConfigIssue::CompositionUnknownMember { id, declared } => write!(
+                f,
+                "[composition].members: unknown source id `{id}` (the [[sources]] ids are: {})",
+                crate::adapter::candidate_list(id, declared.iter().map(String::as_str))
+            ),
             ConfigIssue::PropertyFormulaXorViolation {
                 name,
                 has_template,
@@ -618,9 +633,11 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::PropertyUnknownAssumption {
                 property,
                 assumption,
+                declared,
             } => write!(
                 f,
-                "[[properties]] `{property}`: unknown assumption `{assumption}` (declare it under [[assumptions]])"
+                "[[properties]] `{property}`: unknown assumption `{assumption}` (declare it under [[assumptions]]; declared: {})",
+                crate::adapter::candidate_list(assumption, declared.iter().map(String::as_str))
             ),
             ConfigIssue::PropertyAssumptionsNotApplicable { property } => write!(
                 f,
@@ -871,6 +888,7 @@ impl VerifyConfig {
                                 issues.push(ConfigIssue::RenamingUnknownSource {
                                     source_id: source_id.to_string(),
                                     from: r.from.clone(),
+                                    declared: sorted(&seen_source_ids),
                                 });
                             }
                         }
@@ -903,7 +921,10 @@ impl VerifyConfig {
             // existence; the assembler does the expansion.
             let bare = m.strip_suffix(".*").unwrap_or(m.as_str());
             if !seen_source_ids.contains(bare) {
-                issues.push(ConfigIssue::CompositionUnknownMember { id: m.clone() });
+                issues.push(ConfigIssue::CompositionUnknownMember {
+                    id: m.clone(),
+                    declared: sorted(&seen_source_ids),
+                });
             }
         }
 
@@ -935,6 +956,12 @@ impl VerifyConfig {
                     issues.push(ConfigIssue::PropertyUnknownAssumption {
                         property: p.name.clone(),
                         assumption: a.clone(),
+                        declared: {
+                            let mut names: Vec<String> =
+                                self.assumptions.iter().map(|d| d.name.clone()).collect();
+                            names.sort();
+                            names
+                        },
                     });
                 }
             }
@@ -999,6 +1026,14 @@ fn parse_renaming_from(s: &str) -> Option<(&str, &str)> {
     Some((sid, label))
 }
 
+/// The ids of a set, sorted — the candidate list an "unknown source id" issue carries
+/// (mununu#1121).
+fn sorted(ids: &HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = ids.iter().cloned().collect();
+    out.sort();
+    out
+}
+
 /// `[A-Za-z_][A-Za-z0-9_]*`.
 fn is_valid_identifier(s: &str) -> bool {
     let mut chars = s.chars();
@@ -1014,6 +1049,41 @@ fn is_valid_identifier(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1121 — a `[composition].members` entry naming no `[[sources]]` id is told the ids
+    /// that are declared (`docs/policies/failure-paths.md` Rule 5: an "unknown X" lists the
+    /// candidates).
+    #[test]
+    fn x1121_an_unknown_source_id_in_composition_members_lists_the_declared_ones() {
+        let toml_src = r#"
+[project]
+name = "x"
+
+[[sources]]
+id = "light"
+adapter = "ctxdsl"
+files = ["light.ctxdsl"]
+
+[[sources]]
+id = "door"
+adapter = "ctxdsl"
+files = ["door.ctxdsl"]
+
+[composition]
+semantics = "synchronous"
+members = ["light", "ghost"]
+"#;
+        let cfg = VerifyConfig::from_toml(toml_src).unwrap();
+        let issue = cfg
+            .validate()
+            .into_iter()
+            .find(|i| matches!(i, ConfigIssue::CompositionUnknownMember { .. }))
+            .expect("`ghost` is not a source id");
+        let text = issue.to_string();
+        assert!(text.contains("unknown source id `ghost`"), "{text}");
+        assert!(text.contains("door"), "{text} does not name `door`");
+        assert!(text.contains("light"), "{text} does not name `light`");
+    }
 
     /// mununu#935 — the seam between "the orchestrator reads an option" and "the API confines
     /// it": every `.get("<key>")` in the orchestrator's non-test code must be named by exactly one
@@ -1487,11 +1557,9 @@ members = ["a", "ghost"]
 "#;
         let cfg = VerifyConfig::from_toml(toml_src).unwrap();
         let issues = cfg.validate();
-        assert!(
-            issues.iter().any(
-                |i| matches!(i, ConfigIssue::CompositionUnknownMember { id } if id == "ghost")
-            )
-        );
+        assert!(issues.iter().any(
+            |i| matches!(i, ConfigIssue::CompositionUnknownMember { id, .. } if id == "ghost")
+        ));
     }
 
     #[test]
@@ -1859,10 +1927,11 @@ args = {{ TARGET = "Idle" }}
             name: "odd".into(),
             kind: "strong".into()
         }));
-        assert!(has(&ConfigIssue::PropertyUnknownAssumption {
-            property: "unknown_ref".into(),
-            assumption: "nobody".into()
-        }));
+        assert!(issues.iter().any(|i| matches!(
+            i,
+            ConfigIssue::PropertyUnknownAssumption { property, assumption, .. }
+                if property == "unknown_ref" && assumption == "nobody"
+        )));
         assert!(has(&ConfigIssue::PropertyAssumptionsNotApplicable {
             property: "not_applicable".into()
         }));

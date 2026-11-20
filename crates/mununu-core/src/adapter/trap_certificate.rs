@@ -386,7 +386,7 @@ fn check_candidate(
     // (2) closure: AG (T → [] T) — the `|=>` monitor `bad = T(prev) ∧ ¬T`.
     let closure = match mu_parser::parse(&format!("nu X. ((!{t} || [] {t}) && [] X)")) {
         Ok(f) => f,
-        Err(e) => return (CandidateOutcome::Declined(format!("{e:?}")), None),
+        Err(e) => return (CandidateOutcome::Declined(e.to_string()), None),
     };
     let closure_engines = match under_check_budget(|| {
         reach_portfolio_rescue_diagnosed(btor2, &closure, reset_pinned)
@@ -400,7 +400,7 @@ fn check_candidate(
     // (1) reach: EF T, decided on its dual AG ¬T (a reachable `bad` is a path into T).
     let dual = match mu_parser::parse(&format!("nu Z. (!{t} && [] Z)")) {
         Ok(f) => f,
-        Err(e) => return (CandidateOutcome::Declined(format!("{e:?}")), None),
+        Err(e) => return (CandidateOutcome::Declined(e.to_string()), None),
     };
     let reach_engines =
         match under_check_budget(|| reach_portfolio_rescue_diagnosed(btor2, &dual, reset_pinned)) {

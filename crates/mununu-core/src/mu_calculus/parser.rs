@@ -784,7 +784,10 @@ impl<'a> Parser<'a> {
             },
             ParseErrorKind::UnexpectedGuardKey(key) => ParseError::Unexpected {
                 pos: self.pos,
-                message: format!("unexpected guard key `{key}`"),
+                message: format!(
+                    "unexpected guard key `{key}` (expected one of: {})",
+                    GUARD_KEYS.join(", ")
+                ),
             },
             ParseErrorKind::UnexpectedTrailing => ParseError::Unexpected {
                 pos: self.pos,
@@ -884,10 +887,38 @@ fn parse_control(raw: &str, pos: usize) -> Result<Control, ParseError> {
         "environment" | "env" => Ok(Control::Environment),
         other => Err(ParseError::Unexpected {
             pos,
-            message: format!("unknown controllability `{other}`"),
+            message: format!(
+                "unknown controllability `{other}` (expected one of: {})",
+                CONTROL_WORDS.join(", ")
+            ),
         }),
     }
 }
+
+/// The words [`parse_control`] accepts — what an unknown one is told (mununu#1121). Kept
+/// beside the match it mirrors.
+const CONTROL_WORDS: &[&str] = &["all", "controllable", "controller", "environment", "env"];
+
+/// The guard keys `apply_guard_component` accepts (`steps` is matched by prefix, the rest by
+/// `key = value`) — what an unexpected key is told (mununu#1121). Kept beside the match.
+const GUARD_KEYS: &[&str] = &[
+    "labels",
+    "label",
+    "alphabet",
+    "req_cur",
+    "require",
+    "require_current",
+    "forb_cur",
+    "forbid_current",
+    "req_next",
+    "require_next",
+    "forb_next",
+    "forbid_next",
+    "ctrl",
+    "control",
+    "controllability",
+    "steps",
+];
 
 fn split_once(input: &str, delimiter: char) -> Option<(&str, &str)> {
     let idx = input.find(delimiter)?;
@@ -907,6 +938,24 @@ fn is_ident_continue(ch: char) -> bool {
 mod tests {
     use super::*;
     use crate::mu_calculus::{Control, Guard, ModalKind, Node, VariableGuard};
+
+    /// mununu#1121 — an unknown controllability word is told the words the guard accepts
+    /// (`docs/policies/failure-paths.md` Rule 5: an "unknown X" lists the candidates).
+    #[test]
+    fn x1121_an_unknown_controllability_word_lists_the_accepted_ones() {
+        let err = parse("[ ( ctrl = bogus ) ] p").expect_err("`bogus` is not a controllability");
+        let text = err.to_string();
+        assert!(text.contains("unknown controllability `bogus`"), "{text}");
+        for word in ["all", "controllable", "environment"] {
+            assert!(text.contains(word), "{text} does not name `{word}`");
+        }
+        let err = parse("[ ( colour = {red} ) ] p").expect_err("`colour` is not a guard key");
+        let text = err.to_string();
+        assert!(text.contains("unexpected guard key `colour`"), "{text}");
+        for key in ["labels", "req_next", "ctrl", "steps"] {
+            assert!(text.contains(key), "{text} does not name `{key}`");
+        }
+    }
 
     #[test]
     fn fixpoint_binder_extends_right_through_conjunction() {

@@ -182,6 +182,21 @@ impl TypeName {
     pub fn needs_bounding(&self) -> bool {
         matches!(self, TypeName::Short | TypeName::Int)
     }
+
+    /// The Promela keyword the declaration used (`bit`, `bool`, `byte`, `short`, `int`,
+    /// `mtype`, `chan`), or the user-defined type's own name.
+    pub fn keyword(&self) -> &str {
+        match self {
+            TypeName::Bit => "bit",
+            TypeName::Bool => "bool",
+            TypeName::Byte => "byte",
+            TypeName::Short => "short",
+            TypeName::Int => "int",
+            TypeName::Mtype => "mtype",
+            TypeName::Chan => "chan",
+            TypeName::UserDefined(name) => name,
+        }
+    }
 }
 
 /// Expression AST node.
@@ -274,4 +289,18 @@ pub enum LtlExpr {
     Until(Box<LtlExpr>, Box<LtlExpr>),
     WeakUntil(Box<LtlExpr>, Box<LtlExpr>),
     Release(Box<LtlExpr>, Box<LtlExpr>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypeName;
+
+    /// mununu#1121 — a type prints as its Promela keyword, never as the Rust variant name.
+    #[test]
+    fn x1121_the_promela_type_name_displays_its_keyword() {
+        assert_eq!(TypeName::Int.keyword(), "int");
+        assert_eq!(TypeName::Short.keyword(), "short");
+        assert_eq!(TypeName::Mtype.keyword(), "mtype");
+        assert_eq!(TypeName::UserDefined("msg_t".into()).keyword(), "msg_t");
+    }
 }

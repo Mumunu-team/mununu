@@ -109,6 +109,28 @@ pub enum Node {
     Justice { signals: Vec<Operand> },
 }
 
+impl Node {
+    /// The BTOR2 keyword of the line that declared this node (`sort`, `input`, `state`,
+    /// `const`, the operator's mnemonic, `init`, `next`, `bad`, `constraint`, `fair`,
+    /// `output`, `justice`), for a message that names a node.
+    pub fn kind_keyword(&self) -> &'static str {
+        match self {
+            Node::Sort { .. } => "sort",
+            Node::Input { .. } => "input",
+            Node::State { .. } => "state",
+            Node::Const { .. } => "const",
+            Node::Op { op, .. } => op.keyword(),
+            Node::Init { .. } => "init",
+            Node::Next { .. } => "next",
+            Node::Bad { .. } => "bad",
+            Node::Constraint { .. } => "constraint",
+            Node::Fair { .. } => "fair",
+            Node::Output { .. } => "output",
+            Node::Justice { .. } => "justice",
+        }
+    }
+}
+
 /// Constant value representation (preserved at the original radix for fidelity).
 #[derive(Debug, Clone)]
 pub enum ConstValue {
@@ -198,7 +220,42 @@ pub enum Op {
     Write,
 }
 
+#[cfg(test)]
+mod keyword_table_tests {
+    use super::Op;
+
+    /// mununu#1121 — the keyword table the "unknown BTOR2 keyword" refusal ranks agrees with
+    /// the `from_keyword` / `keyword` pair, entry by entry, with no duplicate.
+    #[test]
+    fn x1121_every_listed_keyword_parses_and_prints_back_to_itself() {
+        for kw in Op::KEYWORDS {
+            let op =
+                Op::from_keyword(kw).unwrap_or_else(|| panic!("`{kw}` is listed but not parsed"));
+            assert_eq!(op.keyword(), *kw);
+        }
+        let mut sorted = Op::KEYWORDS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            Op::KEYWORDS.len(),
+            "a keyword is listed twice"
+        );
+    }
+}
+
 impl Op {
+    /// Every keyword [`Op::from_keyword`] accepts, in the match's order — the candidates an
+    /// "unknown BTOR2 keyword" refusal ranks (mununu#1121). Kept beside the match; the test
+    /// above holds the two equal entry by entry.
+    pub const KEYWORDS: &'static [&'static str] = &[
+        "not", "inc", "dec", "neg", "redand", "redor", "redxor", "iff", "implies", "eq", "neq",
+        "and", "or", "xor", "nand", "nor", "xnor", "sgt", "ugt", "sgte", "ugte", "slt", "ult",
+        "slte", "ulte", "add", "sub", "mul", "sll", "srl", "sra", "rol", "ror", "concat", "slice",
+        "uext", "sext", "ite", "sdiv", "udiv", "smod", "srem", "urem", "saddo", "ssubo", "smulo",
+        "uaddo", "usubo", "umulo", "sdivo", "read", "write",
+    ];
+
     /// Convert a BTOR2 keyword into an `Op`. Returns `None` for unrecognized
     /// keywords (which include `sort`, `input`, `state`, `init`, `next`, etc.,
     /// handled separately by the parser).
@@ -536,5 +593,19 @@ impl Btor2File {
         self.lines
             .iter()
             .filter(|l| matches!(l.node, Node::Fair { .. }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// mununu#1121 — a node names itself by its BTOR2 keyword, an operator by its mnemonic.
+    #[test]
+    fn x1121_a_btor2_node_names_itself_by_its_keyword() {
+        let file = crate::adapter::btor2::parser::parse(
+            "1 sort bitvec 1\n2 input 1 a\n3 state 1 b\n4 and 1 2 3\n5 next 1 3 4\n6 bad 4\n",
+        )
+        .expect("parses");
+        let kinds: Vec<&str> = file.lines.iter().map(|l| l.node.kind_keyword()).collect();
+        assert_eq!(kinds, ["sort", "input", "state", "and", "next", "bad"]);
     }
 }

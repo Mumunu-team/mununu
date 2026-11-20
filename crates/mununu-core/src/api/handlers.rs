@@ -12,7 +12,9 @@ use tracing::info;
 use crate::api::error::{ApiError, ApiResult};
 use crate::api::graph::generate_graphs;
 use crate::api::models::*;
-use crate::api::ops::{compute_counterstrategy_result, resolve_template_ref_for_cache};
+use crate::api::ops::{
+    compute_counterstrategy_result, known_automata, known_formulas, resolve_template_ref_for_cache,
+};
 use crate::clts::{Clts, DefaultLabelIdx, DefaultStateIdx, LabelId};
 use crate::context::{ControllerSynthesisOptions, DiagnosticsOptions as ContextDiagnosticsOptions};
 use crate::guard::sanitize_identifier;
@@ -246,8 +248,8 @@ fn context_summarize_handler_impl(
 /// 2. Else, `extract_strategy = true` → `Functional` (legacy mapping).
 /// 3. Else, `Projection` (default).
 ///
-/// Accepted names: `projection`, `functional`, `permissive`,
-/// `signature-memory`, `product-game`, `parity-game`. The dashes may also
+/// Accepted names: [`ControllerMode::names`] (`projection`, `functional`, `permissive`,
+/// `signature-memory`, `product-game`, `parity-game`, `gr1`). The dashes may also
 /// be underscores or removed (e.g., `parity_game` and `paritygame` work).
 fn resolve_controller_mode(
     mode: &Option<String>,
@@ -257,9 +259,8 @@ fn resolve_controller_mode(
     if let Some(name) = mode {
         return ControllerMode::from_normalized_name(name).map_err(|other| ApiError::BadRequest {
             message: format!("Unknown controller_mode '{other}'"),
-            details: Some(
-                "Valid: projection, functional, permissive, signature-memory, product-game, parity-game".into(),
-            ),
+            // mununu#1121 — generated from the enum, so the list cannot drift from the CLI's.
+            details: Some(format!("Valid: {}", ControllerMode::names().join(", "))),
         });
     }
     Ok(if extract_strategy {
@@ -363,14 +364,14 @@ fn context_synthesize_handler_impl(
             .get(&formula_name)
             .ok_or_else(|| ApiError::BadRequest {
                 message: format!("Unknown formula '{}'", formula_name),
-                details: None,
+                details: Some(known_formulas(realized, &formula_name)),
             })?;
 
     // Verify automaton exists
     if realized.context.clts(&request.automaton).is_none() {
         return Err(ApiError::BadRequest {
             message: format!("Unknown automaton '{}'", request.automaton),
-            details: None,
+            details: Some(known_automata(realized, &request.automaton)),
         });
     }
 
@@ -2784,7 +2785,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
         .collect();
 
     let formula = mu_parser::parse(params.formula).map_err(|e| ApiError::BadRequest {
-        message: format!("formula parse error: {e:?}"),
+        message: format!("formula parse error: {e}"),
         details: None,
     })?;
 
@@ -3192,6 +3193,16 @@ fn convert_diagnostics(
 }
 
 /// Serialize controller CLTS to ctxdsl format
+/// mununu#1121 U2.10 — `writeln!` into a `String` cannot fail; if it ever does, that is ours.
+fn dsl_write_failed(e: std::fmt::Error) -> ApiError {
+    ApiError::Internal {
+        message: crate::adapter::owner::mununu_defect(&format!(
+            "Failed to write controller DSL: {e}"
+        )),
+        source: None,
+    }
+}
+
 fn serialize_controller_to_ctxdsl(
     controller: &Clts<DefaultStateIdx, DefaultLabelIdx>,
     automaton: &str,
@@ -3291,62 +3302,35 @@ fn serialize_controller_to_ctxdsl(
         "// Synthesised controller derived from automaton '{}' and formula '{}'",
         automaton, formula
     )
-    .map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    .map_err(dsl_write_failed)?;
 
     // Write context declaration
-    writeln!(output, "context {context_ident} {{").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "context {context_ident} {{").map_err(dsl_write_failed)?;
 
     // Write alphabet
     if !label_entries.is_empty() {
-        writeln!(output, "    alphabet {{").map_err(|e| ApiError::Internal {
-            message: format!("Failed to write controller DSL: {}", e),
-            source: None,
-        })?;
+        writeln!(output, "    alphabet {{").map_err(dsl_write_failed)?;
         for (_, ident, payload) in &label_entries {
             if payload.is_empty() {
-                writeln!(output, "        label {ident};").map_err(|e| ApiError::Internal {
-                    message: format!("Failed to write controller DSL: {}", e),
-                    source: None,
-                })?;
+                writeln!(output, "        label {ident};").map_err(dsl_write_failed)?;
             } else {
                 writeln!(
                     output,
                     "        label {ident}; // original symbols: {}",
                     payload.join(", ")
                 )
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to write controller DSL: {}", e),
-                    source: None,
-                })?;
+                .map_err(dsl_write_failed)?;
             }
         }
-        writeln!(output, "    }}").map_err(|e| ApiError::Internal {
-            message: format!("Failed to write controller DSL: {}", e),
-            source: None,
-        })?;
+        writeln!(output, "    }}").map_err(dsl_write_failed)?;
     }
 
     // Write automata section
-    writeln!(output, "    automata {{").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "        automaton {automaton_ident} {{").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "    automata {{").map_err(dsl_write_failed)?;
+    writeln!(output, "        automaton {automaton_ident} {{").map_err(dsl_write_failed)?;
 
     // Write states
-    writeln!(output, "            states {{").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "            states {{").map_err(dsl_write_failed)?;
     for state in controller.states() {
         let idx = state.index();
         let name = &state_idents[idx];
@@ -3360,21 +3344,12 @@ fn serialize_controller_to_ctxdsl(
             line.push_str(" // original: ");
             line.push_str(raw);
         }
-        writeln!(output, "{line}").map_err(|e| ApiError::Internal {
-            message: format!("Failed to write controller DSL: {}", e),
-            source: None,
-        })?;
+        writeln!(output, "{line}").map_err(dsl_write_failed)?;
     }
-    writeln!(output, "            }}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "            }}").map_err(dsl_write_failed)?;
 
     // Write transitions
-    writeln!(output, "            transitions {{").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "            transitions {{").map_err(dsl_write_failed)?;
     for state in controller.states() {
         let source_name = &state_idents[state.index()];
         for transition in controller.outgoing(state) {
@@ -3401,59 +3376,26 @@ fn serialize_controller_to_ctxdsl(
             } else {
                 line.push_str(" // uncontrollable");
             }
-            writeln!(output, "{line}").map_err(|e| ApiError::Internal {
-                message: format!("Failed to write controller DSL: {}", e),
-                source: None,
-            })?;
+            writeln!(output, "{line}").map_err(dsl_write_failed)?;
         }
     }
-    writeln!(output, "            }}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "        }}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "    }}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "            }}").map_err(dsl_write_failed)?;
+    writeln!(output, "        }}").map_err(dsl_write_failed)?;
+    writeln!(output, "    }}").map_err(dsl_write_failed)?;
 
     // Write mu_formulas section
-    writeln!(output, "    mu_formulas {{").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    writeln!(output, "    mu_formulas {{").map_err(dsl_write_failed)?;
     writeln!(
         output,
         "        formula {} {{",
         sanitize_identifier(formula)
     )
-    .map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "            over {automaton_ident};").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "            body = {raw_formula};").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "        }}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "    }}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
-    writeln!(output, "}}").map_err(|e| ApiError::Internal {
-        message: format!("Failed to write controller DSL: {}", e),
-        source: None,
-    })?;
+    .map_err(dsl_write_failed)?;
+    writeln!(output, "            over {automaton_ident};").map_err(dsl_write_failed)?;
+    writeln!(output, "            body = {raw_formula};").map_err(dsl_write_failed)?;
+    writeln!(output, "        }}").map_err(dsl_write_failed)?;
+    writeln!(output, "    }}").map_err(dsl_write_failed)?;
+    writeln!(output, "}}").map_err(dsl_write_failed)?;
 
     Ok(output)
 }
@@ -4087,7 +4029,7 @@ fn codesign_verify_handler_impl(
         })?;
 
     let context_doc = parse(&composed.ctxdsl).map_err(|e| ApiError::Internal {
-        message: format!("composed CTXDSL failed to parse: {e:?}"),
+        message: format!("composed CTXDSL failed to parse: {e}"),
         source: None,
     })?;
     let realized = realize_context(&context_doc, &[]).map_err(|e| ApiError::Internal {
@@ -4100,7 +4042,7 @@ fn codesign_verify_handler_impl(
         .get(&request.formula)
         .ok_or_else(|| ApiError::BadRequest {
             message: format!("unknown formula '{}' in composed context", request.formula),
-            details: None,
+            details: Some(known_formulas(&realized, &request.formula)),
         })?;
 
     let automaton_name = request

@@ -120,9 +120,13 @@ pub(crate) fn emit_atom(
         .or_else(|| input_nid_and_sort(file, signal))
         .or_else(|| output_nid_and_sort(file, signal))
         .ok_or_else(|| {
-            err(format!(
-                "adapter/btor2/l2s_monitor: {role} `{signal}` is not a state cell, a primary \
-                 input, or a named output, so the response monitor cannot bind it"
+            err(crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "adapter/btor2/l2s_monitor: {role} `{signal}` is not a state cell, a primary \
+                     input, or a named output, so the response monitor cannot bind it (internal \
+                     nets are not bound)"
+                ),
+                Some("name a register, an input or an output port"),
             ))
         })?;
     // mununu#1012 — a constant past the signal's width fixes the comparison; a `constd` at the

@@ -48,7 +48,12 @@ pub fn extract_from_source(
                 .as_deref()
                 .and_then(parser::SourceLanguage::from_name)
         })
-        .ok_or_else(|| format!("Unknown language: {language}"))?;
+        .ok_or_else(|| {
+            format!(
+                "Unknown language: {language} (expected one of: {})",
+                parser::SourceLanguage::NAMES.join(", ")
+            )
+        })?;
 
     let parsed = parser::parse_source(source_code, lang)?;
 
@@ -263,23 +268,31 @@ fn build_resource_automaton_def(
         resource.states.iter().map(String::as_str).collect();
     if !states_set.contains(resource.initial.as_str()) {
         return Err(format!(
-            "composition.resources['{}'].initial = '{}' is not in `states` (declared: {:?})",
-            resource.name, resource.initial, resource.states
+            "composition.resources['{}'].initial = '{}' is not in `states` (declared: {})",
+            resource.name,
+            resource.initial,
+            resource.states.join(", ")
         ));
     }
     for (i, t) in resource.transitions.iter().enumerate() {
         if !states_set.contains(t.from.as_str()) {
             return Err(format!(
                 "composition.resources['{}'].transitions[{}].from = '{}' \
-                 is not in `states` (declared: {:?})",
-                resource.name, i, t.from, resource.states
+                 is not in `states` (declared: {})",
+                resource.name,
+                i,
+                t.from,
+                resource.states.join(", ")
             ));
         }
         if !states_set.contains(t.to.as_str()) {
             return Err(format!(
                 "composition.resources['{}'].transitions[{}].to = '{}' \
-                 is not in `states` (declared: {:?})",
-                resource.name, i, t.to, resource.states
+                 is not in `states` (declared: {})",
+                resource.name,
+                i,
+                t.to,
+                resource.states.join(", ")
             ));
         }
     }

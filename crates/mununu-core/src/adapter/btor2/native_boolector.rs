@@ -112,7 +112,14 @@ impl std::fmt::Display for BoolectorError {
             BoolectorError::UnsupportedOp(op) => {
                 write!(
                     f,
-                    "native Boolector: unmodelled operator `{op}` — abstaining"
+                    "{}",
+                    crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "native Boolector: operator `{op}` is not modelled by this member, \
+                             which abstains"
+                        ),
+                        Some("the other members of the portfolio still run"),
+                    )
                 )
             }
             BoolectorError::UnsupportedSort => {
@@ -274,7 +281,7 @@ fn encode_op(
         // conventions that differ; `read`/`write` are array ops (also excluded via
         // the array-sort guard, handled here defensively).
         Op::Rol | Op::Ror | Op::Read | Op::Write => {
-            return Err(BoolectorError::UnsupportedOp(format!("{op:?}")));
+            return Err(BoolectorError::UnsupportedOp(op.keyword().to_string()));
         }
     };
     Ok(bv)

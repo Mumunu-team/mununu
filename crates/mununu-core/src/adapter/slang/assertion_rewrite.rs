@@ -192,9 +192,11 @@ fn inline(node: &Value, domains: &LocalVarDomains) -> Result<Value, String> {
                         let plain = body.get("kind").and_then(Value::as_str) == Some("Simple")
                             && body.get("repetition").is_none();
                         if !plain {
-                            return Err("a repetition of a named sequence that is not a plain \
-                                        boolean needs length composition — Tier-3b"
-                                .into());
+                            return Err(crate::adapter::owner::mununu_limitation(
+                                "a repetition of a named sequence that is not a plain boolean \
+                                 needs length composition",
+                                None,
+                            ));
                         }
                         let mut b = body;
                         b["repetition"] = rep.clone();

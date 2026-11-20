@@ -594,9 +594,14 @@ fn artifacts_from_cached(
 ) -> Result<SvFlattenArtifacts, AdapterError> {
     let frontend_used = frontend_from_tag(&hit.frontend_used).ok_or_else(|| AdapterError {
         kind: AdapterErrorKind::ParseError,
+        // mununu#1121 — `LiftCache::lookup` already treats such an entry as a miss, so a hit
+        // that reaches here is ours, not the user's; say so rather than send them to the cache.
         message: format!(
-            "adapter/yosys: lift cache entry names an unknown front end `{}`",
-            hit.frontend_used
+            "adapter/yosys: lift cache entry names an unknown front end `{}` (expected one of: {}); \
+             the cache lookup treats such an entry as a miss, so reaching this is a mununu defect \
+             (please report)",
+            hit.frontend_used,
+            lift_cache::FRONTEND_TAGS.join(", ")
         ),
         location: None,
     })?;
@@ -663,6 +668,9 @@ struct Sv2vPlan {
 /// Plan one concrete lift of `content` staged under `dir` (which need not exist: the lift
 /// cache plans against a placeholder). Touches no file; locates the tools it would run.
 fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan, AdapterError> {
+    // Security gate (OWASP command injection): every value below is interpolated unquoted into
+    // the one `-p` script, so each is checked against its grammar before any text is built.
+    validate_lift_inputs(yopts)?;
     let primary = dir.join("work.sv");
     // A2 — strip yosys/slang-rejected net-type qualifiers on port headers
     // (`input tri0 x`) so the design parses; sound (a port net type is invisible
@@ -975,11 +983,12 @@ fn read_lift_snapshot(path: &Path, what: &str) -> Result<String, AdapterError> {
 fn lift_snapshot_error(path: &Path, what: &str, why: &str) -> AdapterError {
     AdapterError {
         kind: AdapterErrorKind::ParseError,
-        message: format!(
+        message: crate::adapter::owner::mununu_defect(&format!(
             "adapter/yosys: yosys ran but its {what} snapshot {} cannot be used ({why}); without \
-             it the multi-clock refusal and the black-box scan would be skipped",
+             it the multi-clock refusal and the black-box scan would be skipped (please include \
+             the yosys log)",
             path.display()
-        ),
+        )),
         location: None,
     }
 }
@@ -1006,8 +1015,9 @@ fn refuse_merged_clock_domains(
                  gated, divided or muxed clock); the model has one implicit clock that ticks on \
                  every step, so lifting it would ignore the logic that gates or divides the \
                  clock and every verdict could be wrong. Clock domains: {}. Model the gating as \
-                 a clock enable (`if (en) q <= d;` on the root clock), or pass \
-                 `--merge-clock-domains` to accept the lockstep model explicitly.",
+                 a clock enable (`if (en) q <= d;` on the root clock); `--merge-clock-domains` \
+                 on `sv verify-auto` accepts the lockstep model explicitly, and the other verbs \
+                 have no such switch (a mununu limitation).",
                 d.net,
                 d.derived_from.as_deref().unwrap_or("logic"),
                 describe_clock_domains(domains)
@@ -1021,9 +1031,10 @@ fn refuse_merged_clock_domains(
             message: format!(
                 "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
                  clock, so lifting it would step every domain together and hide every crossing \
-                 defect. Run `mununu sv cdc-lint` to classify the crossings, verify each domain \
-                 on its own, or pass `--merge-clock-domains` to accept that under-approximation \
-                 explicitly.",
+                 defect. Run `mununu sv cdc-lint` to classify the crossings, or verify each \
+                 domain on its own; `--merge-clock-domains` on `sv verify-auto` accepts that \
+                 under-approximation explicitly, and the other verbs have no such switch (a \
+                 mununu limitation).",
                 domains.len(),
                 describe_clock_domains(domains)
             ),
@@ -2003,6 +2014,17 @@ fn translate_sv_per_module_impl(
     // BTOR2 through the existing BTOR2 adapter.
     let mut outputs = Vec::with_capacity(submodules.len());
     for module_name in &submodules {
+        // The name comes from yosys's hierarchy of the user's design; an escaped identifier
+        // would reach `hierarchy -top` unquoted (the same gate as `validate_lift_inputs`).
+        if !is_valid_module_name(module_name) {
+            return Err(refuse_lift_input(
+                "a module name in the design's hierarchy",
+                module_name,
+                "a plain identifier (letters, digits, `_`, `$`, not starting with a digit)",
+                "rename the module — an escaped identifier cannot be named in the per-module \
+                 lift script today (a mununu limitation)",
+            ));
+        }
         let btor_path = out_dir.join(format!("{module_name}.btor2"));
         let script = build_per_module_script(
             &sources,
@@ -2243,7 +2265,8 @@ fn lift_timeout_outcome(
             "adapter/yosys: `{tool}` exceeded the lift timeout and was killed. The lift runs \
              before any property is attempted, so this would otherwise hang with no output at \
              all. Raise or disable the cap with {}=<ms> (0 disables), or reduce the design \
-             (fewer sources, a narrower --top).",
+             (fewer sources, or a narrower top: `--top` on the `sv` verbs, the source's `top` \
+             key in a `mununu verify` config).",
             crate::adapter::LIFT_TIMEOUT_ENV
         ),
         location: None,
@@ -2893,8 +2916,9 @@ fn read_slang_hint(text: &str) -> String {
         hint.push_str(&format!(
             " — the design instantiates a module with no definition: sv-elab needs one for every \
              instantiated module (`read_verilog` lifted a missing one silently; a known flop \
-             primitive such as prim_flop / prim_sparse_fsm_flop is still stubbed automatically \
-             unless --no-auto-stub-flops). Add the module's source, or an empty stub module with \
+             primitive such as prim_flop / prim_sparse_fsm_flop is still stubbed automatically; \
+             `--no-auto-stub-flops` on `sv verify-auto` turns that off). Add the module's source, \
+             or an empty stub module with \
              its ports: marked `(* {MISSING_MODULE_ATTR} *)` it stands in for the missing module \
              exactly as the old reader did — outputs free, a VIOLATED over them withheld — and \
              unmarked (or `(* blackbox *)`) it is a deliberate cut that keeps its verdict under \
@@ -3176,6 +3200,138 @@ fn is_valid_net_name(name: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
+
+/// A module name is safe in the `-p` script iff it is a plain SystemVerilog identifier:
+/// `--top`, `hierarchy -top` and the per-module scripts interpolate it unquoted into the one
+/// `-p` argument (the same gate as [`is_valid_net_name`]). Escaped identifiers (`\\a;b `) are
+/// legal SystemVerilog and are refused here on purpose.
+pub(crate) fn is_valid_module_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
+}
+
+/// A parameter name is one or more module-name segments joined by `.` (`WIDTH`,
+/// `core.WIDTH`); the lift keeps the last segment for `-G`.
+pub(crate) fn is_valid_param_name(name: &str) -> bool {
+    !name.is_empty() && name.split('.').all(is_valid_module_name)
+}
+
+/// A parameter value is a plain SystemVerilog literal or identifier as it reaches `-G NAME=VALUE`
+/// unquoted: digits, letters, `_`, `'`, `.`, `+`, `-` (`8`, `4'hF`, `-1`, `1.5`, `WIDTH`,
+/// `32'd10`). No whitespace, quotes or shell / yosys punctuation; a string-valued parameter is
+/// not accepted on this path.
+pub(crate) fn is_valid_param_value(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '.' | '+' | '-'))
+}
+
+/// An additional source's file name, as it is written under the staging directory and named in
+/// the `read_slang` line and the replay Makefile: path components of letters, digits, `_`, `-`,
+/// `.`, `/`, not starting with `-` (an option) and, through [`crate::adapter::staged_path`],
+/// relative with no `..`.
+pub(crate) fn is_valid_source_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+}
+
+fn refuse_lift_input(field: &str, value: &str, accepted: &str, remedy: &str) -> AdapterError {
+    AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!(
+            "adapter/yosys: {field} `{value}` is not accepted — the lift passes it to yosys \
+             inside one command script, so only {accepted} is taken; {remedy}."
+        ),
+        location: None,
+    }
+}
+
+/// Every request value that reaches the yosys script or the replay Makefile, checked before any
+/// text is built: `top`, each parameter name and value, each additional source name. Called
+/// first thing by `plan_lift`; the replay generator checks `top` and the source names again.
+pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterError> {
+    if let Some(top) = yopts.top.as_deref()
+        && !is_valid_module_name(top)
+    {
+        return Err(refuse_lift_input(
+            "the top module name",
+            top,
+            "a plain identifier (letters, digits, `_`, `$`, not starting with a digit)",
+            "pass the module's declared name (`--top` / `top`)",
+        ));
+    }
+    for (name, value) in &yopts.params {
+        if !is_valid_param_name(name) {
+            return Err(refuse_lift_input(
+                "the parameter name",
+                name,
+                "an identifier, optionally scoped as `MODULE.NAME`",
+                "name the parameter as the RTL declares it (`--param NAME=VALUE` / `params`)",
+            ));
+        }
+        if !is_valid_param_value(value) {
+            return Err(refuse_lift_input(
+                &format!("the value of parameter `{name}`"),
+                value,
+                "a plain literal or identifier (digits, letters, `_`, `'`, `.`, `+`, `-`: `8`, \
+                 `4'hF`, `-1`, `WIDTH`)",
+                "write the value as the RTL would, without spaces or quotes; a string-valued \
+                 parameter cannot be set on this path today (a mununu limitation)",
+            ));
+        }
+    }
+    for (name, _) in &yopts.additional_sources {
+        if !is_valid_source_name(name) {
+            return Err(refuse_lift_input(
+                "the additional source name",
+                name,
+                "a plain relative file name (letters, digits, `_`, `-`, `.`, `/`)",
+                "rename the file (`additional_sources` / the extra `.sv` arguments)",
+            ));
+        }
+    }
+    // The annotation sidecar's init-policy overrides name signals that `setattr … w:<name>`
+    // writes into the same script (the sibling the first sweep missed).
+    for (name, _) in &yopts.init_policy_overrides {
+        if !is_valid_net_name(name) {
+            return Err(refuse_lift_input(
+                "the init-policy override's signal name",
+                name,
+                "a plain net name (letters, digits, `_`, `$`, `.`, a `[hi:lo]` select)",
+                "name the signal as the RTL declares it in the annotation sidecar",
+            ));
+        }
+    }
+    // Include directories are written as `-I<dir>` unquoted: a path with whitespace, a
+    // quote or a `;` would split or end the command, so it is refused with the path quoted back
+    // rather than failing inside yosys with no reason.
+    for dir in &yopts.extra_include_dirs {
+        let text = dir.display().to_string();
+        if text.is_empty()
+            || text
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, ';' | '"' | '\'' | '`'))
+        {
+            return Err(refuse_lift_input(
+                "the include directory",
+                &text,
+                "a path without whitespace, quotes or `;`",
+                "move or rename the directory (`-I` / `include_dirs`)",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Emit the explicit control-slice cut-point pass: `cutpoint w:<sig> …; ` (empty
@@ -4390,6 +4546,154 @@ endmodule
         assert!(
             hier_pos < setattr_pos && setattr_pos < proc_pos,
             "setattr must appear between hierarchy and proc; ordering = hier@{hier_pos} setattr@{setattr_pos} proc@{proc_pos}"
+        );
+    }
+
+    // ----- Lift-input validation (yosys-free) --------------------------
+
+    /// Every request value that reaches the `-p` script is refused unless it matches its
+    /// grammar, before any text is built and naming the field; the plain forms pass. One hostile
+    /// value per field (a `;` ends a yosys command, a space splits an argument, quotes and `$(`
+    /// reach the replay Makefile). Uses only `plan_lift` and `YosysOptions`, so it compiles on
+    /// the parent, where the plan accepts every one of these.
+    #[test]
+    fn hostile_lift_inputs_are_refused_by_field_before_any_script_is_built() {
+        type Mutate<'a> = &'a dyn Fn(&mut YosysOptions);
+        let tmp = TempDir::new("mununu-yosys-inputs").expect("tempdir");
+        let design = "module m; endmodule\n";
+        let plan = |mutate: Mutate<'_>| {
+            let mut yopts = YosysOptions::default();
+            mutate(&mut yopts);
+            plan_lift(design, &yopts, tmp.path())
+                .map(|_| ())
+                .map_err(|e| e.message)
+        };
+        let hostile: &[(&str, Mutate<'_>, &str)] = &[
+            (
+                "top with a command",
+                &|o| o.top = Some("m; shell id".into()),
+                "top module name",
+            ),
+            (
+                "top with a space",
+                &|o| o.top = Some("m x".into()),
+                "top module name",
+            ),
+            (
+                "top with a quote",
+                &|o| o.top = Some("m\"".into()),
+                "top module name",
+            ),
+            (
+                "param name",
+                &|o| o.params = vec![("W; shell id".into(), "8".into())],
+                "parameter name",
+            ),
+            (
+                "param value with a space",
+                &|o| o.params = vec![("W".into(), "8 ; shell id".into())],
+                "value of parameter `W`",
+            ),
+            (
+                "param value with make syntax",
+                &|o| o.params = vec![("W".into(), "$(shell id)".into())],
+                "value of parameter `W`",
+            ),
+            (
+                "source name with a space",
+                &|o| o.additional_sources = vec![("a b.sv".into(), String::new())],
+                "additional source name",
+            ),
+            (
+                "source name as an option",
+                &|o| o.additional_sources = vec![("-p".into(), String::new())],
+                "additional source name",
+            ),
+            (
+                "source name with a semicolon",
+                &|o| o.additional_sources = vec![("x.sv; shell id".into(), String::new())],
+                "additional source name",
+            ),
+            (
+                "init-policy override name with a command",
+                &|o| {
+                    o.init_policy_overrides = vec![(
+                        "q; shell id".into(),
+                        crate::adapter::systemverilog::annotation::InitPolicy::Zero,
+                    )]
+                },
+                "init-policy override's signal name",
+            ),
+            (
+                "include directory with a space",
+                &|o| o.extra_include_dirs = vec![PathBuf::from("inc dir")],
+                "include directory",
+            ),
+        ];
+        for (what, mutate, field) in hostile {
+            let err = plan(*mutate).expect_err(what);
+            assert!(
+                err.contains(field) && err.contains("is not accepted"),
+                "{what}: the refusal names the field: {err}"
+            );
+        }
+        // The plain forms pass this gate (the plan may still fail later for other reasons; the
+        // message would then not be the input refusal).
+        let plain: &[(&str, Mutate<'_>)] = &[
+            ("a plain top", &|o| o.top = Some("core_top".into())),
+            ("a scoped param with a sized literal", &|o| {
+                o.params = vec![
+                    ("core.WIDTH".into(), "4'hF".into()),
+                    ("N".into(), "-1".into()),
+                ]
+            }),
+            ("a nested source path", &|o| {
+                o.additional_sources =
+                    vec![("rtl/sub-mod_v2.sv".into(), "module s; endmodule\n".into())]
+            }),
+            (
+                "a hierarchical override name and a plain include dir",
+                &|o| {
+                    o.init_policy_overrides = vec![(
+                        "core.q_reg[3:0]".into(),
+                        crate::adapter::systemverilog::annotation::InitPolicy::Zero,
+                    )];
+                    o.extra_include_dirs = vec![PathBuf::from("rtl/include")];
+                },
+            ),
+        ];
+        for (what, mutate) in plain {
+            if let Err(e) = plan(*mutate) {
+                assert!(
+                    !e.contains("is not accepted"),
+                    "{what} passes the gate: {e}"
+                );
+            }
+        }
+    }
+
+    /// The seam: each grammar on its own.
+    #[test]
+    fn lift_input_grammars_accept_the_rtl_forms_and_nothing_else() {
+        assert!(is_valid_module_name("_m$1") && is_valid_module_name("core_top"));
+        assert!(
+            !is_valid_module_name("1m")
+                && !is_valid_module_name("")
+                && !is_valid_module_name("a.b")
+        );
+        assert!(is_valid_param_name("WIDTH") && is_valid_param_name("core.sub.WIDTH"));
+        assert!(!is_valid_param_name("core..W") && !is_valid_param_name(".W"));
+        for v in ["8", "4'hF", "-1", "1.5", "WIDTH", "32'd10", "+3"] {
+            assert!(is_valid_param_value(v), "{v}");
+        }
+        for v in ["\"str\"", "", "8 ", "$(x)", "a;b", "`x"] {
+            assert!(!is_valid_param_value(v), "{v}");
+        }
+        assert!(is_valid_source_name("a.sv") && is_valid_source_name("rtl/sub-mod_v2.sv"));
+        assert!(
+            !is_valid_source_name("-p")
+                && !is_valid_source_name("a b.sv")
+                && !is_valid_source_name("x;y")
         );
     }
 

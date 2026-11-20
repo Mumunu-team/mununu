@@ -64,6 +64,124 @@ pub fn require_tool(tool: &str, present: bool) -> bool {
     }
     present
 }
+
+/// mununu#1121 — an "unknown X" refusal prints every candidate, sorted, when the set has at most
+/// this many members; a larger set prints the [`CANDIDATE_LIST_NEAREST`] nearest followed by
+/// "and N more" (`docs/policies/failure-paths.md`, Rule 5).
+pub const CANDIDATE_LIST_FULL: usize = 20;
+/// How many candidates [`candidate_list`] shows of a set larger than [`CANDIDATE_LIST_FULL`].
+pub const CANDIDATE_LIST_NEAREST: usize = 5;
+
+/// mununu#1121 — the candidates nearest to `wanted`, at most `max`: an exact match ignoring case
+/// first, then a candidate that is a prefix of `wanted` (or the reverse), then the rest by edit
+/// distance; ties alphabetically. Duplicates are dropped. The ranking an "unknown X" message
+/// uses when the candidate set is too large to print whole.
+pub fn nearest_names<'a>(
+    wanted: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+    max: usize,
+) -> Vec<&'a str> {
+    let wanted_lc = wanted.to_lowercase();
+    let mut ranked: Vec<(u8, usize, &'a str)> = candidates
+        .into_iter()
+        .map(|candidate| {
+            let candidate_lc = candidate.to_lowercase();
+            let class = if candidate_lc == wanted_lc {
+                0
+            } else if candidate_lc.starts_with(&wanted_lc) || wanted_lc.starts_with(&candidate_lc) {
+                1
+            } else {
+                2
+            };
+            (class, edit_distance(&wanted_lc, &candidate_lc), candidate)
+        })
+        .collect();
+    ranked.sort_unstable();
+    ranked.dedup_by(|a, b| a.2 == b.2);
+    ranked.truncate(max);
+    ranked
+        .into_iter()
+        .map(|(_, _, candidate)| candidate)
+        .collect()
+}
+
+/// mununu#1121 — the candidate list an "unknown X" message appends: every candidate, sorted and
+/// comma-separated, when there are at most [`CANDIDATE_LIST_FULL`]; otherwise the
+/// [`CANDIDATE_LIST_NEAREST`] nearest to `wanted` (see [`nearest_names`]) and "and N more".
+/// An empty set reads "(none declared)", so the message still says what was looked at.
+pub fn candidate_list<'a>(wanted: &str, candidates: impl IntoIterator<Item = &'a str>) -> String {
+    let mut all: Vec<&str> = candidates.into_iter().collect();
+    all.sort_unstable();
+    all.dedup();
+    if all.is_empty() {
+        return "(none declared)".to_string();
+    }
+    if all.len() <= CANDIDATE_LIST_FULL {
+        return all.join(", ");
+    }
+    let shown = nearest_names(wanted, all.iter().copied(), CANDIDATE_LIST_NEAREST);
+    format!("{} and {} more", shown.join(", "), all.len() - shown.len())
+}
+
+/// Levenshtein distance over chars; both inputs are short names, so the quadratic table is fine.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let subst = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = subst.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+#[cfg(test)]
+mod candidate_list_tests {
+    use super::*;
+
+    #[test]
+    fn x1121_nearest_names_ranks_exact_then_prefix_then_edit_distance() {
+        let names = ["parity-game", "product-game", "projection", "gr1"];
+        assert_eq!(
+            nearest_names("Projection", names, 1),
+            vec!["projection"],
+            "an exact match ignoring case comes first"
+        );
+        assert_eq!(
+            nearest_names("pro", names, 2),
+            vec!["projection", "product-game"],
+            "a shared prefix beats a smaller edit distance (`gr1` is closer by edits); \
+             among prefixes the shorter edit distance first"
+        );
+        assert_eq!(
+            nearest_names("parity_gam", names, 1),
+            vec!["parity-game"],
+            "otherwise the nearest by edit distance"
+        );
+        assert_eq!(nearest_names("x", ["b", "a", "a"], 5), vec!["a", "b"]);
+        assert!(nearest_names("x", [], 3).is_empty());
+    }
+
+    #[test]
+    fn x1121_candidate_list_prints_a_small_set_whole_and_a_large_set_by_nearness() {
+        assert_eq!(candidate_list("b", ["c", "a", "b", "a"]), "a, b, c");
+        assert_eq!(candidate_list("b", []), "(none declared)");
+        let many: Vec<String> = (0..30).map(|i| format!("reg_{i:02}")).collect();
+        let listed = candidate_list("reg_1", many.iter().map(String::as_str));
+        assert!(
+            listed.starts_with("reg_10, reg_11, reg_12, reg_13, reg_14"),
+            "{listed}"
+        );
+        assert!(listed.ends_with(" and 25 more"), "{listed}");
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
+}
 pub mod extraction;
 pub mod fault_adversary;
 pub mod fsm_scan;
@@ -74,6 +192,8 @@ pub mod langgraph;
 pub mod liveness_rescue;
 pub mod memory_budget;
 pub mod microcode;
+/// mununu#1121 U2.10 — the owner clause of a message that reports a gap.
+pub mod owner;
 pub mod partial_json;
 pub mod partition;
 pub mod pono;

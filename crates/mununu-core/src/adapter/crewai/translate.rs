@@ -26,9 +26,14 @@ pub fn to_ir(crew: &Crew, warnings: &mut Vec<AdapterWarning>) -> AdapterIR {
     if crew.process != "sequential" {
         warnings.push(AdapterWarning {
             kind: WarningKind::ApproximateTranslation,
-            message: format!(
-                "process = \"{}\" is not yet fully modelled; falling back to sequential.",
-                crew.process
+            message: crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "process = \"{}\" is modelled as sequential: the tasks run one after \
+                     another in listed order, and the manager's choice of order and delegation \
+                     is dropped",
+                    crew.process
+                ),
+                None,
             ),
             location: None,
         });

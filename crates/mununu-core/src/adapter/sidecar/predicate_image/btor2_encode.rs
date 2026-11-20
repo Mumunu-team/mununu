@@ -30,9 +30,22 @@ use crate::adapter::btor2::term_backend::{WalkError, walk_design};
 /// Error variants raised by [`encode_design`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EncodeError {
-    #[error("BTOR2 NID {nid}: operator '{op_name}' not supported by the predicate-image encoder.")]
+    #[error(
+        "{}",
+        crate::adapter::owner::mununu_limitation(
+            &format!("BTOR2 NID {}: operator '{}' is not encoded by the predicate-image encoder", .nid, .op_name),
+            Some("the sampling may-inference still runs"),
+        )
+    )]
     UnsupportedOperator { nid: i64, op_name: &'static str },
-    #[error("BTOR2 NID {nid}: array sort under Theory::BvOnly. Use Theory::BvUfArray (step 4.5).")]
+    /// The theory is chosen inside mununu from the design's sorts, so an array sort reaching the
+    /// bit-vector-only theory is ours.
+    #[error(
+        "{}",
+        crate::adapter::owner::mununu_defect(
+            &format!("BTOR2 NID {}: array sort encoded under the bit-vector-only theory", .nid)
+        )
+    )]
     ArraySortUnsupportedInBvOnly { nid: i64 },
     /// A `next` line references an operand whose width does not match
     /// its state cell. The BTOR2 parser usually catches this; surfaced
@@ -53,7 +66,12 @@ pub enum EncodeError {
     /// mununu#965 — a memory state whose encoded term has no array domain / range. The encoder
     /// builds every memory from a BTOR2 `sort array`, so this is defence-in-depth; dropping the
     /// memory instead would freeze it across frames and could make a reachable `bad` read Safe.
-    #[error("BTOR2 NID {nid}: memory state has no array sort; it cannot be unrolled.")]
+    #[error(
+        "{}",
+        crate::adapter::owner::mununu_defect(
+            &format!("BTOR2 NID {}: memory state has no array sort, so it cannot be unrolled", .nid)
+        )
+    )]
     MemoryWithoutArraySort { nid: i64 },
 }
 

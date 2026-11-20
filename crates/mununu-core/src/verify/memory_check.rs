@@ -408,7 +408,7 @@ impl MemoryCheckReport {
                 line.push_str(&format!(", fence_semantics = {fs}"));
             }
             if let Some(n) = &p.notes {
-                line.push_str(&format!(", notes = {:?}", n));
+                line.push_str(&format!(", notes = {n}"));
             }
             s.push_str(&line);
             s.push('\n');
@@ -473,8 +473,15 @@ fn format_warning_human(w: &MemoryCheckWarning) -> String {
 fn format_info_human(i: &MemoryCheckInfo) -> String {
     match i {
         MemoryCheckInfo::RvwmoAspirational { source_id } => format!(
-            "[rvwmo_aspirational] source `{}` declares fence_semantics = rvwmo — the orchestrator does not yet enforce RVWMO semantics; the declaration is honoured as a soundness-discipline marker only",
-            source_id
+            "[rvwmo_aspirational] {}",
+            crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "source `{source_id}` declares fence_semantics = rvwmo — the orchestrator \
+                     does not enforce RVWMO semantics; the declaration is honoured as a \
+                     soundness-discipline marker only"
+                ),
+                None,
+            )
         ),
     }
 }

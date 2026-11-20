@@ -71,6 +71,12 @@ fn err(message: String) -> AdapterError {
     }
 }
 
+/// A bit width for a message: the number, or "unknown width" when the sort is not a
+/// bit-vector (mununu#1121 — never `Some(8)` / `None`).
+fn width_or_unknown(width: Option<u32>) -> String {
+    width.map_or_else(|| "unknown width".to_string(), |w| w.to_string())
+}
+
 /// BTOR2 keyword for an *unsigned* comparison (the internal oracle compares
 /// `u128`, so unsigned is the matching semantics).
 pub(crate) fn btor2_cmp_keyword(op: CmpOp) -> &'static str {
@@ -784,9 +790,15 @@ pub(crate) fn compile_boolean_subtree(
                     parser::bv_width(file, r_sort),
                 );
                 if lw.is_none() || lw != rw {
-                    return Err(err(format!(
-                        "adapter/btor2/bad_monitor: relational leaf `{atom}` compares widths \
-                         {lw:?} and {rw:?}; only same-width operands are compiled"
+                    return Err(err(crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "adapter/btor2/bad_monitor: relational leaf `{atom}` compares widths \
+                             {} and {}; the monitor compiles same-width operands only and does \
+                             not extend them",
+                            width_or_unknown(lw),
+                            width_or_unknown(rw)
+                        ),
+                        Some("compare equal-width signals, or a slice of the wider one"),
                     )));
                 }
                 let cmp_kw = btor2_cmp_keyword(op);
@@ -795,18 +807,25 @@ pub(crate) fn compile_boolean_subtree(
                 appended.push(format!("{n} {cmp_kw} {bool_sort} {l_nid} {r_nid}"));
                 Ok(n)
             }
-            Ok(_) => Err(err(format!(
-                "adapter/btor2/bad_monitor: leaf atom `{atom}` uses an addend / select shape not \
-                 supported by the compound monitor"
+            Ok(_) => Err(err(crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "adapter/btor2/bad_monitor: leaf atom `{atom}` uses an addend / select shape \
+                     the compound monitor does not compile"
+                ),
+                Some("the monitor takes `REG op VALUE` and `REG op REG` leaves"),
             ))),
             Err(e) => Err(err(format!(
                 "adapter/btor2/bad_monitor: leaf atom `{atom}` did not parse as a predicate \
-                 expression: {e:?}"
+                 expression: {e}"
             ))),
         },
-        other => Err(err(format!(
-            "adapter/btor2/bad_monitor: compound safety monitor accepts \
-             And/Or/Not/True/False/Predicate only; found {other:?}"
+        other => Err(err(crate::adapter::owner::mununu_limitation(
+            &format!(
+                "adapter/btor2/bad_monitor: compound safety monitor accepts `REG op VALUE` atoms, \
+                 `&&`, `||`, `!`, `true` and `false` only; found {}",
+                other.kind_name()
+            ),
+            None,
         ))),
     }
 }
@@ -1401,9 +1420,13 @@ pub fn emit_bounded_chain_monitor(
                     })?;
                     Ok(if v { self.one } else { self.zero })
                 }
-                other => Err(err(format!(
-                    "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, `||`, \
-                     boxes and `e throughout b[->1]` blocks only; found {other:?}"
+                other => Err(err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, \
+                         `||`, boxes and `e throughout b[->1]` blocks only; found {}",
+                        other.kind_name()
+                    ),
+                    None,
                 ))),
             }
         }
@@ -1711,5 +1734,13 @@ mod tests {
     #[test]
     fn non_state_signal_is_rejected() {
         assert!(emit_ag_state_atom_monitor(CYCLE_FSM, "nope", CmpOp::Eq, 0, false).is_err());
+    }
+
+    /// mununu#1121 — a width prints as the number or as "unknown width", never as an
+    /// `Option`.
+    #[test]
+    fn x1121_a_width_prints_as_a_number_or_unknown_width() {
+        assert_eq!(width_or_unknown(Some(8)), "8");
+        assert_eq!(width_or_unknown(None), "unknown width");
     }
 }

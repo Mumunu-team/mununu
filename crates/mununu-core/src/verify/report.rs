@@ -308,7 +308,15 @@ impl fmt::Display for VerifyError {
             }
             VerifyError::UnknownAdapter { source_id, adapter } => write!(
                 f,
-                "source `{source_id}`: unknown adapter `{adapter}` (orchestrator dispatch doesn't know how to call this adapter yet)"
+                "{}",
+                crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "source `{source_id}`: adapter `{adapter}` is not wired into `verify`; \
+                         the adapters it dispatches: {}",
+                        crate::verify::orchestrator::DISPATCH_ADAPTERS.join(", ")
+                    ),
+                    None,
+                )
             ),
             VerifyError::AdapterTranslationFailed {
                 source_id,
@@ -349,3 +357,38 @@ impl fmt::Display for VerifyError {
 }
 
 impl std::error::Error for VerifyError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// mununu#1121 U2.10 reproducer — a message that reports a gap says whose it is. The
+    /// unknown-adapter refusal used to say "orchestrator dispatch doesn't know how to call this
+    /// adapter yet": no owner, no candidates. It now names the owner (a mununu limitation) and
+    /// lists the adapters `verify` dispatches. Fails on the parent commit: neither phrase is there.
+    #[test]
+    fn x1121_unknown_adapter_message_names_its_owner_and_the_adapters_verify_dispatches() {
+        let msg = VerifyError::UnknownAdapter {
+            source_id: "s0".to_string(),
+            adapter: "made-up-adapter".to_string(),
+        }
+        .to_string();
+        assert!(msg.contains("`made-up-adapter`"), "{msg}");
+        assert!(msg.contains("a mununu limitation"), "{msg}");
+        for name in [
+            "ctxdsl",
+            "xstate",
+            "sv-yosys",
+            "crewai",
+            "langgraph",
+            "microcode",
+            "extraction",
+            "c-codesign",
+        ] {
+            assert!(
+                msg.contains(name),
+                "the candidate list lacks `{name}`: {msg}"
+            );
+        }
+    }
+}

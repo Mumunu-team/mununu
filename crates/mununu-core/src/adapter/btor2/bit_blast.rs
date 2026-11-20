@@ -817,9 +817,20 @@ pub fn to_ir(
             return Err(AdapterError {
                 kind: AdapterErrorKind::UnsupportedConstruct,
                 message: format!(
-                    "BTOR2 operator '{op:?}' at NID {} is not supported by the Phase 1 bit-blaster.{uf_memory_hint} \
-                     Hand the BTOR2 to an external symbolic engine (Phase 3 hand-off) instead.",
-                    line.nid
+                    "{}.{uf_memory_hint}",
+                    crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "BTOR2 operator '{}' at NID {} is not carried by the explicit \
+                             bit-blaster",
+                            op.keyword(),
+                            line.nid
+                        ),
+                        Some(
+                            "declare the memory in the sidecar's `memories`, or use the \
+                             predicate-cube engine (`--engine symbolic` on `sv verify-auto`, \
+                             `sv cegar` or `btor2 cegar`), whose SMT encoding reads memories"
+                        ),
+                    )
                 ),
                 location: Some(SourceLocation {
                     line: line.source_line,
@@ -871,11 +882,16 @@ pub fn to_ir(
         }
         return Err(AdapterError {
             kind: AdapterErrorKind::StateSpaceOverflow,
-            message: format!(
-                "BTOR2 design has {total_state_bits} state bits → 2^{total_state_bits} = {} states (max supported: 2^{MAX_STATE_BITS} = {}). \
-                 Compose-and-decompose (Phase 3) or hand-off to an external symbolic engine.",
-                1u64 << total_state_bits.min(63),
-                1u64 << MAX_STATE_BITS,
+            message: crate::adapter::owner::technique_limit(
+                &format!(
+                    "BTOR2 design has {total_state_bits} state bits → 2^{total_state_bits} = {} \
+                     states; explicit enumeration stops at 2^{MAX_STATE_BITS} = {} states",
+                    1u64 << total_state_bits.min(63),
+                    1u64 << MAX_STATE_BITS,
+                ),
+                "the symbolic engines do not enumerate states (`--engine symbolic` on \
+                 `sv verify-auto`, `sv cegar` or `btor2 cegar`; `--engine exact-symbolic` on \
+                 `sv verify-auto`)",
             ),
             location: None,
         });
@@ -1366,9 +1382,13 @@ fn sum_widths(file: &Btor2File, lines: &[&Line]) -> Result<u32, AdapterError> {
         }
         let width = parser::bv_width(file, sort_nid).ok_or_else(|| AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
-            message: format!(
-                "input/state NID {} references non-bitvec sort {sort_nid} (arrays not yet supported)",
-                line.nid
+            message: crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "input/state NID {} references sort {sort_nid}, which is neither a bit-vector \
+                     nor an array sort; the explicit bit-blaster carries bit-vector cells only",
+                    line.nid
+                ),
+                None,
             ),
             location: Some(SourceLocation {
                 line: line.source_line,
@@ -3222,13 +3242,19 @@ pub(crate) fn havoc_rewrite_memories(
                 if !havoc_nids.contains(&line.nid) {
                     return Err(AdapterError {
                         kind: AdapterErrorKind::UnsupportedConstruct,
-                        message: format!(
-                            "§Phase 10 §10.2 stage 1b: BTOR2 has array-typed state at NID {} \
-                             that the sidecar did not declare with `abstraction: havoc`. \
-                             Stage 1b only handles mixed havoc + bitvec-only fixtures; \
-                             non-havoc memories must wait for stage 3 (UF) or stage 4 \
-                             (bounded bit-blast).",
-                            line.nid,
+                        message: crate::adapter::owner::mununu_limitation(
+                            &format!(
+                                "BTOR2 has array-typed state at NID {} that the sidecar did not \
+                                 declare with `abstraction: havoc`; the explicit bit-blaster \
+                                 carries a memory only as a havoc'd one",
+                                line.nid,
+                            ),
+                            Some(
+                                "declare it under the sidecar's `memories` with `abstraction: \
+                                 havoc` (a sound over-approximation for safety), or use the \
+                                 predicate-cube engine (`--engine symbolic` on `sv verify-auto`, \
+                                 `sv cegar` or `btor2 cegar`)",
+                            ),
                         ),
                         location: Some(SourceLocation {
                             line: line.source_line,
@@ -3307,11 +3333,13 @@ pub(crate) fn havoc_rewrite_memories(
                     kind: AdapterErrorKind::UnsupportedConstruct,
                     message: format!(
                         "§Phase 10 §10.2 stage 1b: havoc rewrite would leave NID {} \
-                         (a {:?}) referencing dropped NID {} (an array-tainted node). \
+                         (a {}) referencing dropped NID {} (an array-tainted node). \
                          The stage 1b rewriter assumes array data flow is self-contained \
                          within the memory subgraph; please file an issue with the BTOR2 \
                          dump so we can extend the rewriter.",
-                        line.nid, line.node, r,
+                        line.nid,
+                        line.node.kind_keyword(),
+                        r,
                     ),
                     location: Some(SourceLocation {
                         line: line.source_line,
@@ -3417,8 +3445,12 @@ fn enumerate_and_blast(
     if clock_count > 1 {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
-            message: format!(
-                "BTOR2 design declares {clock_count} clock-shaped inputs (multi-clock is out of scope for Phase 1)."
+            message: crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "BTOR2 design declares {clock_count} clock-shaped inputs; the explicit \
+                     bit-blaster models a single clock"
+                ),
+                None,
             ),
             location: None,
         });
@@ -6702,7 +6734,9 @@ fn evaluate_pure_with_uf_rep(
             },
             WalkError::Unevaluated(nid) => AdapterError {
                 kind: AdapterErrorKind::IrConsistencyError,
-                message: format!("NID {nid}: init value not yet evaluated"),
+                message: crate::adapter::owner::mununu_defect(&format!(
+                    "the init walk reached NID {nid} before its operands were evaluated"
+                )),
                 location: lookup_loc(nid),
             },
             WalkError::Backend(msg) => AdapterError {
@@ -6866,8 +6900,12 @@ fn eval_op(
         Op::Sdivo => Ok(Bv::from_bool(read(0)?.sdivo(&read(1)?))),
         // Arrays (`read` / `write`) are the one shape left: the simulator carries bit-vector
         // cells only, and the engines refuse array designs before a trace exists.
-        _ => Err(format!(
-            "operator {op:?} unsupported in Phase 1 bit-blaster"
+        _ => Err(crate::adapter::owner::mununu_limitation(
+            &format!(
+                "operator {} is not carried by the explicit bit-blaster's evaluator",
+                op.keyword()
+            ),
+            None,
         )),
     }
 }

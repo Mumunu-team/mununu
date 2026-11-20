@@ -63,7 +63,7 @@ pub fn synthesize_refinement_predicate(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e:?}")),
+            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e}")),
         };
 
         // Register symbol → NID (only named state cells are addressable predicates).
@@ -136,13 +136,21 @@ pub fn synthesize_refinement_predicate(
         let source_bool = match build(source, &cur) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable("source references an unknown register".into());
+                return RefineOutcome::Unavailable(PredicateExpr::unknown_register_reason(
+                    "source references an unknown register",
+                    source,
+                    name_to_nid.keys().map(String::as_str),
+                ));
             }
         };
         let target_bool = match build(target, &nx) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable("target references an unknown register".into());
+                return RefineOutcome::Unavailable(PredicateExpr::unknown_register_reason(
+                    "target references an unknown register",
+                    target,
+                    name_to_nid.keys().map(String::as_str),
+                ));
             }
         };
 
@@ -208,8 +216,10 @@ pub fn synthesize_refinement_predicate(
         match parse_interpolant_to_predicate_expr(&stdout) {
             Some(pe) => RefineOutcome::Predicate(pe),
             None => RefineOutcome::Unavailable(format!(
-                "interpolant outside the parseable grammar: {:?}",
+                "interpolant outside the parseable grammar: {}",
                 extract_interpolant_body(&stdout)
+                    .as_deref()
+                    .unwrap_or("<none>")
             )),
         }
     })
@@ -239,7 +249,7 @@ pub fn must_precondition_interpolant(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e:?}")),
+            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e}")),
         };
         let name_to_nid: HashMap<String, Nid> = view
             .signals
@@ -458,7 +468,7 @@ fn interpolant_at_cut(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e:?}")),
+            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e}")),
         };
         let nid_to_name: HashMap<Nid, String> = view
             .signals
@@ -661,8 +671,10 @@ fn interpolant_at_cut(
         match parse_interpolant_to_predicate_expr(&stdout) {
             Some(pe) => RefineOutcome::Predicate(pe),
             None => RefineOutcome::Unavailable(format!(
-                "interpolant outside the parseable grammar: {:?}",
+                "interpolant outside the parseable grammar: {}",
                 extract_interpolant_body(&stdout)
+                    .as_deref()
+                    .unwrap_or("<none>")
             )),
         }
     })

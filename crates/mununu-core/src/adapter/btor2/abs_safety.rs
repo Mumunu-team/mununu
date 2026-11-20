@@ -34,7 +34,42 @@ use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
 use crate::adapter::btor2::refine::{
     RefineOutcome, sequence_interpolant_predicates, synthesize_refinement_predicate,
 };
+use crate::adapter::owner::{mununu_defect, mununu_limitation, technique_limit};
 use crate::adapter::sidecar::predicate_image::btor2_encode::{SignalKind, encode_design};
+
+/// mununu#1121 U2.10 — the engines that decide the same `bad` without this pass; this pass runs
+/// under `btor2 verify --engine ic3` only (`recoverability::verify_safety_with_engine`).
+const OTHER_ENGINES: &str = "the default portfolio (`--engine portfolio` on `btor2 verify`) decides the same property \
+     with its SAT and IC3 members";
+
+/// The per-query solver budget is fixed by the caller of this pass (no verb exposes it), so a
+/// timeout is a mununu limitation with the other engines as the way out, not a budget the user
+/// can raise.
+fn solver_timeout(timeout_ms: u32, query: &str) -> String {
+    mununu_limitation(
+        &format!(
+            "z3 hit its {timeout_ms} ms per-query budget on the {query} query; the budget is \
+             fixed on this engine"
+        ),
+        Some(OTHER_ENGINES),
+    )
+}
+
+/// A `sat` answer without a model: the solver contradicted itself, or we misread it.
+fn sat_without_model(query: &str) -> String {
+    mununu_defect(&format!(
+        "z3 answered sat on the {query} query but returned no model"
+    ))
+}
+
+/// Our own candidate invariant failed the direct check that makes `Safe` sound; the verdict is
+/// withheld.
+fn invariant_check_failed(which: &str) -> String {
+    mununu_defect(&format!(
+        "the abstract invariant this pass computed failed its direct check ({which}); the \
+         verdict is withheld"
+    ))
+}
 
 /// Verdict of the predicate-abstraction safety driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +144,7 @@ fn one_pass(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return PassResult::Unknown(format!("encode: {e:?}")),
+            Err(e) => return PassResult::Unknown(format!("encode: {e}")),
         };
         // Named-state interface (cur / nx) + transition, mirroring `refine`.
         let name_to_nid: HashMap<String, Nid> = view
@@ -174,7 +209,11 @@ fn one_pass(
                         pn.push(n);
                     }
                     _ => {
-                        return PassResult::Unknown("predicate references unknown register".into());
+                        return PassResult::Unknown(PredicateExpr::unknown_register_reason(
+                            "predicate references unknown register",
+                            preds,
+                            name_to_nid.keys().map(String::as_str),
+                        ));
                     }
                 }
             }
@@ -206,42 +245,50 @@ fn one_pass(
             }
         };
         // All-SAT enumeration of the predicate valuations satisfying `phi`
-        // (`phi` is over `over_preds` — either cur or nx). Bounded by `max_cubes`.
-        let all_cubes = |phi: &Bool, over_preds: &[Bool]| -> Option<Vec<Cube>> {
-            let s = mk_solver();
-            s.assert(phi);
-            let mut out = Vec::new();
-            loop {
-                match s.check() {
-                    z3::SatResult::Sat => {}
-                    z3::SatResult::Unsat => break,
-                    z3::SatResult::Unknown => return None,
+        // (`phi` is over `over_preds` — either cur or nx). Bounded by `max_cubes`; `Err` carries
+        // the owner-naming reason (cap, solver budget, or a sat without a model).
+        let all_cubes =
+            |what: &str, phi: &Bool, over_preds: &[Bool]| -> Result<Vec<Cube>, String> {
+                let s = mk_solver();
+                s.assert(phi);
+                let mut out = Vec::new();
+                loop {
+                    match s.check() {
+                        z3::SatResult::Sat => {}
+                        z3::SatResult::Unsat => break,
+                        z3::SatResult::Unknown => return Err(solver_timeout(timeout_ms, what)),
+                    }
+                    let model = s.get_model().ok_or_else(|| sat_without_model(what))?;
+                    let cube: Cube = over_preds
+                        .iter()
+                        .map(|p| {
+                            model
+                                .eval(p, true)
+                                .and_then(|b| b.as_bool())
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    // block this exact valuation
+                    let block = cube_bool(&cube, over_preds).not();
+                    s.assert(&block);
+                    out.push(cube);
+                    if out.len() > max_cubes {
+                        return Err(technique_limit(
+                            &format!(
+                                "the abstract {what} enumeration exceeded its cap of {max_cubes} \
+                             cubes (the predicate abstraction enumerates cubes explicitly)"
+                            ),
+                            OTHER_ENGINES,
+                        ));
+                    }
                 }
-                let model = s.get_model()?;
-                let cube: Cube = over_preds
-                    .iter()
-                    .map(|p| {
-                        model
-                            .eval(p, true)
-                            .and_then(|b| b.as_bool())
-                            .unwrap_or(false)
-                    })
-                    .collect();
-                // block this exact valuation
-                let block = cube_bool(&cube, over_preds).not();
-                s.assert(&block);
-                out.push(cube);
-                if out.len() > max_cubes {
-                    return None;
-                }
-            }
-            Some(out)
-        };
+                Ok(out)
+            };
 
         // Reset-initial cubes (predicate valuations consistent with Init).
-        let init_cubes = match all_cubes(&init_cur, &pred_cur) {
-            Some(v) => v,
-            None => return PassResult::Unknown("init cube enumeration blew up / timed out".into()),
+        let init_cubes = match all_cubes("init-cube", &init_cur, &pred_cur) {
+            Ok(v) => v,
+            Err(reason) => return PassResult::Unknown(reason),
         };
 
         // Forward BFS of may-reachable cubes; record a parent for path recovery.
@@ -251,16 +298,22 @@ fn one_pass(
         while let Some(c) = queue.pop_front() {
             // may-successors: predicate valuations of `cube(c) ∧ T` at next-state.
             let src = Bool::and(&[&cube_bool(&c, &pred_cur), &transition]);
-            let succs = match all_cubes(&src, &pred_nx) {
-                Some(v) => v,
-                None => return PassResult::Unknown("post-image enumeration blew up".into()),
+            let succs = match all_cubes("post-image", &src, &pred_nx) {
+                Ok(v) => v,
+                Err(reason) => return PassResult::Unknown(reason),
             };
             for d in succs {
                 if reachable.insert(d.clone()) {
                     parent.insert(d.clone(), c.clone());
                     queue.push_back(d);
                     if reachable.len() > max_cubes {
-                        return PassResult::Unknown("reachable set exceeded cap".into());
+                        return PassResult::Unknown(technique_limit(
+                            &format!(
+                                "the may-reachable cube set exceeded its cap of {max_cubes} \
+                                 cubes (the predicate abstraction enumerates cubes explicitly)"
+                            ),
+                            OTHER_ENGINES,
+                        ));
                     }
                 }
             }
@@ -286,11 +339,13 @@ fn one_pass(
             };
             // Init ⟹ inv
             if sat_of(&mk_solver, &[&init_cur, &inv.not()]) != z3::SatResult::Unsat {
-                return PassResult::Unknown("invariant verification: Init ⊄ R#".into());
+                return PassResult::Unknown(invariant_check_failed(
+                    "it does not contain the initial states",
+                ));
             }
             // inv ⟹ ¬bad
             if sat_of(&mk_solver, &[&inv, &bad_cur]) != z3::SatResult::Unsat {
-                return PassResult::Unknown("invariant verification: R# ∩ bad ≠ ∅".into());
+                return PassResult::Unknown(invariant_check_failed("it intersects `bad`"));
             }
             // inv ∧ T ⟹ inv'  — need inv over nx.
             let inv_nx = {
@@ -298,7 +353,9 @@ fn one_pass(
                 Bool::or(&disj.iter().collect::<Vec<_>>())
             };
             if sat_of(&mk_solver, &[&inv, &transition, &inv_nx.not()]) != z3::SatResult::Unsat {
-                return PassResult::Unknown("invariant verification: R# not closed under T".into());
+                return PassResult::Unknown(invariant_check_failed(
+                    "it is not closed under the transition relation",
+                ));
             }
             return PassResult::Safe;
         };
@@ -328,11 +385,11 @@ fn one_pass(
                 RefineOutcome::Unavailable(_) => continue,
             }
         }
-        PassResult::Unknown(
-            "spurious abstract CEX with no single-step-refinable edge (needs frame/path \
-             interpolation — P2.2b)"
-                .into(),
-        )
+        PassResult::Unknown(mununu_limitation(
+            "the spurious abstract counterexample has no single-step-refinable edge; ruling it \
+             out needs a path-interpolation refinement this pass does not have",
+            Some(OTHER_ENGINES),
+        ))
     })
 }
 
@@ -377,6 +434,18 @@ struct AbsScope {
     init_cur: Bool,
     bad_cur: Bool,
     bad_nx: Bool,
+}
+
+/// The named state registers of an encoded design — the names a predicate may use (the
+/// candidates an "unknown register" abstention lists, mununu#1121).
+fn state_register_names(
+    view: &crate::adapter::sidecar::predicate_image::btor2_encode::Btor2SmtView,
+) -> Vec<String> {
+    view.signals
+        .iter()
+        .filter(|s| s.kind == SignalKind::State)
+        .filter_map(|s| s.symbol.clone())
+        .collect()
 }
 
 /// Build the abstraction scope for `preds` over the exact transition — the shared
@@ -574,11 +643,17 @@ fn ic3_pass(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return Ic3Pass::Unknown(format!("encode: {e:?}")),
+            Err(e) => return Ic3Pass::Unknown(format!("encode: {e}")),
         };
         let scope = match build_abs_scope(&view, preds, &props) {
             Some(s) => s,
-            None => return Ic3Pass::Unknown("predicate references unknown register".into()),
+            None => {
+                return Ic3Pass::Unknown(PredicateExpr::unknown_register_reason(
+                    "predicate references unknown register",
+                    preds,
+                    state_register_names(&view).iter().map(String::as_str),
+                ));
+            }
         };
         let mk = || {
             let s = z3::Solver::new();
@@ -600,7 +675,10 @@ fn ic3_pass(
             k += 1;
             frames.push(Vec::new());
             if k > max_frames {
-                return Ic3Pass::Unknown(format!("IC3 exceeded {max_frames} frames"));
+                return Ic3Pass::Unknown(technique_limit(
+                    &format!("the abstract IC3 did not converge within {max_frames} frames"),
+                    OTHER_ENGINES,
+                ));
             }
 
             // Block every bad-predecessor in F(k). Bounded so a blocking that fails to
@@ -609,9 +687,11 @@ fn ic3_pass(
             loop {
                 block_iters += 1;
                 if block_iters > 400 {
-                    return Ic3Pass::Unknown(
-                        "IC3 blocking-iteration limit (no convergence)".into(),
-                    );
+                    return Ic3Pass::Unknown(technique_limit(
+                        "the abstract IC3 did not converge within its limit of 400 blocking \
+                         iterations at one frame",
+                        OTHER_ENGINES,
+                    ));
                 }
                 let query = Bool::and(&[
                     &frame_formula(&scope, &frames, k),
@@ -623,12 +703,12 @@ fn ic3_pass(
                 match s.check() {
                     z3::SatResult::Unsat => break, // no bad-predecessor in F(k)
                     z3::SatResult::Unknown => {
-                        return Ic3Pass::Unknown("solver timeout (bad-predecessor)".into());
+                        return Ic3Pass::Unknown(solver_timeout(timeout_ms, "bad-predecessor"));
                     }
                     z3::SatResult::Sat => {
                         let model = match s.get_model() {
                             Some(m) => m,
-                            None => return Ic3Pass::Unknown("no model".into()),
+                            None => return Ic3Pass::Unknown(sat_without_model("bad-predecessor")),
                         };
                         let cti = extract_cube(&model, &scope.pred_cur);
                         match rec_block(file, &scope, &mut frames, cti, k, &mk, timeout_ms) {
@@ -699,6 +779,7 @@ fn rec_block(
     // Obligations processed lowest-level-first. Bounded so a runaway obligation
     // chain abstains rather than hangs.
     let mut obligations: Vec<(usize, IcCube)> = vec![(lvl, s0)];
+    const MAX_OBLIGATIONS: u32 = 2000;
     let mut steps = 0u32;
     while let Some(idx) = obligations
         .iter()
@@ -707,8 +788,14 @@ fn rec_block(
         .map(|(i, _)| i)
     {
         steps += 1;
-        if steps > 2000 {
-            return BlockResult::Unknown("IC3 obligation limit (no convergence)".into());
+        if steps > MAX_OBLIGATIONS {
+            return BlockResult::Unknown(technique_limit(
+                &format!(
+                    "the abstract IC3 did not converge within its limit of {MAX_OBLIGATIONS} \
+                     proof obligations"
+                ),
+                OTHER_ENGINES,
+            ));
         }
         let (j, c) = obligations.remove(idx);
         if j == 0 {
@@ -748,12 +835,14 @@ fn rec_block(
         let s = mk();
         s.assert(&q);
         match s.check() {
-            z3::SatResult::Unknown => return BlockResult::Unknown("solver timeout (block)".into()),
+            z3::SatResult::Unknown => {
+                return BlockResult::Unknown(solver_timeout(timeout_ms, "blocking"));
+            }
             z3::SatResult::Sat => {
                 // Predecessor exists → block it first, then retry c.
                 let model = match s.get_model() {
                     Some(m) => m,
-                    None => return BlockResult::Unknown("no model (block)".into()),
+                    None => return BlockResult::Unknown(sat_without_model("blocking")),
                 };
                 let d = extract_cube(&model, &scope.pred_cur);
                 obligations.push((j - 1, d));

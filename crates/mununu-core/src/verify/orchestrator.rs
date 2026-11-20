@@ -331,15 +331,15 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     let (main_text, props_text) = split_main_and_props(&assembled);
     let main_doc = crate::context_dsl::parse(&main_text).map_err(|e| {
         VerifyError::AssembledCtxdslParseFailed {
-            message: format!("{e:?}"),
-            snippet: snippet_around_error(&main_text, &format!("{e:?}")),
+            message: e.to_string(),
+            snippet: snippet_around_error(&main_text, &e.to_string()),
         }
     })?;
     let sidecar_docs = if let Some(props) = props_text.as_deref() {
         let sidecar = crate::context_dsl::parse(props).map_err(|e| {
             VerifyError::AssembledCtxdslParseFailed {
-                message: format!("{e:?}"),
-                snippet: snippet_around_error(props, &format!("{e:?}")),
+                message: e.to_string(),
+                snippet: snippet_around_error(props, &e.to_string()),
             }
         })?;
         vec![sidecar]
@@ -348,7 +348,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     };
     let realized = crate::context_dsl::realize_context(&main_doc, &sidecar_docs).map_err(|e| {
         VerifyError::RealizeFailed {
-            message: format!("{e:?}"),
+            message: e.to_string(),
         }
     })?;
 
@@ -720,15 +720,15 @@ pub fn inspect_project(
     let (main_text, props_text) = split_main_and_props(&assembled);
     let main_doc = crate::context_dsl::parse(&main_text).map_err(|e| {
         VerifyError::AssembledCtxdslParseFailed {
-            message: format!("{e:?}"),
-            snippet: snippet_around_error(&main_text, &format!("{e:?}")),
+            message: e.to_string(),
+            snippet: snippet_around_error(&main_text, &e.to_string()),
         }
     })?;
     let sidecar_docs = if let Some(props) = props_text.as_deref() {
         let sidecar = crate::context_dsl::parse(props).map_err(|e| {
             VerifyError::AssembledCtxdslParseFailed {
-                message: format!("{e:?}"),
-                snippet: snippet_around_error(props, &format!("{e:?}")),
+                message: e.to_string(),
+                snippet: snippet_around_error(props, &e.to_string()),
             }
         })?;
         vec![sidecar]
@@ -737,7 +737,7 @@ pub fn inspect_project(
     };
     let realized = crate::context_dsl::realize_context(&main_doc, &sidecar_docs).map_err(|e| {
         VerifyError::RealizeFailed {
-            message: format!("{e:?}"),
+            message: e.to_string(),
         }
     })?;
 
@@ -977,6 +977,19 @@ fn dispatch_adapter(
         }),
     }
 }
+
+/// The `[[sources]].adapter` values the dispatch above routes — the candidates an "unknown
+/// adapter" refusal lists (mununu#1121). Kept beside the match it mirrors.
+pub const DISPATCH_ADAPTERS: &[&str] = &[
+    "c-codesign",
+    "crewai",
+    "ctxdsl",
+    "extraction",
+    "langgraph",
+    "microcode",
+    "sv-yosys",
+    "xstate",
+];
 
 /// Emit a `tracing::warn!` line per dropped additional file when a
 /// single-file adapter is given more than one input. The verify
@@ -1420,7 +1433,7 @@ fn dispatch_c_codesign(
         VerifyError::AdapterTranslationFailed {
             source_id: source_id.to_string(),
             adapter: "c-codesign".to_string(),
-            message: format!("{err:?}"),
+            message: err.to_string(),
         }
     })?;
 
@@ -3147,7 +3160,7 @@ members = ["light", "ghost"]
             VerifyError::ConfigValidationFailed(issues) => {
                 assert!(issues.iter().any(|i| matches!(
                     i,
-                    crate::verify::config::ConfigIssue::CompositionUnknownMember { id } if id == "ghost"
+                    crate::verify::config::ConfigIssue::CompositionUnknownMember { id, .. } if id == "ghost"
                 )));
             }
             other => panic!("expected ConfigValidationFailed, got {other:?}"),
@@ -3207,6 +3220,47 @@ formula = "true"
             !matches!(result, Err(VerifyError::UnknownAdapter { .. })),
             "sv-yosys must be a recognized adapter route, not UnknownAdapter"
         );
+    }
+
+    /// mununu#1121 U2.10 seam — the candidate list the unknown-adapter message quotes
+    /// ([`DISPATCH_ADAPTERS`]) is the dispatch's own arm list: every
+    /// name in it dispatches (to a translation result or a translation failure on empty input),
+    /// never to `UnknownAdapter`. `sv-yosys` has its own test above, and `c-codesign` runs
+    /// clang on its input, so both are checked by name only.
+    #[test]
+    fn every_adapter_the_unknown_adapter_message_lists_is_one_the_dispatch_takes() {
+        let listed = DISPATCH_ADAPTERS;
+        assert!(listed.contains(&"sv-yosys") && listed.contains(&"c-codesign"));
+        for &name in listed {
+            if name == "sv-yosys" || name == "c-codesign" {
+                continue;
+            }
+            let result = dispatch_adapter(
+                name,
+                "src0",
+                std::path::Path::new("work.txt"),
+                "",
+                &[],
+                &std::collections::BTreeMap::new(),
+                std::path::Path::new("."),
+                &ClusterCoiInputs::default(),
+            );
+            assert!(
+                !matches!(result, Err(VerifyError::UnknownAdapter { .. })),
+                "`{name}` is listed as dispatched but the dispatch does not know it"
+            );
+        }
+        let unknown = dispatch_adapter(
+            "made-up-adapter",
+            "src0",
+            std::path::Path::new("work.txt"),
+            "",
+            &[],
+            &std::collections::BTreeMap::new(),
+            std::path::Path::new("."),
+            &ClusterCoiInputs::default(),
+        );
+        assert!(matches!(unknown, Err(VerifyError::UnknownAdapter { .. })));
     }
 
     #[test]

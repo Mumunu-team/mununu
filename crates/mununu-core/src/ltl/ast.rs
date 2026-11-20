@@ -59,6 +59,54 @@ pub enum LtlFormula {
     },
 }
 
+/// Prints the formula in the usual LTL syntax (`G`, `F`, `X`, `U`, `W`, `R`, `->`, `&&`,
+/// `||`, `!`, atoms), so a message can quote a clause in the user's own words (mununu#1121).
+/// Every compound operand is parenthesised; the text reads back under any precedence.
+impl std::fmt::Display for LtlFormula {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LtlFormula::True => f.write_str("true"),
+            LtlFormula::False => f.write_str("false"),
+            LtlFormula::Predicate(p) => f.write_str(p),
+            LtlFormula::Not(x) => write!(f, "!{}", Operand(x)),
+            LtlFormula::And(a, b) => write!(f, "{} && {}", Operand(a), Operand(b)),
+            LtlFormula::Or(a, b) => write!(f, "{} || {}", Operand(a), Operand(b)),
+            LtlFormula::Implies(a, b) => write!(f, "{} -> {}", Operand(a), Operand(b)),
+            LtlFormula::Next(x) => write!(f, "X {}", Operand(x)),
+            LtlFormula::Always(x) => write!(f, "G {}", Operand(x)),
+            LtlFormula::Eventually(x) => write!(f, "F {}", Operand(x)),
+            LtlFormula::Until { left, right } => {
+                write!(f, "{} U {}", Operand(left), Operand(right))
+            }
+            LtlFormula::WeakUntil { left, right } => {
+                write!(f, "{} W {}", Operand(left), Operand(right))
+            }
+            LtlFormula::Release { left, right } => {
+                write!(f, "{} R {}", Operand(left), Operand(right))
+            }
+            LtlFormula::Recurrence(x) => write!(f, "G F {}", Operand(x)),
+            LtlFormula::Stabilization(x) => write!(f, "F G {}", Operand(x)),
+            LtlFormula::Response { trigger, response } => {
+                write!(f, "G ({} -> F {})", Operand(trigger), Operand(response))
+            }
+        }
+    }
+}
+
+/// An operand of a compound operator: an atom prints bare, anything else in parentheses.
+struct Operand<'a>(&'a LtlFormula);
+
+impl std::fmt::Display for Operand<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            LtlFormula::True | LtlFormula::False | LtlFormula::Predicate(_) => {
+                write!(f, "{}", self.0)
+            }
+            other => write!(f, "({other})"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::LtlFormula;
@@ -169,5 +217,28 @@ mod tests {
 
         assert_eq!(formula1, formula2);
         assert_ne!(formula1, formula3);
+    }
+
+    /// mununu#1121 — a formula prints in the usual LTL syntax, with compound operands
+    /// parenthesised, never as the Rust `Debug` tree.
+    #[test]
+    fn x1121_an_ltl_formula_displays_in_the_usual_syntax() {
+        let p = |s: &str| Box::new(LtlFormula::Predicate(s.to_string()));
+        let next_not_grant = LtlFormula::Always(Box::new(LtlFormula::Implies(
+            p("grant"),
+            Box::new(LtlFormula::Next(Box::new(LtlFormula::Not(p("grant"))))),
+        )));
+        assert_eq!(next_not_grant.to_string(), "G (grant -> (X (!grant)))");
+        let response = LtlFormula::Response {
+            trigger: p("req"),
+            response: p("grant"),
+        };
+        assert_eq!(response.to_string(), "G (req -> F grant)");
+        assert_eq!(LtlFormula::Recurrence(p("req")).to_string(), "G F req");
+        let until = LtlFormula::Until {
+            left: Box::new(LtlFormula::And(p("a"), p("b"))),
+            right: Box::new(LtlFormula::True),
+        };
+        assert_eq!(until.to_string(), "(a && b) U true");
     }
 }

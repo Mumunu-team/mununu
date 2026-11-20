@@ -1227,15 +1227,17 @@ pub fn cegar_refine_loop(
             warnings.push(crate::adapter::AdapterWarning {
                 kind: crate::adapter::WarningKind::ApproximateTranslation,
                 location: None,
-                message: format!(
-                    "adapter/btor2/cegar (B.3.b): formula has alternation depth {} but the \
-                     lifted CLTS has no MustHyperOnly (hyper-must) transitions. Refining \
-                     standard KMTS (Sharp + MayOnly only) on alternating fixpoints is \
-                     non-monotone per Shoham–Grumberg LMCS 2007 — verdicts may regress \
-                     across CEGAR iterations. Until R.2.5b's SMT-driven must-edge work + \
-                     paired B.3.c hyper-must extension ship, treat refined νμ verdicts as \
-                     soundness-tagged.",
-                    formula.alternation_depth()
+                message: crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "adapter/btor2/cegar (B.3.b): formula has alternation depth {} but the \
+                         lifted CLTS has no MustHyperOnly (hyper-must) transitions. Refining \
+                         standard KMTS (Sharp + MayOnly only) on alternating fixpoints is \
+                         non-monotone per Shoham–Grumberg LMCS 2007 — verdicts may regress \
+                         across CEGAR iterations, so a refined νμ verdict is soundness-tagged; \
+                         the lift does not infer hyper-must edges",
+                        formula.alternation_depth()
+                    ),
+                    None,
                 ),
             });
         }
@@ -1755,7 +1757,7 @@ fn eval_err_to_adapter_err(e: EvaluationError) -> AdapterError {
     AdapterError {
         kind: AdapterErrorKind::IrConsistencyError,
         location: None,
-        message: format!("adapter/btor2/cegar: evaluator error: {e:?}"),
+        message: format!("adapter/btor2/cegar: evaluator error: {e}"),
     }
 }
 

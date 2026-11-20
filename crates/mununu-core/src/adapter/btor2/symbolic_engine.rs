@@ -180,10 +180,13 @@ fn derive_sidecar_compounds(
         crate::adapter::btor2::cegar::sidecar_compound_predicates(options)
     {
         if is_derived {
-            return Err(ir_err(format!(
-                "the derived/combinational predicate `{}` (a per-cube SMT label, not a cube \
-                 dimension) is not supported by the symbolic engine yet — use `--engine explicit`",
-                spec.name
+            return Err(ir_err(crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "the derived/combinational predicate `{}` (a per-cube SMT label, not a cube \
+                     dimension) is not carried by the symbolic engine",
+                    spec.name
+                ),
+                Some("`--engine explicit`"),
             )));
         }
         compound.insert(spec.name.clone(), expr);

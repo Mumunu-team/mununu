@@ -278,8 +278,12 @@ fn build_variable_automata(
             ContextValue::String(_) => {
                 warnings.push(AdapterWarning {
                     kind: WarningKind::UnsupportedConstruct,
-                    message: format!(
-                        "Context variable '{var_name}' is a string; string context variables are not yet supported"
+                    message: crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "Context variable '{var_name}' is a string; the model drops string \
+                             context variables"
+                        ),
+                        None,
                     ),
                     location: None,
                 });
