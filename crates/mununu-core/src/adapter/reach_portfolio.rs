@@ -634,35 +634,19 @@ const INTERP_OVERALL_TIMEOUT_MS: u64 = 25_000;
 /// needs *synthesised* predicates that k-induction does not reach at its budget — measured *unique* HWMCC coverage (`gen12`/`gen14`/`gen39`,
 /// which the whole rest of the portfolio leaves `Unknown`). cvc5 (a subprocess) is
 /// required; when it is absent the engine abstains.
-fn run_interp(
+fn interp_search(
     file: &Btor2File,
     cancel: &std::sync::atomic::AtomicBool,
     t: MemberTimeouts,
-    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    clock_stop: &std::sync::atomic::AtomicBool,
-) -> Option<bool> {
-    timed("interp", || {
-        interp_member(
-            refused,
-            abstained,
-            undecided,
-            cancel,
-            clock_stop,
-            native_interp::interp_available(),
-            || {
-                native_interp::verify_safety_interp_cancellable(
-                    file,
-                    INTERP_MAX_SUFFIX,
-                    INTERP_MAX_ITERS,
-                    t.interp_query_ms,
-                    t.interp_overall_ms,
-                    cancel,
-                )
-            },
-        )
-    })
+) -> InterpSafetyVerdict {
+    native_interp::verify_safety_interp_cancellable(
+        file,
+        INTERP_MAX_SUFFIX,
+        INTERP_MAX_ITERS,
+        t.interp_query_ms,
+        t.interp_overall_ms,
+        cancel,
+    )
 }
 
 /// mununu#1022 — the interpolation member's run: a cvc5 that cannot be located is a REFUSAL,
@@ -696,6 +680,87 @@ fn interp_member(
             None
         }
     }
+}
+
+/// The **btormc** member's run (subprocess BMC): its verdict, an `Err` when the tool cannot be
+/// invoked. N5.4 — btormc prints its witness on `sat`; with `carried` it is replayed and carried.
+fn run_btormc(
+    file: &Btor2File,
+    kmax: u32,
+    timeout: std::time::Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+    carried: Option<&Carried>,
+) -> Result<Option<McVerdict>, String> {
+    timed("btormc", || {
+        btormc::decide_via_btormc_with_output(file, kmax, timeout, Some(cancel))
+            .map(|(v, out)| {
+                if let (Some(carried), McVerdict::Violated) = (carried, v) {
+                    carried.carry("btormc", replayed_subprocess_witness(file, &out), None);
+                }
+                Some(v)
+            })
+            .map_err(|e| e.message)
+    })
+}
+
+/// The **Pono** member's run (subprocess, `ic3bits`).
+fn run_pono(
+    file: &Btor2File,
+    timeout: std::time::Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Option<McVerdict>, String> {
+    timed("pono", || {
+        pono::decide_via_pono(file, pono::DEFAULT_ENGINE, timeout, Some(cancel))
+            .map(Some)
+            .map_err(|e| e.message)
+    })
+}
+
+/// The **rIC3** member's run (subprocess, `-e <engine>`). N5.4 — with `carried`, `--witness` is
+/// asked for and the witness is replayed and carried.
+fn run_ric3(
+    file: &Btor2File,
+    engine: &'static str,
+    timeout: std::time::Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+    carried: Option<&Carried>,
+) -> Result<Option<McVerdict>, String> {
+    timed("ric3", || {
+        ric3::decide_via_ric3_with_output(file, engine, timeout, Some(cancel), carried.is_some())
+            .map(|(v, out)| {
+                if let (Some(carried), McVerdict::Violated) = (carried, v) {
+                    carried.carry("ric3", replayed_subprocess_witness(file, &out), None);
+                }
+                Some(v)
+            })
+            .map_err(|e| e.message)
+    })
+}
+
+/// The **rIC3 dynamic-step BMC** member's run (subprocess). N5.4 — with `carried`, the witness
+/// is the sticky model's: replayed on the design up to the first frame that fires the original
+/// `bad`, and carried.
+fn run_ric3_bmc(
+    file: &Btor2File,
+    timeout: std::time::Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+    carried: Option<&Carried>,
+) -> Result<Option<McVerdict>, String> {
+    timed("ric3-bmc", || {
+        ric3::decide_via_ric3_bmc_dyn_step_with_output(
+            file,
+            timeout,
+            Some(cancel),
+            carried.is_some(),
+        )
+        .map(|(v, out)| {
+            if let (Some(carried), McVerdict::Violated) = (carried, v) {
+                carried.carry("ric3-bmc", ric3::sticky_witness_trace(file, &out), None);
+            }
+            Some(v)
+        })
+        .map_err(|e| e.message)
+    })
 }
 
 /// mununu#726 — the members' time bounds for one portfolio run, derived from the thread-local
@@ -1133,6 +1198,110 @@ impl ReachMembers {
     }
 }
 
+/// An owned SAT-backed member's runner ([`run_sat_bmc`], [`run_ic3`]): the design, the member's
+/// wall deadline, the shared stop flag, and where to leave a replayed counterexample.
+type OwnedRunner = fn(
+    &Btor2File,
+    std::time::Instant,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    Option<&Carried>,
+) -> Result<Option<bool>, MemberStop>;
+
+/// The native member's runner ([`run_native`]): the design, the shared stop flag, the per-check
+/// allowance in nominal milliseconds, and the portfolio's wall (for the progress it reports).
+type NativeRunner = fn(
+    &Btor2File,
+    Option<&std::sync::atomic::AtomicBool>,
+    u32,
+    Option<std::time::Instant>,
+) -> Result<Option<bool>, MemberStop>;
+
+/// The btormc member's runner ([`run_btormc`]): as [`SubprocessRunner`], after the depth cap.
+type BtormcRunner = fn(
+    &Btor2File,
+    u32,
+    std::time::Duration,
+    &std::sync::atomic::AtomicBool,
+    Option<&Carried>,
+) -> Result<Option<McVerdict>, String>;
+
+/// The rIC3 member's runner ([`run_ric3`]): as [`SubprocessRunner`], after the `-e` engine.
+type Ric3Runner = fn(
+    &Btor2File,
+    &'static str,
+    std::time::Duration,
+    &std::sync::atomic::AtomicBool,
+    Option<&Carried>,
+) -> Result<Option<McVerdict>, String>;
+
+/// A subprocess member's runner that can carry a witness ([`run_ric3_bmc`]): the design, the
+/// member's wall, the shared stop flag, and where to leave a replayed counterexample.
+type SubprocessRunner = fn(
+    &Btor2File,
+    std::time::Duration,
+    &std::sync::atomic::AtomicBool,
+    Option<&Carried>,
+) -> Result<Option<McVerdict>, String>;
+
+/// What each member thread of a driver calls for its result: the full driver
+/// ([`decide_with_members_using`]) passes [`Runners::SHIPPED`], the owned-only driver
+/// ([`decide_owned_only_using`]) [`Runners::OWNED_ONLY`], and each calls the runners of the
+/// members it starts. A test
+/// replaces members with stubs whose finish order it scripts, so the verdict and every list of
+/// the outcome are asserted on every host instead of on the order one host's scheduler produced
+/// (`os-dependent-test-expectation` in `docs/defect-classes.md`). Settling a result into the
+/// outcome's lists, raising the shared stop flag and the join stay in the driver, so a stub goes
+/// through them exactly as an engine does. mununu#996 introduced the seam for the exact member
+/// alone.
+#[derive(Clone, Copy)]
+struct Runners {
+    exact: fn(&str) -> Result<Option<bool>, String>,
+    native: NativeRunner,
+    sat_bmc: OwnedRunner,
+    ic3: OwnedRunner,
+    interp_available: fn() -> Result<(), String>,
+    interp_search:
+        fn(&Btor2File, &std::sync::atomic::AtomicBool, MemberTimeouts) -> InterpSafetyVerdict,
+    btormc: BtormcRunner,
+    pono: fn(
+        &Btor2File,
+        std::time::Duration,
+        &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<McVerdict>, String>,
+    ric3: Ric3Runner,
+    ric3_bmc: SubprocessRunner,
+    /// The owned-only driver's deep counterexample search (`cex`): the depth it found `bad` at.
+    #[cfg(not(feature = "boolector"))]
+    cex: fn(
+        &Btor2File,
+        std::time::Instant,
+        &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<u32>, MemberStop>,
+}
+
+impl Runners {
+    /// The engines themselves.
+    const SHIPPED: Self = Self {
+        exact: run_exact,
+        native: run_native,
+        sat_bmc: run_sat_bmc,
+        ic3: run_ic3,
+        interp_available: native_interp::interp_available,
+        interp_search,
+        btormc: run_btormc,
+        pono: run_pono,
+        ric3: run_ric3,
+        ric3_bmc: run_ric3_bmc,
+        #[cfg(not(feature = "boolector"))]
+        cex: run_owned_cex,
+    };
+    /// The owned-only driver's: the same engines, with its own interpolation schedule.
+    const OWNED_ONLY: Self = Self {
+        interp_search: owned_interp_search,
+        ..Self::SHIPPED
+    };
+}
+
 /// [`decide_reach_portfolio_cancellable`] restricted to `members`. A member left out is simply
 /// not started — it neither refuses nor abstains, so the outcome's lists name only members that
 /// ran. The merge, the budget handling and the cancellation are unchanged.
@@ -1142,7 +1311,7 @@ pub fn decide_reach_portfolio_with_members(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: ReachMembers,
 ) -> ReachOutcome {
-    decide_with_members_using(file, subprocess_timeout, cancel, members, run_exact)
+    decide_with_members_using(file, subprocess_timeout, cancel, members, &Runners::SHIPPED)
 }
 
 /// mununu#1064 — the stated reason a model with no `bad` line is not decided.
@@ -1164,17 +1333,18 @@ fn no_obligation(file: &Btor2File) -> Option<ReachOutcome> {
     })
 }
 
-/// [`decide_reach_portfolio_with_members`] with the exact member's runner as a parameter: the
-/// shipped driver passes [`run_exact`]; a test passes a runner that does not return, which is
-/// what one long OxiDD apply looks like from the join (mununu#996).
+/// [`decide_reach_portfolio_with_members`] with the members' runners as a parameter: the shipped
+/// driver passes [`Runners::SHIPPED`]; a test passes stubs, for instance an exact runner that
+/// does not return, which is what one long OxiDD apply looks like from the join (mununu#996).
 fn decide_with_members_using(
     file: &Btor2File,
     subprocess_timeout: std::time::Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: ReachMembers,
-    exact_runner: fn(&str) -> Result<Option<bool>, String>,
+    runners: &Runners,
 ) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let runners = *runners;
     if let Some(outcome) = no_obligation(file) {
         return outcome;
     }
@@ -1241,7 +1411,7 @@ fn decide_with_members_using(
         let (decided, budget) = (std::sync::Arc::clone(&decided_flag), budget.clone());
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = exact_runner(&content);
+            let r = (runners.exact)(&content);
             if matches!(r, Ok(Some(_))) {
                 decided.store(true, Relaxed);
             }
@@ -1300,22 +1470,7 @@ fn decide_with_members_using(
         let btormc_h = members.btormc.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
-                let v = timed("btormc", || {
-                    btormc::decide_via_btormc_with_output(
-                        file,
-                        btormc_kmax,
-                        subprocess_timeout,
-                        Some(decided),
-                    )
-                    .map(|(v, out)| {
-                        // N5.4 — btormc prints its witness on `sat`; replayed and carried.
-                        if let (Some(carried), McVerdict::Violated) = (carried, v) {
-                            carried.carry("btormc", replayed_subprocess_witness(file, &out), None);
-                        }
-                        Some(v)
-                    })
-                    .map_err(|e| e.message)
-                });
+                let v = (runners.btormc)(file, btormc_kmax, subprocess_timeout, decided, carried);
                 let v = settle_subprocess(
                     refused,
                     abstained,
@@ -1334,16 +1489,7 @@ fn decide_with_members_using(
         let pono_h = members.pono.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
-                let v = timed("pono", || {
-                    pono::decide_via_pono(
-                        file,
-                        pono::DEFAULT_ENGINE,
-                        subprocess_timeout,
-                        Some(decided),
-                    )
-                    .map(Some)
-                    .map_err(|e| e.message)
-                });
+                let v = (runners.pono)(file, subprocess_timeout, decided);
                 let v = settle_subprocess(
                     refused,
                     abstained,
@@ -1367,23 +1513,13 @@ fn decide_with_members_using(
         let ric3_h = members.ric3.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
-                let v = timed("ric3", || {
-                    ric3::decide_via_ric3_with_output(
-                        file,
-                        members.ric3_engine,
-                        subprocess_timeout,
-                        Some(decided),
-                        carried.is_some(),
-                    )
-                    .map(|(v, out)| {
-                        // N5.4 — `--witness` was asked for; the witness is replayed and carried.
-                        if let (Some(carried), McVerdict::Violated) = (carried, v) {
-                            carried.carry("ric3", replayed_subprocess_witness(file, &out), None);
-                        }
-                        Some(v)
-                    })
-                    .map_err(|e| e.message)
-                });
+                let v = (runners.ric3)(
+                    file,
+                    members.ric3_engine,
+                    subprocess_timeout,
+                    decided,
+                    carried,
+                );
                 let v = settle_subprocess(
                     refused,
                     abstained,
@@ -1405,23 +1541,7 @@ fn decide_with_members_using(
         let ric3_bmc_h = members.ric3_bmc.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
-                let v = timed("ric3-bmc", || {
-                    ric3::decide_via_ric3_bmc_dyn_step_with_output(
-                        file,
-                        subprocess_timeout,
-                        Some(decided),
-                        carried.is_some(),
-                    )
-                    .map(|(v, out)| {
-                        // N5.4 — the witness is the sticky model's; replayed on the design up to
-                        // the first frame that fires the original `bad`, and carried.
-                        if let (Some(carried), McVerdict::Violated) = (carried, v) {
-                            carried.carry("ric3-bmc", ric3::sticky_witness_trace(file, &out), None);
-                        }
-                        Some(v)
-                    })
-                    .map_err(|e| e.message)
-                });
+                let v = (runners.ric3_bmc)(file, subprocess_timeout, decided, carried);
                 let v = settle_subprocess(
                     refused,
                     abstained,
@@ -1451,7 +1571,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "sat-bmc",
-                    run_sat_bmc(file, deadline, cancel, carried),
+                    (runners.sat_bmc)(file, deadline, cancel, carried),
                 );
                 if v == Some(true) {
                     decided.store(true, Relaxed);
@@ -1473,7 +1593,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "ic3",
-                    run_ic3(file, deadline, cancel, carried),
+                    (runners.ic3)(file, deadline, cancel, carried),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -1493,7 +1613,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "native",
-                    run_native(file, Some(decided), t.native_query_ms, Some(wall_deadline)),
+                    (runners.native)(file, Some(decided), t.native_query_ms, Some(wall_deadline)),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -1506,7 +1626,17 @@ fn decide_with_members_using(
         let interp_h = members.interp.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
-                run_interp(file, decided, t, refused, abstained, undecided, clock_stop)
+                timed("interp", || {
+                    interp_member(
+                        refused,
+                        abstained,
+                        undecided,
+                        decided,
+                        clock_stop,
+                        (runners.interp_available)(),
+                        || (runners.interp_search)(file, decided, t),
+                    )
+                })
             })
         });
         // The exact member reports on its channel; wait for it no longer than the others need.
@@ -1713,6 +1843,42 @@ const OWNED_DEEP_CEX_MAX_K: u32 = 128;
 #[cfg(not(feature = "boolector"))]
 const OWNED_CEX_QUERY_MS: u32 = 15_000;
 
+/// The owned-only driver's interpolation search: the full driver's ([`interp_search`]) with a
+/// longer iteration schedule; the driver passes the default query bound and its own wall.
+fn owned_interp_search(
+    file: &Btor2File,
+    cancel: &std::sync::atomic::AtomicBool,
+    t: MemberTimeouts,
+) -> InterpSafetyVerdict {
+    native_interp::verify_safety_interp_cancellable(
+        file,
+        INTERP_MAX_SUFFIX,
+        64,
+        t.interp_query_ms,
+        t.interp_overall_ms,
+        cancel,
+    )
+}
+
+/// The owned-only driver's deep counterexample search (z3 BMC to [`OWNED_DEEP_CEX_MAX_K`]),
+/// wall-bounded by `deadline`: the depth of the counterexample, `None` when there is none in
+/// reach.
+#[cfg(not(feature = "boolector"))]
+fn run_owned_cex(
+    file: &Btor2File,
+    deadline: std::time::Instant,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Option<u32>, MemberStop> {
+    native_bmc::bmc_cex_until(
+        file,
+        OWNED_DEEP_CEX_MAX_K,
+        OWNED_CEX_QUERY_MS,
+        deadline,
+        cancel,
+    )
+    .map_err(MemberStop::from)
+}
+
 /// The **owned-standalone** driver: decide `bad`-reachability with ONLY the
 /// mununu-owned engines, run concurrently under a shared `timeout_ms` wall budget,
 /// deliberately EXCLUDING the external algorithms (btormc, Pono, rIC3). It
@@ -1742,8 +1908,21 @@ pub fn decide_reach_owned_only_with_witness(
     timeout_ms: u32,
     witness: bool,
 ) -> ReachOutcome {
+    decide_owned_only_using(file, timeout_ms, witness, &Runners::OWNED_ONLY)
+}
+
+/// [`decide_reach_owned_only_with_witness`] with the members' runners as a parameter (as
+/// [`decide_with_members_using`]): the shipped driver passes [`Runners::OWNED_ONLY`], a test
+/// passes stubs.
+fn decide_owned_only_using(
+    file: &Btor2File,
+    timeout_ms: u32,
+    witness: bool,
+    runners: &Runners,
+) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::{Arc, mpsc};
+    let runners = *runners;
     if let Some(outcome) = no_obligation(file) {
         return outcome;
     }
@@ -1794,6 +1973,14 @@ pub fn decide_reach_owned_only_with_witness(
     let (tx, rx) = mpsc::channel::<(&'static str, Option<bool>)>();
     // The members this run starts, each sending its name once ([`owned_members`]).
     let members = owned_members();
+    // The members' bounds here: this driver's wall is native's per-check allowance and the
+    // interpolation search's overall bound; interpolation keeps its default query bound.
+    let t = MemberTimeouts {
+        native_query_ms: timeout_ms,
+        interp_query_ms: INTERP_QUERY_TIMEOUT_MS,
+        interp_overall_ms: u64::from(timeout_ms),
+        subprocess: Duration::from_millis(u64::from(timeout_ms)),
+    };
 
     // Safety proof — shallow native BMC + k-induction.
     {
@@ -1810,36 +1997,15 @@ pub fn decide_reach_owned_only_with_witness(
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#893 — `timeout_ms` is the member's NOMINAL per-check allowance (a resource
             // limit inside); a budget stop is an abstention with its cause, an encode error a
-            // refusal.
-            let v = timed(
+            // refusal, a search to the bound `undecided` with the wall it left; a stop on a
+            // peer's verdict is in no list (this driver has no clock stop).
+            let v = settle_native(
+                &refused,
+                &abstained,
+                &undecided,
+                &NO_CLOCK_STOP,
                 "native",
-                || match native_bmc::decide_bad_safety_cancellable(
-                    &file,
-                    native_bmc::DEFAULT_MAX_K,
-                    Some(timeout_ms),
-                    Some(&decided),
-                ) {
-                    Ok(SafetyVerdict::Violated { .. }) => Some(true),
-                    Ok(SafetyVerdict::Safe { .. }) => Some(false),
-                    Ok(SafetyVerdict::Unknown { k }) => {
-                        if !decided.load(Relaxed) {
-                            note_refusal(&undecided, "native", native_unknown(k, Some(deadline)));
-                        }
-                        None
-                    }
-                    Err(e) => {
-                        match MemberStop::from(e) {
-                            MemberStop::Refused(why) => note_refusal(&refused, "native", why),
-                            MemberStop::Abstained(cause) => {
-                                note_refusal(&abstained, "native", cause)
-                            }
-                            MemberStop::Undecided(p) => note_refusal(&undecided, "native", p),
-                            // `BmcError` never maps to a cancel; a peer's stop is in no list.
-                            MemberStop::Cancelled(_) => {}
-                        }
-                        None
-                    }
-                },
+                (runners.native)(&file, Some(&decided), t.native_query_ms, Some(deadline)),
             );
             if v.is_some() {
                 decided.store(true, Relaxed);
@@ -1867,17 +2033,8 @@ pub fn decide_reach_owned_only_with_witness(
                     &undecided,
                     &decided,
                     &NO_CLOCK_STOP,
-                    native_interp::interp_available(),
-                    || {
-                        native_interp::verify_safety_interp_cancellable(
-                            &file,
-                            INTERP_MAX_SUFFIX,
-                            64,
-                            INTERP_QUERY_TIMEOUT_MS,
-                            u64::from(timeout_ms),
-                            &decided,
-                        )
-                    },
+                    (runners.interp_available)(),
+                    || (runners.interp_search)(&file, &decided, t),
                 )
             });
             if v.is_some() {
@@ -1925,14 +2082,7 @@ pub fn decide_reach_owned_only_with_witness(
             // mununu#955 — a budget stop (the deadline, the resource limit) is an abstention with
             // its cause, an encoder refusal a refusal, as for the native member above.
             let hit = timed("cex", || {
-                let r = native_bmc::bmc_cex_until(
-                    &file,
-                    OWNED_DEEP_CEX_MAX_K,
-                    OWNED_CEX_QUERY_MS,
-                    deadline,
-                    &decided,
-                )
-                .map_err(MemberStop::from);
+                let r = (runners.cex)(&file, deadline, &decided);
                 settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "cex", r).is_some()
             });
             if hit {
@@ -1958,7 +2108,7 @@ pub fn decide_reach_owned_only_with_witness(
         let carried = witness.then(|| Arc::clone(&carried_store));
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = run_sat_bmc(&file, deadline, Arc::clone(&decided), carried.as_deref());
+            let r = (runners.sat_bmc)(&file, deadline, Arc::clone(&decided), carried.as_deref());
             let v = settle_native(
                 &refused,
                 &abstained,
@@ -1989,7 +2139,7 @@ pub fn decide_reach_owned_only_with_witness(
         let carried = witness.then(|| Arc::clone(&carried_store));
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = run_ic3(&file, deadline, Arc::clone(&decided), carried.as_deref());
+            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), carried.as_deref());
             let v = settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "ic3", r);
             if v.is_some() {
                 decided.store(true, Relaxed);
@@ -2010,7 +2160,7 @@ pub fn decide_reach_owned_only_with_witness(
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#873 — a refusal (over-cap cone, free init) is an abstention AND a recorded
             // reason, as in the scoped driver; it used to be dropped here.
-            let v = settle(&refused, "exact", run_exact(&content));
+            let v = settle(&refused, "exact", (runners.exact)(&content));
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
@@ -2569,16 +2719,11 @@ mod tests {
         use std::sync::atomic::AtomicBool;
         let (_tx, rx) = std::sync::mpsc::channel::<Result<Option<bool>, String>>();
         let decided = AtomicBool::new(true);
-        let t0 = std::time::Instant::now();
+        // `_tx` is alive and never sends: the call returns only by abandoning the member.
         let w = await_straggler(&rx, &decided, &Budget::unbounded(), STRAGGLER_GRACE);
         assert!(
             matches!(w, StragglerWait::Abandoned(Abandon::OtherDecided)),
             "{w:?}"
-        );
-        assert!(
-            t0.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            t0.elapsed()
         );
     }
 
@@ -2630,13 +2775,10 @@ mod tests {
 
     /// mununu#996 at the driver: the exact member stands for the `krebs.3` apply — it does not
     /// return — while the native member finds the counter's `bad` at depth 7. The portfolio
-    /// returns native's verdict promptly instead of joining the exact member.
+    /// returns native's verdict instead of joining the exact member: the stub never returns, so
+    /// an outcome at all is one the join did not wait for (no wall-clock bound to pass or miss).
     #[test]
     fn the_portfolio_returns_a_decided_verdict_without_joining_a_stuck_exact_member() {
-        fn stuck_exact(_: &str) -> Result<Option<bool>, String> {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
-            Ok(None)
-        }
         const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
@@ -2654,33 +2796,27 @@ mod tests {
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
         };
-        let t0 = std::time::Instant::now();
         let out = decide_with_members_using(
             &file,
             std::time::Duration::from_secs(60),
             None,
             members,
-            stuck_exact,
+            &Runners {
+                exact: scripted::exact_never_returns,
+                ..Runners::SHIPPED
+            },
         );
         assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
         assert_eq!(out.reachable_by, vec!["native"], "{out:?}");
-        assert!(
-            t0.elapsed() < std::time::Duration::from_secs(60),
-            "the join waited for the stuck exact member: {:?}",
-            t0.elapsed()
-        );
     }
 
     /// mununu#1039 at the driver: with no run budget (`btor2 verify --timeout-ms`), a member that
     /// runs past the portfolio's wall no longer holds the run. The stuck member stands for the
     /// native z3 check that ran 70 s past a 300 s wall on HWMCC'20 `mul9`. The portfolio returns
-    /// at the wall plus the grace, and the stopped member is named with its cause.
+    /// at the wall plus the grace, and the stopped member is named with its cause. The stub never
+    /// returns, so only the wall can end the run: an outcome at all is the wall's.
     #[test]
     fn the_portfolio_returns_at_its_wall_and_names_the_member_it_stopped() {
-        fn slow_exact(_: &str) -> Result<Option<bool>, String> {
-            std::thread::sleep(std::time::Duration::from_secs(20));
-            Ok(None)
-        }
         const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
@@ -2698,18 +2834,15 @@ mod tests {
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
         };
-        let t0 = std::time::Instant::now();
         let out = decide_with_members_using(
             &file,
             std::time::Duration::from_millis(200),
             None,
             members,
-            slow_exact,
-        );
-        assert!(
-            t0.elapsed() < std::time::Duration::from_secs(10),
-            "the portfolio ran past its wall: {:?}",
-            t0.elapsed()
+            &Runners {
+                exact: scripted::exact_never_returns,
+                ..Runners::SHIPPED
+            },
         );
         assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
         assert!(
@@ -3022,8 +3155,10 @@ mod tests {
     }
 
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:
-    /// `Unknown`, no engine credited, back in well under a second. The unbounded control is the
-    /// existing `portfolio_decides_reachable_without_subprocess` (same fixture, `Reachable`).
+    /// `Unknown`, no engine credited. That no member starts is asserted on the runners
+    /// (`scripted::an_expired_budget_starts_no_member`), not on how fast the call came back. The
+    /// unbounded control is `portfolio_decides_reachable_without_subprocess` (same fixture,
+    /// `Reachable`).
     #[test]
     fn portfolio_abstains_promptly_under_an_expired_budget() {
         use crate::adapter::run_budget::{Budget, enter};
@@ -3031,30 +3166,19 @@ mod tests {
                                6 add 1 3 5\n7 next 1 3 6\n8 constd 1 5\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(COUNTER).expect("parse");
-        let t0 = std::time::Instant::now();
         let out = {
             let _g = enter(&Budget::with_ms(0));
             decide_reach_portfolio(&file)
         };
-        assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
-        assert!(
-            out.reachable_by.is_empty() && out.unreachable_by.is_empty(),
-            "{out:?}"
-        );
-        assert!(
-            // mununu#1144 — a bound on "promptly", wide enough for a loaded host; the verdict
-            // assertion above carries the content.
-            t0.elapsed() < std::time::Duration::from_secs(10),
-            "{:?}",
-            t0.elapsed()
-        );
+        assert_eq!(out, ReachOutcome::default());
     }
 
     /// mununu#816 — the owned driver's detached members run under the caller's budget. A
     /// thread-local is not inherited by a spawned thread, so before this an already-expired
     /// budget still spawned four members that ran unbounded by it. The same fixture decides
     /// `Reachable` with no budget (`owned_only_excludes_external_engines_on_small_counter`), and
-    /// on the parent commit it decides here too.
+    /// on the parent commit it decides here too. That no member is asked is
+    /// `scripted::owned::an_expired_budget_starts_no_member`.
     #[test]
     fn the_owned_driver_abstains_promptly_under_an_expired_budget() {
         use crate::adapter::run_budget::{Budget, enter};
@@ -3062,23 +3186,11 @@ mod tests {
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(COUNTER).expect("parse");
-        let t0 = std::time::Instant::now();
         let out = {
             let _g = enter(&Budget::with_ms(0));
             decide_reach_owned_only(&file, 30_000)
         };
-        assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
-        assert!(
-            out.reachable_by.is_empty() && out.unreachable_by.is_empty(),
-            "{out:?}"
-        );
-        assert!(
-            // mununu#1144 — a bound on "promptly", wide enough for a loaded host; the verdict
-            // assertion above carries the content.
-            t0.elapsed() < std::time::Duration::from_secs(10),
-            "{:?}",
-            t0.elapsed()
-        );
+        assert_eq!(out, ReachOutcome::default());
     }
 
     /// mununu#726 — with no budget the members keep the constants they always had (the floor);
@@ -3771,5 +3883,558 @@ mod tests {
             elapsed.as_secs_f64()
         );
         assert!(carried.depth() >= 1);
+    }
+
+    /// Scripted members: the every-host half of the race tests (`os-dependent-test-expectation`
+    /// in `docs/defect-classes.md`). A stub either reports at once or blocks until the shared
+    /// stop flag is up, which is what "still running when a peer decided, or when the clock
+    /// fired" is from the driver's side. Which members have reported when the first verdict
+    /// lands is then the test's choice and not the scheduler's, and the whole outcome is
+    /// compared. Settling, the stop flag, the join and the merge are the shipped driver's. The
+    /// detector that races the real engines stays: `portfolio_decides_reachable_without_subprocess`.
+    mod scripted {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        use std::time::{Duration, Instant};
+
+        /// A wall no scripted run reaches: every script ends on its own.
+        const NO_WALL: Duration = Duration::from_secs(600);
+
+        fn counter() -> Btor2File {
+            parser::parse(COUNTER_TO_SEVEN).unwrap()
+        }
+
+        fn until_stopped(stop: &AtomicBool) {
+            while !stop.load(Relaxed) {
+                std::thread::yield_now();
+            }
+        }
+
+        /// The exact member inside one long BDD apply: it never returns. The thread stays parked
+        /// (the shipped driver leaves a real one running the same way); the test process ends it.
+        pub(super) fn exact_never_returns(_: &str) -> Result<Option<bool>, String> {
+            loop {
+                std::thread::park();
+            }
+        }
+
+        fn native_stopped(
+            _: &Btor2File,
+            stop: Option<&AtomicBool>,
+            _: u32,
+            _: Option<Instant>,
+        ) -> Result<Option<bool>, MemberStop> {
+            until_stopped(stop.expect("the driver passes its stop flag"));
+            Err(MemberStop::Cancelled("native stopped at depth 3".into()))
+        }
+
+        fn owned_stopped(
+            _: &Btor2File,
+            _: Instant,
+            stop: Arc<AtomicBool>,
+            _: Option<&Carried>,
+        ) -> Result<Option<bool>, MemberStop> {
+            until_stopped(&stop);
+            Err(MemberStop::Cancelled("stopped at frame 2".into()))
+        }
+
+        fn interp_stopped(
+            _: &Btor2File,
+            stop: &AtomicBool,
+            _: MemberTimeouts,
+        ) -> InterpSafetyVerdict {
+            until_stopped(stop);
+            InterpSafetyVerdict::Undecided {
+                reason: "the search was cancelled".into(),
+            }
+        }
+
+        /// A killed child: `Unknown` once the stop flag is up.
+        fn subprocess_stopped(
+            _: &Btor2File,
+            _: Duration,
+            stop: &AtomicBool,
+            _: Option<&Carried>,
+        ) -> Result<Option<McVerdict>, String> {
+            until_stopped(stop);
+            Ok(Some(McVerdict::Unknown))
+        }
+
+        /// Every member still running: each reports as a stopped engine does once the stop flag
+        /// is up, and the exact member never returns.
+        const ALL_RUNNING: Runners = Runners {
+            exact: exact_never_returns,
+            native: native_stopped,
+            sat_bmc: owned_stopped,
+            ic3: owned_stopped,
+            interp_available: || Ok(()),
+            interp_search: interp_stopped,
+            btormc: |f, _, t, stop, c| subprocess_stopped(f, t, stop, c),
+            pono: |f, t, stop| subprocess_stopped(f, t, stop, None),
+            ric3: |f, _, t, stop, c| subprocess_stopped(f, t, stop, c),
+            ric3_bmc: subprocess_stopped,
+            #[cfg(not(feature = "boolector"))]
+            cex: |_, _, stop| {
+                until_stopped(stop);
+                Ok(None)
+            },
+        };
+
+        fn run(runners: &Runners) -> ReachOutcome {
+            decide_with_members_using(&counter(), NO_WALL, None, ReachMembers::ALL, runners)
+        }
+
+        fn names(notes: &[(&'static str, String)]) -> Vec<&'static str> {
+            notes.iter().map(|(m, _)| *m).collect()
+        }
+
+        /// Whichever member decides first is credited alone, and every member its verdict
+        /// stopped is in no list: a cancelled owned member, a cancelled interpolation search, a
+        /// killed child and the abandoned exact member alike. (The interpolation member is not
+        /// a row: its verdict does not raise the stop flag, so its peers run on.)
+        #[test]
+        fn the_first_verdict_is_credited_alone_and_a_member_it_stopped_is_in_no_list() {
+            let reach = |m| ReachOutcome::from_sets(vec![m], vec![]);
+            let safe = |m| ReachOutcome::from_sets(vec![], vec![m]);
+            let cases: [(Runners, ReachOutcome); 9] = [
+                (
+                    Runners {
+                        exact: |_| Ok(Some(true)),
+                        ..ALL_RUNNING
+                    },
+                    reach("exact"),
+                ),
+                (
+                    Runners {
+                        native: |_, _, _, _| Ok(Some(false)),
+                        ..ALL_RUNNING
+                    },
+                    safe("native"),
+                ),
+                (
+                    Runners {
+                        sat_bmc: |_, _, _, _| Ok(Some(true)),
+                        ..ALL_RUNNING
+                    },
+                    reach("sat-bmc"),
+                ),
+                (
+                    Runners {
+                        ic3: |_, _, _, _| Ok(Some(false)),
+                        ..ALL_RUNNING
+                    },
+                    safe("ic3"),
+                ),
+                (
+                    Runners {
+                        ic3: |_, _, _, _| Ok(Some(true)),
+                        ..ALL_RUNNING
+                    },
+                    reach("ic3"),
+                ),
+                (
+                    Runners {
+                        btormc: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
+                        ..ALL_RUNNING
+                    },
+                    reach("btormc"),
+                ),
+                (
+                    Runners {
+                        pono: |_, _, _| Ok(Some(McVerdict::Safe)),
+                        ..ALL_RUNNING
+                    },
+                    safe("pono"),
+                ),
+                (
+                    Runners {
+                        ric3: |_, _, _, _, _| Ok(Some(McVerdict::Safe)),
+                        ..ALL_RUNNING
+                    },
+                    safe("ric3"),
+                ),
+                (
+                    Runners {
+                        ric3_bmc: |_, _, _, _| Ok(Some(McVerdict::Violated)),
+                        ..ALL_RUNNING
+                    },
+                    reach("ric3-bmc"),
+                ),
+            ];
+            for (runners, want) in &cases {
+                assert_eq!(&run(runners), want);
+            }
+        }
+
+        /// A member that reports its own verdict after the first one is in (the scoped join
+        /// waits for it) is credited beside the first, in the fixed engine order; when it
+        /// disagrees, the outcome is the contradiction alarm naming both sides.
+        #[test]
+        fn a_verdict_that_lands_after_the_first_is_credited_and_a_disagreement_is_the_alarm() {
+            let agreeing = Runners {
+                native: |_, _, _, _| Ok(Some(true)),
+                ic3: |_, _, stop, _| {
+                    until_stopped(&stop);
+                    Ok(Some(true))
+                },
+                pono: |_, _, stop| {
+                    until_stopped(stop);
+                    Ok(Some(McVerdict::Violated))
+                },
+                ..ALL_RUNNING
+            };
+            assert_eq!(
+                run(&agreeing),
+                ReachOutcome::from_sets(vec!["native", "ic3", "pono"], vec![])
+            );
+            let disagreeing = Runners {
+                native: |_, _, _, _| Ok(Some(true)),
+                ric3: |_, _, _, stop, _| {
+                    until_stopped(stop);
+                    Ok(Some(McVerdict::Safe))
+                },
+                ..ALL_RUNNING
+            };
+            let out = run(&disagreeing);
+            assert_eq!(out.verdict, ReachVerdict::Contradiction);
+            assert_eq!(out, ReachOutcome::from_sets(vec!["native"], vec!["ric3"]));
+        }
+
+        /// With no verdict, every member that ended on its own reaches the outcome under its
+        /// own stop: a refusal, a budget abstention and a search to the bound each in their
+        /// list, in the fixed engine order. Nothing raises the stop flag in this script.
+        #[test]
+        fn with_no_verdict_each_member_is_listed_under_its_own_stop() {
+            let stops = Runners {
+                exact: |_| Err("exact: over the cap".into()),
+                native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
+                sat_bmc: |_, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
+                ic3: |_, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
+                interp_available: || Err("no cvc5".into()),
+                interp_search: |_, _, _| unreachable!("no search without cvc5"),
+                btormc: |_, _, _, _, _| Ok(Some(McVerdict::Unknown)),
+                pono: |_, _, _| Err("pono: not found".into()),
+                ric3: |_, _, _, _, _| Ok(Some(McVerdict::Unknown)),
+                ric3_bmc: |_, _, _, _| Err("ric3: not found".into()),
+                #[cfg(not(feature = "boolector"))]
+                cex: |_, _, _| Ok(None),
+            };
+            let out = run(&stops);
+            assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+            let note = |m, why: &str| (m, why.to_string());
+            assert_eq!(
+                out.refused,
+                vec![
+                    note("exact", "exact: over the cap"),
+                    note("interp", "no cvc5"),
+                    note("ic3", "ic3: arrays"),
+                    note("pono", "pono: not found"),
+                    note("ric3-bmc", "ric3: not found"),
+                ]
+            );
+            assert_eq!(out.undecided, vec![note("native", "searched to depth 40")]);
+            // A child that ended undecided with nothing decided is a budget stop naming its budget.
+            assert_eq!(names(&out.abstained), vec!["sat-bmc", "btormc", "ric3"]);
+            assert_eq!(out.abstained[0].1, "conflict budget spent");
+            let budget = NO_WALL.as_millis().to_string();
+            assert!(
+                out.abstained[1..]
+                    .iter()
+                    .all(|(_, why)| why.contains(&budget)),
+                "{out:?}"
+            );
+            assert_eq!((out.trace, out.trace_replay_failed), (None, Vec::new()));
+        }
+
+        /// mununu#1039 — the portfolio's wall stops every member still running, and each is a
+        /// budget abstention: none is silent, none is a refusal or a search to its bound.
+        #[test]
+        fn the_wall_makes_every_running_member_a_budget_abstention() {
+            let out = decide_with_members_using(
+                &counter(),
+                Duration::from_millis(50),
+                None,
+                ReachMembers::ALL,
+                &ALL_RUNNING,
+            );
+            assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+            assert_eq!(names(&out.abstained), ReachMembers::ALL.names(), "{out:?}");
+            assert!(
+                out.refused.is_empty() && out.undecided.is_empty(),
+                "{out:?}"
+            );
+        }
+
+        /// mununu#1043 — the run budget stops them the same way, and no cause blames the wall.
+        /// The budget is spent from inside a member (each member thread re-enters it), so no
+        /// clock decides when.
+        #[test]
+        fn the_run_budget_makes_every_running_member_a_budget_abstention() {
+            use crate::adapter::run_budget::{Budget, current, enter};
+            let spent = Runners {
+                native: |f, stop, query_ms, wall| {
+                    current().cancel();
+                    native_stopped(f, stop, query_ms, wall)
+                },
+                ..ALL_RUNNING
+            };
+            let budget = Budget::unbounded();
+            let out = {
+                let _g = enter(&budget);
+                run(&spent)
+            };
+            assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+            assert_eq!(names(&out.abstained), ReachMembers::ALL.names(), "{out:?}");
+            assert!(
+                out.refused.is_empty() && out.undecided.is_empty(),
+                "{out:?}"
+            );
+            let wall = clock_sweep_cause(true, NO_WALL.as_millis());
+            assert!(out.abstained.iter().all(|(_, why)| *why != wall), "{out:?}");
+        }
+
+        /// The caller's cancellation (another rung won) stops every member and names none: it
+        /// is neither a verdict nor a clock.
+        #[test]
+        fn a_callers_cancellation_names_no_member() {
+            let cancel = AtomicBool::new(true);
+            let out = decide_with_members_using(
+                &counter(),
+                NO_WALL,
+                Some(&cancel),
+                ReachMembers::ALL,
+                &ALL_RUNNING,
+            );
+            assert_eq!(out, ReachOutcome::default());
+        }
+
+        /// Every member would decide at once.
+        const ALL_DECIDE: Runners = Runners {
+            exact: |_| Ok(Some(true)),
+            native: |_, _, _, _| Ok(Some(true)),
+            sat_bmc: |_, _, _, _| Ok(Some(true)),
+            ic3: |_, _, _, _| Ok(Some(true)),
+            interp_available: || Ok(()),
+            interp_search: |_, _, _| InterpSafetyVerdict::Unsafe { depth: 1 },
+            btormc: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
+            pono: |_, _, _| Ok(Some(McVerdict::Violated)),
+            ric3: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
+            ric3_bmc: |_, _, _, _| Ok(Some(McVerdict::Violated)),
+            #[cfg(not(feature = "boolector"))]
+            cex: |_, _, _| Ok(Some(1)),
+        };
+
+        /// mununu#726 — under an already-expired budget no member is asked: every runner here
+        /// would decide at once, and the outcome credits none. The control is the same runners
+        /// with no budget.
+        #[test]
+        fn an_expired_budget_starts_no_member() {
+            use crate::adapter::run_budget::{Budget, enter};
+            let out = {
+                let _g = enter(&Budget::with_ms(0));
+                run(&ALL_DECIDE)
+            };
+            assert_eq!(out, ReachOutcome::default());
+            assert_eq!(run(&ALL_DECIDE).verdict, ReachVerdict::Reachable);
+        }
+
+        /// The owned-only driver under scripted members. Its detectors, which race the real
+        /// engines, are `owned_only_excludes_external_engines_on_small_counter` and
+        /// `the_owned_only_driver_carries_a_trace_when_asked`. (Not under the `boolector`
+        /// feature: that member has no runner and would decide the fixture itself.)
+        #[cfg(not(feature = "boolector"))]
+        mod owned {
+            use super::*;
+
+            /// A deadline no scripted run reaches.
+            const NO_DEADLINE: u32 = 600_000;
+
+            /// A member that never returns. The collector's deadline raises no flag, so a stub
+            /// waiting for one would spin on after the test; this one stays parked.
+            fn stuck() -> ! {
+                loop {
+                    std::thread::park();
+                }
+            }
+
+            /// Every owned-only member still running, whatever happens.
+            const ALL_STUCK: Runners = Runners {
+                exact: |_| stuck(),
+                native: |_, _, _, _| stuck(),
+                sat_bmc: |_, _, _, _| stuck(),
+                ic3: |_, _, _, _| stuck(),
+                interp_search: |_, _, _| stuck(),
+                cex: |_, _, _| stuck(),
+                ..ALL_RUNNING
+            };
+
+            fn run(runners: &Runners) -> ReachOutcome {
+                decide_owned_only_using(&counter(), NO_DEADLINE, false, runners)
+            }
+
+            /// The driver starts `ic3` unless `MUNUNU_REACH_IC3=0`; its rows follow the setting.
+            fn ic3_starts() -> bool {
+                owned_members().contains(&"ic3")
+            }
+
+            /// This driver's lists are in finishing order; compared sorted.
+            fn sorted(mut notes: Vec<(&'static str, String)>) -> Vec<(&'static str, String)> {
+                notes.sort();
+                notes
+            }
+
+            #[test]
+            fn the_first_verdict_is_credited_alone_and_a_member_it_stopped_is_in_no_list() {
+                let reach = |m| ReachOutcome::from_sets(vec![m], vec![]);
+                let safe = |m| ReachOutcome::from_sets(vec![], vec![m]);
+                let mut cases = vec![
+                    (
+                        Runners {
+                            exact: |_| Ok(Some(true)),
+                            ..ALL_RUNNING
+                        },
+                        reach("exact"),
+                    ),
+                    (
+                        Runners {
+                            native: |_, _, _, _| Ok(Some(false)),
+                            ..ALL_RUNNING
+                        },
+                        safe("native"),
+                    ),
+                    (
+                        Runners {
+                            interp_search: |_, _, _| InterpSafetyVerdict::Safe { iterations: 1 },
+                            ..ALL_RUNNING
+                        },
+                        safe("interp"),
+                    ),
+                    (
+                        Runners {
+                            cex: |_, _, _| Ok(Some(3)),
+                            ..ALL_RUNNING
+                        },
+                        reach("cex"),
+                    ),
+                    (
+                        Runners {
+                            sat_bmc: |_, _, _, _| Ok(Some(true)),
+                            ..ALL_RUNNING
+                        },
+                        reach("sat-bmc"),
+                    ),
+                ];
+                if ic3_starts() {
+                    cases.push((
+                        Runners {
+                            ic3: |_, _, _, _| Ok(Some(false)),
+                            ..ALL_RUNNING
+                        },
+                        safe("ic3"),
+                    ));
+                }
+                for (runners, want) in &cases {
+                    assert_eq!(&run(runners), want);
+                }
+            }
+
+            /// With no verdict and every member ended on its own, each is listed under its own
+            /// stop, and none is named as still running.
+            #[test]
+            fn with_no_verdict_each_member_is_listed_under_its_own_stop() {
+                let stops = Runners {
+                    exact: |_| Err("exact: over the cap".into()),
+                    native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
+                    sat_bmc: |_, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
+                    ic3: |_, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
+                    interp_available: || Err("no cvc5".into()),
+                    cex: |_, _, _| Err(MemberStop::Abstained("query budget spent".into())),
+                    ..ALL_RUNNING
+                };
+                let out = run(&stops);
+                let note = |m, why: &str| (m, why.to_string());
+                assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+                assert_eq!(
+                    sorted(out.refused),
+                    vec![
+                        note("exact", "exact: over the cap"),
+                        note("interp", "no cvc5"),
+                        note("sat-bmc", "sat-bmc: arrays"),
+                    ]
+                );
+                assert_eq!(out.undecided, vec![note("native", "searched to depth 40")]);
+                let mut abstained = vec![note("cex", "query budget spent")];
+                if ic3_starts() {
+                    abstained.push(note("ic3", "frame budget spent"));
+                }
+                assert_eq!(sorted(out.abstained), abstained);
+            }
+
+            /// mununu#1022 — at the deadline, every member that has not reported is named, with
+            /// the cause the collector gives (`unreported_at_deadline`).
+            #[test]
+            fn at_the_deadline_every_member_still_running_is_named() {
+                let out = decide_owned_only_using(&counter(), 50, false, &ALL_STUCK);
+                assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+                assert!(
+                    out.refused.is_empty() && out.undecided.is_empty(),
+                    "{out:?}"
+                );
+                assert_eq!(
+                    sorted(out.abstained),
+                    sorted(unreported_at_deadline(&owned_members(), &[], 50))
+                );
+            }
+
+            /// N5.4 — a carrier that decides alone (the real engine; every other member still
+            /// running) carries its own depth-7 trace when asked, and nothing unasked.
+            #[test]
+            fn a_carrier_that_decides_carries_its_trace_only_when_asked() {
+                let carriers = [
+                    (
+                        "sat-bmc",
+                        Runners {
+                            sat_bmc: run_sat_bmc,
+                            ..ALL_STUCK
+                        },
+                    ),
+                    (
+                        "ic3",
+                        Runners {
+                            ic3: run_ic3,
+                            ..ALL_STUCK
+                        },
+                    ),
+                ];
+                for (name, runners) in &carriers {
+                    if *name == "ic3" && !ic3_starts() {
+                        continue;
+                    }
+                    let with = decide_owned_only_using(&counter(), NO_DEADLINE, true, runners);
+                    assert_eq!(with.reachable_by, vec![*name], "{with:?}");
+                    let carried = with.trace.as_ref().expect("the decider carried its trace");
+                    assert_eq!((carried.by, carried.depth()), (*name, 7), "{with:?}");
+                    assert!(with.trace_replay_failed.is_empty(), "{with:?}");
+                    assert_eq!(
+                        decide_owned_only_using(&counter(), NO_DEADLINE, false, runners),
+                        ReachOutcome::from_sets(vec![*name], vec![])
+                    );
+                }
+            }
+
+            /// mununu#816 — under an already-expired budget no member is asked (as the full
+            /// driver's test of the same name).
+            #[test]
+            fn an_expired_budget_starts_no_member() {
+                use crate::adapter::run_budget::{Budget, enter};
+                let out = {
+                    let _g = enter(&Budget::with_ms(0));
+                    run(&ALL_DECIDE)
+                };
+                assert_eq!(out, ReachOutcome::default());
+                assert_eq!(run(&ALL_DECIDE).verdict, ReachVerdict::Reachable);
+            }
+        }
     }
 }
