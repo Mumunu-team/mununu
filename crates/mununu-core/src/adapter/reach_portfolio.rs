@@ -1246,6 +1246,7 @@ type OwnedRunner = fn(
     std::time::Instant,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     Option<&Carried>,
+    &SharedAig,
 ) -> Result<Option<bool>, MemberStop>;
 
 /// The native member's runner ([`run_native`]): the design, the shared stop flag, the per-check
@@ -1615,11 +1616,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "sat-bmc",
-<<<<<<< HEAD
-                    run_sat_bmc(file, deadline, cancel, carried, shared_aig),
-=======
-                    (runners.sat_bmc)(file, deadline, cancel, carried),
->>>>>>> origin/main
+                    (runners.sat_bmc)(file, deadline, cancel, carried, shared_aig),
                 );
                 if v == Some(true) {
                     decided.store(true, Relaxed);
@@ -1641,11 +1638,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "ic3",
-<<<<<<< HEAD
-                    run_ic3(file, deadline, cancel, carried, shared_aig),
-=======
-                    (runners.ic3)(file, deadline, cancel, carried),
->>>>>>> origin/main
+                    (runners.ic3)(file, deadline, cancel, carried, shared_aig),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -2163,17 +2156,13 @@ fn decide_owned_only_using(
         let aig = Arc::clone(&shared_aig);
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-<<<<<<< HEAD
-            let r = run_sat_bmc(
+            let r = (runners.sat_bmc)(
                 &file,
                 deadline,
                 Arc::clone(&decided),
                 carried.as_deref(),
                 &aig,
             );
-=======
-            let r = (runners.sat_bmc)(&file, deadline, Arc::clone(&decided), carried.as_deref());
->>>>>>> origin/main
             let v = settle_native(
                 &refused,
                 &abstained,
@@ -2205,17 +2194,13 @@ fn decide_owned_only_using(
         let aig = Arc::clone(&shared_aig);
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-<<<<<<< HEAD
-            let r = run_ic3(
+            let r = (runners.ic3)(
                 &file,
                 deadline,
                 Arc::clone(&decided),
                 carried.as_deref(),
                 &aig,
             );
-=======
-            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), carried.as_deref());
->>>>>>> origin/main
             let v = settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "ic3", r);
             if v.is_some() {
                 decided.store(true, Relaxed);
@@ -4089,6 +4074,7 @@ mod tests {
             _: Instant,
             stop: Arc<AtomicBool>,
             _: Option<&Carried>,
+            _: &SharedAig,
         ) -> Result<Option<bool>, MemberStop> {
             until_stopped(&stop);
             Err(MemberStop::Cancelled("stopped at frame 2".into()))
@@ -4169,21 +4155,21 @@ mod tests {
                 ),
                 (
                     Runners {
-                        sat_bmc: |_, _, _, _| Ok(Some(true)),
+                        sat_bmc: |_, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("sat-bmc"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _| Ok(Some(false)),
+                        ic3: |_, _, _, _, _| Ok(Some(false)),
                         ..ALL_RUNNING
                     },
                     safe("ic3"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _| Ok(Some(true)),
+                        ic3: |_, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("ic3"),
@@ -4264,8 +4250,8 @@ mod tests {
             let stops = Runners {
                 exact: |_| Err("exact: over the cap".into()),
                 native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
-                sat_bmc: |_, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
-                ic3: |_, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
+                sat_bmc: |_, _, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
+                ic3: |_, _, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
                 interp_available: || Err("no cvc5".into()),
                 interp_search: |_, _, _| unreachable!("no search without cvc5"),
                 btormc: |_, _, _, _, _| Ok(Some(McVerdict::Unknown)),
@@ -4368,8 +4354,8 @@ mod tests {
         const ALL_DECIDE: Runners = Runners {
             exact: |_| Ok(Some(true)),
             native: |_, _, _, _| Ok(Some(true)),
-            sat_bmc: |_, _, _, _| Ok(Some(true)),
-            ic3: |_, _, _, _| Ok(Some(true)),
+            sat_bmc: |_, _, _, _, _| Ok(Some(true)),
+            ic3: |_, _, _, _, _| Ok(Some(true)),
             interp_available: || Ok(()),
             interp_search: |_, _, _| InterpSafetyVerdict::Unsafe { depth: 1 },
             btormc: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
@@ -4417,8 +4403,8 @@ mod tests {
             const ALL_STUCK: Runners = Runners {
                 exact: |_| stuck(),
                 native: |_, _, _, _| stuck(),
-                sat_bmc: |_, _, _, _| stuck(),
-                ic3: |_, _, _, _| stuck(),
+                sat_bmc: |_, _, _, _, _| stuck(),
+                ic3: |_, _, _, _, _| stuck(),
                 interp_search: |_, _, _| stuck(),
                 cex: |_, _, _| stuck(),
                 ..ALL_RUNNING
@@ -4474,7 +4460,7 @@ mod tests {
                     ),
                     (
                         Runners {
-                            sat_bmc: |_, _, _, _| Ok(Some(true)),
+                            sat_bmc: |_, _, _, _, _| Ok(Some(true)),
                             ..ALL_RUNNING
                         },
                         reach("sat-bmc"),
@@ -4483,7 +4469,7 @@ mod tests {
                 if ic3_starts() {
                     cases.push((
                         Runners {
-                            ic3: |_, _, _, _| Ok(Some(false)),
+                            ic3: |_, _, _, _, _| Ok(Some(false)),
                             ..ALL_RUNNING
                         },
                         safe("ic3"),
@@ -4501,8 +4487,8 @@ mod tests {
                 let stops = Runners {
                     exact: |_| Err("exact: over the cap".into()),
                     native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
-                    sat_bmc: |_, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
-                    ic3: |_, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
+                    sat_bmc: |_, _, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
+                    ic3: |_, _, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
                     interp_available: || Err("no cvc5".into()),
                     cex: |_, _, _| Err(MemberStop::Abstained("query budget spent".into())),
                     ..ALL_RUNNING
