@@ -26,6 +26,19 @@ impl SourceLanguage {
         }
     }
 
+    /// Every name [`Self::from_name`] accepts — the candidates an "Unknown language" refusal
+    /// lists (mununu#1121). Kept beside the match; the test holds the two equal.
+    pub const NAMES: &'static [&'static str] = &[
+        "typescript",
+        "ts",
+        "javascript",
+        "js",
+        "python",
+        "py",
+        "rust",
+        "rs",
+    ];
+
     /// Detect language from explicit name string.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
@@ -287,5 +300,17 @@ impl Connection {
         let root = parsed.tree.root_node();
         // Root starts at line 1
         assert_eq!(parsed.node_line(&root), 1);
+    }
+
+    /// mununu#1121 — the listed names are exactly the ones `from_name` accepts.
+    #[test]
+    fn x1121_every_listed_language_name_is_accepted() {
+        for name in SourceLanguage::NAMES {
+            assert!(
+                SourceLanguage::from_name(name).is_some(),
+                "`{name}` is listed but refused"
+            );
+        }
+        assert!(SourceLanguage::from_name("cobol").is_none());
     }
 }

@@ -296,6 +296,29 @@ impl PredicateExpr {
         }
     }
 
+    /// mununu#1121 — the reason a pass abstains when a predicate names a register the design
+    /// does not have: `head`, the first register of `preds` that `known` lacks, and the design's
+    /// registers (every one when few, the nearest when many). `head` alone when every register
+    /// resolves (the caller failed for another reason).
+    pub fn unknown_register_reason<'a>(
+        head: &str,
+        preds: &[PredicateExpr],
+        known: impl IntoIterator<Item = &'a str>,
+    ) -> String {
+        let known: Vec<&str> = known.into_iter().collect();
+        match preds
+            .iter()
+            .flat_map(PredicateExpr::registers)
+            .find(|r| !known.contains(&r.as_str()))
+        {
+            Some(missing) => format!(
+                "{head} `{missing}` (the design's registers: {})",
+                crate::adapter::candidate_list(&missing, known.iter().copied())
+            ),
+            None => head.to_string(),
+        }
+    }
+
     /// All distinct register names referenced by the expression, sorted. Used
     /// to resolve + width-check every register a compound predicate touches
     /// (the simple atom touches exactly one; a compound may touch several).

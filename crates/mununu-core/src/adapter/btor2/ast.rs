@@ -220,7 +220,42 @@ pub enum Op {
     Write,
 }
 
+#[cfg(test)]
+mod keyword_table_tests {
+    use super::Op;
+
+    /// mununu#1121 — the keyword table the "unknown BTOR2 keyword" refusal ranks agrees with
+    /// the `from_keyword` / `keyword` pair, entry by entry, with no duplicate.
+    #[test]
+    fn x1121_every_listed_keyword_parses_and_prints_back_to_itself() {
+        for kw in Op::KEYWORDS {
+            let op =
+                Op::from_keyword(kw).unwrap_or_else(|| panic!("`{kw}` is listed but not parsed"));
+            assert_eq!(op.keyword(), *kw);
+        }
+        let mut sorted = Op::KEYWORDS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            Op::KEYWORDS.len(),
+            "a keyword is listed twice"
+        );
+    }
+}
+
 impl Op {
+    /// Every keyword [`Op::from_keyword`] accepts, in the match's order — the candidates an
+    /// "unknown BTOR2 keyword" refusal ranks (mununu#1121). Kept beside the match; the test
+    /// above holds the two equal entry by entry.
+    pub const KEYWORDS: &'static [&'static str] = &[
+        "not", "inc", "dec", "neg", "redand", "redor", "redxor", "iff", "implies", "eq", "neq",
+        "and", "or", "xor", "nand", "nor", "xnor", "sgt", "ugt", "sgte", "ugte", "slt", "ult",
+        "slte", "ulte", "add", "sub", "mul", "sll", "srl", "sra", "rol", "ror", "concat", "slice",
+        "uext", "sext", "ite", "sdiv", "udiv", "smod", "srem", "urem", "saddo", "ssubo", "smulo",
+        "uaddo", "usubo", "umulo", "sdivo", "read", "write",
+    ];
+
     /// Convert a BTOR2 keyword into an `Op`. Returns `None` for unrecognized
     /// keywords (which include `sort`, `input`, `state`, `init`, `next`, etc.,
     /// handled separately by the parser).

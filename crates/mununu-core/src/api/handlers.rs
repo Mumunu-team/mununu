@@ -12,7 +12,9 @@ use tracing::info;
 use crate::api::error::{ApiError, ApiResult};
 use crate::api::graph::generate_graphs;
 use crate::api::models::*;
-use crate::api::ops::{compute_counterstrategy_result, resolve_template_ref_for_cache};
+use crate::api::ops::{
+    compute_counterstrategy_result, known_automata, known_formulas, resolve_template_ref_for_cache,
+};
 use crate::clts::{Clts, DefaultLabelIdx, DefaultStateIdx, LabelId};
 use crate::context::{ControllerSynthesisOptions, DiagnosticsOptions as ContextDiagnosticsOptions};
 use crate::guard::sanitize_identifier;
@@ -246,8 +248,8 @@ fn context_summarize_handler_impl(
 /// 2. Else, `extract_strategy = true` → `Functional` (legacy mapping).
 /// 3. Else, `Projection` (default).
 ///
-/// Accepted names: `projection`, `functional`, `permissive`,
-/// `signature-memory`, `product-game`, `parity-game`. The dashes may also
+/// Accepted names: [`ControllerMode::names`] (`projection`, `functional`, `permissive`,
+/// `signature-memory`, `product-game`, `parity-game`, `gr1`). The dashes may also
 /// be underscores or removed (e.g., `parity_game` and `paritygame` work).
 fn resolve_controller_mode(
     mode: &Option<String>,
@@ -257,9 +259,8 @@ fn resolve_controller_mode(
     if let Some(name) = mode {
         return ControllerMode::from_normalized_name(name).map_err(|other| ApiError::BadRequest {
             message: format!("Unknown controller_mode '{other}'"),
-            details: Some(
-                "Valid: projection, functional, permissive, signature-memory, product-game, parity-game".into(),
-            ),
+            // mununu#1121 — generated from the enum, so the list cannot drift from the CLI's.
+            details: Some(format!("Valid: {}", ControllerMode::names().join(", "))),
         });
     }
     Ok(if extract_strategy {
@@ -363,14 +364,14 @@ fn context_synthesize_handler_impl(
             .get(&formula_name)
             .ok_or_else(|| ApiError::BadRequest {
                 message: format!("Unknown formula '{}'", formula_name),
-                details: None,
+                details: Some(known_formulas(realized, &formula_name)),
             })?;
 
     // Verify automaton exists
     if realized.context.clts(&request.automaton).is_none() {
         return Err(ApiError::BadRequest {
             message: format!("Unknown automaton '{}'", request.automaton),
-            details: None,
+            details: Some(known_automata(realized, &request.automaton)),
         });
     }
 
@@ -4100,7 +4101,7 @@ fn codesign_verify_handler_impl(
         .get(&request.formula)
         .ok_or_else(|| ApiError::BadRequest {
             message: format!("unknown formula '{}' in composed context", request.formula),
-            details: None,
+            details: Some(known_formulas(&realized, &request.formula)),
         })?;
 
     let automaton_name = request

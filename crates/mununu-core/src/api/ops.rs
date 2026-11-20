@@ -15,6 +15,26 @@ use crate::api::models::*;
 use crate::context_dsl::RealizedContext;
 use crate::mu_calculus::{Environment, EvaluationOptions, Formula};
 
+/// mununu#1121 — the `details` of an "Unknown formula" `BadRequest`: the formula names the
+/// realised context declares (every name when few, the nearest to `wanted` when many). The list
+/// goes in `details`, not `message`, because consumers match on `message`.
+pub(crate) fn known_formulas(realized: &RealizedContext, wanted: &str) -> String {
+    format!(
+        "formulas: {}",
+        crate::adapter::candidate_list(wanted, realized.formulas.keys().map(String::as_str))
+    )
+}
+
+/// mununu#1121 — the `details` of an "Unknown automaton" `BadRequest`: the automaton and
+/// composition names the realised context exposes.
+pub(crate) fn known_automata(realized: &RealizedContext, wanted: &str) -> String {
+    let names = realized.context.clts_names();
+    format!(
+        "automata: {}",
+        crate::adapter::candidate_list(wanted, names.iter().map(String::as_str))
+    )
+}
+
 /// `POST /api/v1/context/eval` and the MCP `context_eval` tool: evaluate the μ-calculus formulas
 /// of a CTXDSL context (all of them, one by name, or a template instance) over their target
 /// automata, with the optional counterstrategy and the structural sanity checks.
@@ -76,7 +96,7 @@ pub fn context_verify(request: ContextVerifyRequest) -> ApiResult<ContextVerifyR
         if !realized.formulas.contains_key(formula_name) {
             return Err(ApiError::BadRequest {
                 message: format!("Unknown formula '{}'", formula_name),
-                details: None,
+                details: Some(known_formulas(realized, formula_name)),
             });
         }
         if let Some(ref automaton_name) = request.automaton {
@@ -125,7 +145,7 @@ pub fn context_verify(request: ContextVerifyRequest) -> ApiResult<ContextVerifyR
             .clts(automaton_name)
             .ok_or_else(|| ApiError::BadRequest {
                 message: format!("Unknown automaton '{}'", automaton_name),
-                details: None,
+                details: Some(known_automata(realized, automaton_name)),
             })?;
         let env = realized.environment_for(automaton_name);
 
@@ -229,7 +249,7 @@ pub fn context_verify(request: ContextVerifyRequest) -> ApiResult<ContextVerifyR
             let Some(clts) = realized.context.clts(&a) else {
                 return Err(ApiError::BadRequest {
                     message: format!("Unknown automaton '{a}'"),
-                    details: None,
+                    details: Some(known_automata(realized, &a)),
                 });
             };
             let members: Vec<(String, &crate::clts::Clts<_, _>)> = realized

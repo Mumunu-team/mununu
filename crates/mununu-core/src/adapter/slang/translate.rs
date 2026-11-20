@@ -598,7 +598,10 @@ pub fn translate_ast_json_with_source(
                 report.unsupported.push(UnsupportedAssertion {
                     name,
                     kind: None,
-                    reason: format!("unknown assertionKind: {}", other.unwrap_or("<missing>")),
+                    reason: format!(
+                        "unknown assertionKind: {} (expected one of: Assert, Assume, Cover*)",
+                        other.unwrap_or("<missing>")
+                    ),
                 });
                 continue;
             }
