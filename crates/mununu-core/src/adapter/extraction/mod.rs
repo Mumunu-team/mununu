@@ -103,8 +103,8 @@ impl FormatAdapter for ExtractionAdapter {
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "auto-partition (preview, step 3.4): extraction adapter's dep graph is derived from `methods[].guards/effects`; \
-                     indirect pointer writes (`*p = x` and equivalents) may be missing — see phase-a3-followup-indirect-references.md. \
+                    "auto-partition (preview): the extraction adapter's dependency graph is derived from `methods[].guards/effects`; \
+                     indirect pointer writes (`*p = x` and equivalents) may be missing. \
                      Spec declares {} state field(s).",
                     spec.state_fields.len()
                 ),
@@ -116,9 +116,12 @@ impl FormatAdapter for ExtractionAdapter {
                 if let PartitionClass::Dropped { reason } = class {
                     warnings.push(AdapterWarning {
                         kind: WarningKind::ApproximateTranslation,
-                        message: format!(
-                            "auto-partition (preview, step 3.4): extraction field '{name}' would be dropped as {reason} — \
-                             step 3.5 will make this take effect on the sidecar resolver"
+                        message: crate::adapter::owner::mununu_limitation(
+                            &format!(
+                                "auto-partition (preview): extraction field '{name}' would be dropped as {reason}; \
+                                 the partition is advisory and is not applied to the sidecar resolver"
+                            ),
+                            None,
                         ),
                         location: None,
                     });

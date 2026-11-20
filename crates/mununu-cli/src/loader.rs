@@ -234,7 +234,7 @@ pub(crate) fn load_with_adapter_mode_extra(
                                 && let Ok(dump_path) = std::env::var("MUNUNU_R_S5_DUMP_PATH")
                             {
                                 let _ = std::fs::write(&dump_path, json);
-                                eprintln!("R-S5/R-S7: dumped widened sidecar to {dump_path}");
+                                eprintln!("dumped widened sidecar to {dump_path}");
                             }
                             widened_sidecar_json = widened.widened_json;
                             overrides = widened.init_policy_overrides;
