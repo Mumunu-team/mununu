@@ -3920,7 +3920,7 @@ fn parse_template_body(body: &str) -> Result<crate::adapter::templates::Template
     };
     if !ident(id) {
         return Err(if id.is_empty() {
-            "a template id is required (`mununu templates --domain rtl` lists them)".to_string()
+            "a template id is required (`--domain rtl` on `templates` lists them)".to_string()
         } else {
             format!("`{id}` is not a template id")
         });

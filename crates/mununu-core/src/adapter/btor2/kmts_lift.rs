@@ -768,7 +768,9 @@ impl MemoryInitGap {
             Self::UnsupportedOperator { op } => format!(
                 "a mununu limitation: the cycle-0 encoder has no rule for `{op}` yet (mununu#1106); \
                  the exact engine reads the memory itself when the cone fits its bit cap — \
-                 decide the row with `--engine exact-symbolic`, or supply an `init` without `{op}`"
+                 decide the row with `--engine exact-symbolic` on `sv verify-auto` (the cegar \
+                 verbs cannot select it), or give the memory an initial value without `{op}` (an \
+                 initializer in the RTL, or the `init` line of a hand-written BTOR2)"
             ),
             Self::LiftDefect => "a lift defect, not something the source can change: please \
                                  report it with the BTOR2 (mununu#1106)"
