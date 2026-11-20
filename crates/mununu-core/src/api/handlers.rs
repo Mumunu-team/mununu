@@ -26,17 +26,43 @@ use crate::mu_calculus::EvaluationOptions;
 /// blocks every other request sharing the worker. The heavy body lives in a
 /// sibling `*_impl` fn; this wrapper just moves it off-thread and flattens the
 /// `JoinError` (task panic/cancel) into an `ApiError`.
+///
+/// mununu#1147 — the body runs under a run budget whose cancel flag goes up if this future is
+/// dropped before the body returns (the request timed out, or the client went away): every seam
+/// under it that polls the budget — the portfolio members, the planner's per-property budgets,
+/// the subprocess helper that kills its child — stops instead of finishing for nobody. A body
+/// that installs its own budget derives it with `Budget::child(&current(), …)` so the flag is
+/// inherited.
 async fn blocking<T, F>(f: F) -> ApiResult<T>
 where
     F: FnOnce() -> ApiResult<T> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("handler task panicked or was cancelled: {e}"),
-            source: None,
-        })?
+    use crate::adapter::run_budget::{Budget, enter};
+    let budget = Budget::unbounded();
+    let mut armed = CancelOnDrop(Some(budget.clone()));
+    let joined = tokio::task::spawn_blocking(move || {
+        let _g = enter(&budget);
+        f()
+    })
+    .await;
+    armed.0 = None; // the body returned: nothing to cancel
+    joined.map_err(|e| ApiError::Internal {
+        message: format!("handler task panicked or was cancelled: {e}"),
+        source: None,
+    })?
+}
+
+/// mununu#1147 — cancels the budget it holds when dropped while still armed: [`blocking`]
+/// disarms it after the body returns, so only an abandoned future (a timed-out request) cancels.
+struct CancelOnDrop(Option<crate::adapter::run_budget::Budget>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(budget) = self.0.take() {
+            budget.cancel();
+        }
+    }
 }
 
 /// mununu#865 — map a string option to its value. An unknown spelling is a 400 naming the field
@@ -920,8 +946,12 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             request.fault_warmup.unwrap_or(10),
         )
         .map_err(bad)?;
-        // `timeout_ms` bounds the attack's trace search (it polls this thread's budget).
-        let budget = crate::adapter::run_budget::Budget::with_ms_opt(request.timeout_ms);
+        // `timeout_ms` bounds the attack's trace search (it polls this thread's budget); a
+        // child of the request's budget, so the request's cancel reaches it (mununu#1147).
+        let budget = crate::adapter::run_budget::Budget::child(
+            &crate::adapter::run_budget::current(),
+            request.timeout_ms,
+        );
         let _budget = crate::adapter::run_budget::enter(&budget);
         let o = crate::adapter::fault_adversary::verify_fault_reach(
             &request.content,
@@ -6693,5 +6723,55 @@ over = "Sys"
             "the lift's doubt warning is beside it: {}",
             json["warnings"]
         );
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    //! mununu#1147 — a request dropped past its timeout cancels the work it started.
+
+    /// REPRODUCER — the blocking body polls the run budget; when the future is dropped (here by
+    /// `tokio::time::timeout`, the layer's effect) the body sees the cancel within a short grace
+    /// and stops. Fails on the parent: the body ran under no budget and never stopped.
+    #[tokio::test]
+    async fn x1147_a_dropped_request_cancels_its_blocking_work() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stopped = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&stopped);
+        let fut = super::blocking(move || {
+            let t0 = std::time::Instant::now();
+            while !crate::adapter::run_budget::expired() {
+                if t0.elapsed() > std::time::Duration::from_secs(5) {
+                    return Ok::<(), super::ApiError>(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            seen.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        let timed_out = tokio::time::timeout(std::time::Duration::from_millis(100), fut).await;
+        assert!(
+            timed_out.is_err(),
+            "the body outlives the request's timeout"
+        );
+        let t0 = std::time::Instant::now();
+        while !stopped.load(Ordering::Relaxed) && t0.elapsed() < std::time::Duration::from_secs(2) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            stopped.load(Ordering::Relaxed),
+            "the dropped request's body saw the cancel within 2 s"
+        );
+    }
+
+    /// A body that returns normally is not cancelled afterwards: a sibling body sharing nothing
+    /// is unaffected, and the budget of a finished body is left alone.
+    #[tokio::test]
+    async fn a_finished_body_is_not_cancelled() {
+        let r =
+            super::blocking(|| Ok::<bool, super::ApiError>(crate::adapter::run_budget::expired()))
+                .await;
+        assert_eq!(r.ok(), Some(false), "the body ran under a live budget");
     }
 }
