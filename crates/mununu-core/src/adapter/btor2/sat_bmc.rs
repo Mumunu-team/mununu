@@ -720,12 +720,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            out,
-            SatBmcOutcome::Stopped {
-                depth: 0,
-                reason: "cancelled".into()
-            }
+        // mununu#1142 — a flag already up stops the model build, before the first depth.
+        assert!(
+            matches!(&out, SatBmcOutcome::Stopped { depth: 0, reason } if reason.contains("cancelled")),
+            "{out:?}"
         );
     }
 

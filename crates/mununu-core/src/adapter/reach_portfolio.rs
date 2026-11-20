@@ -547,15 +547,9 @@ fn run_sat_bmc(
     };
     timed("sat-bmc", || match run() {
         Ok(SatBmcOutcome::Violated { .. }) => Ok(Some(true)),
-        // mununu#1142 — a build that stopped (the cap, the wall, a peer's verdict) searched no
-        // depth: the build's own reason, as a cancellation or a budget abstention.
-        Ok(SatBmcOutcome::Stopped { depth: 0, reason }) if reason.starts_with("aig:") => {
-            Err(if cancelled() {
-                MemberStop::Cancelled(reason)
-            } else {
-                MemberStop::Abstained(reason)
-            })
-        }
+        // mununu#1142 — a build that stopped (the cap, the wall, a peer's verdict) is a
+        // `Stopped` at depth 0 carrying the build's reason; the arms below report it as any
+        // other stop ("every depth below 0 refuted" is vacuously true).
         Ok(SatBmcOutcome::Stopped { depth, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("SAT BMC stopped; every depth below {depth} refuted"),
         )),
@@ -614,14 +608,8 @@ fn run_ic3(
             }
             Ok(Some(true))
         }
-        // mununu#1142 — a build that stopped searched no frame: the build's own reason.
-        Ok(Ic3Outcome::Stopped { frames: 0, reason }) if reason.starts_with("aig:") => {
-            Err(if cancelled() {
-                MemberStop::Cancelled(reason)
-            } else {
-                MemberStop::Abstained(reason)
-            })
-        }
+        // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
+        // reason; the arms below report it as any other stop.
         Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("IC3 stopped at frame {frames}"),
         )),
@@ -3131,7 +3119,7 @@ mod tests {
         let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         assert!(matches!(
             run_ic3(&file, later(), up, None, &cancelled),
-            Err(MemberStop::Cancelled(why)) if why.contains("cancelled")
+            Err(MemberStop::Cancelled(why)) if why.starts_with("IC3 stopped at frame 0")
         ));
     }
 

@@ -48,6 +48,7 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the member reached its own bound | `undecided`, with depth or frame, and the wall it left unused | mununu#1022, mununu#1038 |
 | the wall or the run budget stopped it | `abstained`, with progress | mununu#1043 |
 | the member refused the design | `refused` | — |
+| the owned SAT members' model build stopped (the node cap, the wall, a peer's verdict, the run budget) | `abstained` with the node count, or a cancellation; both members share the one build | mununu#1142 |
 | the member panicked | open: unrecorded, or reported as still running | mununu#1143 |
 | a rung of the justice / response ladder panicked | open | mununu#1140 |
 

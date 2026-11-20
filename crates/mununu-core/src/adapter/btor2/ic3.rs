@@ -2008,8 +2008,9 @@ mod tests {
             },
         )
         .unwrap();
+        // mununu#1142 — a flag already up stops the model build, before the first frame.
         assert!(
-            matches!(&out, Ic3Outcome::Stopped { reason, .. } if reason == "cancelled"),
+            matches!(&out, Ic3Outcome::Stopped { reason, .. } if reason.contains("cancelled")),
             "{out:?}"
         );
     }
