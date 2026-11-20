@@ -4,7 +4,7 @@
 //! An external tool (e.g. an agent writing RTL) can hand raw SV plus a target atom
 //! and get a verdict, with no manual `sv emit-btor2-per-module` → `btor2 verify-*`
 //! round-trip. Each function is a thin bridge: [`sv_to_btor2`] then the matching
-//! BTOR2 verb core ([`decide_reach_portfolio`],
+//! BTOR2 verb core ([`crate::adapter::reach_portfolio::decide_reach_portfolio`],
 //! [`response_liveness_rescue_atoms`], [`verify_recoverability`]). The SV → BTOR2
 //! lift requires sv2v + Yosys on the host (see [`docs/verifying-rtl.md`]); a missing
 //! tool returns a structured error.
@@ -24,7 +24,7 @@ use crate::adapter::liveness_rescue::{
     Atom, LivenessVerdict, parse_response_atom, parse_response_pairs,
     response_liveness_rescue_atoms, response_liveness_rescue_conjunction,
 };
-use crate::adapter::reach_portfolio::{ReachOutcome, decide_reach_portfolio};
+use crate::adapter::reach_portfolio::ReachOutcome;
 use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2, sv_to_btor2_with_blackboxes};
 use crate::verdict::PropertyVerdict;
 
@@ -158,33 +158,6 @@ pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport,
         ));
     }
     Ok(report)
-}
-
-/// `sv verify` — lift SV and decide `bad`-reachability of its assertions with the
-/// multi-engine safety portfolio.
-pub fn sv_verify_safety(lift: &SvLift) -> Result<ReachOutcome, String> {
-    let btor2 = lift.lift()?;
-    let file =
-        parser::parse(&btor2).map_err(|e| format!("parsing the lifted BTOR2: {}", e.message))?;
-    require_bad_line(&file)?;
-    Ok(decide_reach_portfolio(&file))
-}
-
-/// mununu#1064 — `sv verify-bad` decides the `bad` lines of the lifted model; a model with none
-/// has nothing to decide, and the verb says so instead of reporting a proof of nothing. The lift
-/// reads the design with `read_slang --ignore-assertions`, so a design whose checks are immediate
-/// assertions (or concurrent SVA) lifts to exactly this.
-fn require_bad_line(file: &crate::adapter::btor2::ast::Btor2File) -> Result<(), String> {
-    if file.bads().next().is_some() {
-        return Ok(());
-    }
-    Err(
-        "sv verify-bad: the lifted design has no `bad` line, so there is nothing to decide. \
-         The lift drops immediate assertions (`assert (…)` in procedural code) and does not lower \
-         concurrent SVA: write the checks as `assert property (…)` and run `mununu sv \
-         verify-auto`, or decide a hand-written `bad` with `mununu btor2 verify`"
-            .to_string(),
-    )
 }
 
 /// `sv verify-liveness` — lift SV and decide `AG(request → AF grant)` via the l2s
@@ -1015,20 +988,6 @@ fn node_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// mununu#1064 — `sv verify-bad` on a lifted model with no `bad` line is an error that names
-    /// the cause, and a model with one passes the gate.
-    #[test]
-    fn verify_bad_refuses_a_lifted_model_with_no_bad_line() {
-        let state = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n5 input 1 d\n\
-                     6 next 1 3 5\n";
-        let none = parser::parse(state).expect("parse");
-        let err = require_bad_line(&none).expect_err("no `bad` line is refused");
-        assert!(err.contains("no `bad` line"), "{err}");
-        assert!(err.contains("sv verify-auto"), "{err}");
-        let one = parser::parse(&format!("{state}7 bad 3\n")).expect("parse");
-        assert_eq!(require_bad_line(&one), Ok(()));
-    }
 
     fn lift_of(source: &str) -> SvLift {
         SvLift {

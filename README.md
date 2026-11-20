@@ -277,7 +277,7 @@ from raw SystemVerilog) and a BTOR2-direct form (`btor2 …`).
 
 | Capability | CLI | API | UI |
 |---|---|---|---|
-| SV / BTOR2 safety (`AG ¬bad`, portfolio) | `sv verify-bad`, `btor2 verify` | `POST /sv/verify-bad`, `/btor2/verify` | ✅ |
+| BTOR2 safety (`AG ¬bad`, portfolio) | `btor2 verify` | `POST /btor2/verify` | ✅ |
 | **No-sidecar auto SVA verify** | `sv verify-auto` | `POST /sv/verify-auto` | ✅ |
 | Response-liveness `AG(req → AF grant)` | `sv verify-liveness[-all]`, `btor2 …` | `POST /{sv,btor2}/verify-liveness[-all]` | ✅ |
 | **Recoverability `AG EF good`** (branching) | `sv verify-recoverability`, `btor2 …` | `POST /{sv,btor2}/verify-recoverability` | ✅ |

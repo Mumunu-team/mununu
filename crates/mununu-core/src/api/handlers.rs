@@ -1619,52 +1619,9 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
 }
 
 // --- SV-direct verbs: lift SV (yosys-slang) then decide, in one call. Surface peers
-// of the CLI `sv verify-bad` / `verify-liveness` / `verify-recoverability`; they return
+// of the CLI `sv verify-liveness` / `verify-recoverability`; they return
 // the same `Btor2Verify*Response` shapes as the BTOR2-direct verbs. The lift needs
 // yosys with the slang reader on the host (a missing tool → BadRequest). ---
-
-/// `POST /api/v1/sv/verify-bad` — lift SV and decide `bad`-reachability of its assertions
-/// with the multi-engine safety portfolio.
-pub async fn sv_verify_handler(
-    Json(request): Json<SvVerifyRequest>,
-) -> ApiResult<Json<Btor2VerifyResponse>> {
-    blocking(move || sv_verify_handler_impl(request)).await
-}
-
-fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2VerifyResponse>> {
-    use crate::adapter::reach_portfolio::ReachVerdict;
-    use crate::adapter::sv_verify::sv_verify_safety;
-
-    let lift = sv_lift_of(&request.lift)?;
-    let outcome = sv_verify_safety(&lift).map_err(|message| ApiError::BadRequest {
-        message,
-        details: None,
-    })?;
-    Ok(Json(Btor2VerifyResponse {
-        outcome: crate::verdict::PropertyVerdict::from(outcome.verdict)
-            .as_str()
-            .to_string(),
-        reachable_by: outcome.reachable_by.iter().map(|s| s.to_string()).collect(),
-        unreachable_by: outcome
-            .unreachable_by
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        contradiction: outcome.verdict == ReachVerdict::Contradiction,
-        refused: crate::api::models::MemberRefusalView::list(&outcome),
-        abstained: crate::api::models::MemberRefusalView::list_abstained(&outcome),
-        undecided: crate::api::models::MemberRefusalView::list_undecided(&outcome),
-        detail: None,
-        fault: None,
-        target: None,
-        trace: None,
-        trace_unavailable_within_k: None,
-        trace_by: None,
-        trace_shortest: None,
-        trace_unavailable_reason: None,
-        trace_replay_failed: Vec::new(),
-    }))
-}
 
 /// `POST /api/v1/sv/verify-liveness` — lift SV and decide `AG(request → AF grant)`.
 pub async fn sv_verify_liveness_handler(

@@ -309,7 +309,8 @@ mod ci_gate_tests {
             0
         );
         assert_eq!(code(&["mununu", "btor2", "verify-safety", "d.btor2"]), 64);
-        assert_eq!(code(&["mununu", "sv", "verify-bad", "m.sv"]), 0);
+        // mununu#1074 — `sv verify-bad` was removed (no SystemVerilog input could reach the portfolio
+        // through it); the bare `sv verify` stays unknown.
         assert_eq!(code(&["mununu", "sv", "verify", "m.sv"]), 64);
         // The liveness family is one verb.
         assert_eq!(
@@ -2107,14 +2108,6 @@ enum SvCommand {
     /// can't bind them) — never given a misleading verdict. Surface peer of
     /// `POST /api/v1/sv/verify-auto` + the extraction-tab verify-auto panel.
     VerifyAuto(Box<SvVerifyAutoArgs>),
-    /// Lift SV (yosys-slang) and decide `bad`-reachability of the `bad` lines in the lifted
-    /// model, with the multi-engine safety portfolio — one call, no `emit-btor2` step. The lift
-    /// drops immediate assertions and does not lower SVA, so a design whose checks are those
-    /// lifts to no `bad` line and this verb refuses it (mununu#1064): the SVA property set is
-    /// `sv verify-auto`. (0.5: renamed from `sv verify`.) Surface peer of
-    /// `POST /api/v1/sv/verify-bad`.
-    #[command(name = "verify-bad")]
-    Verify(SvVerifyArgs),
     /// Lift SV and decide liveness — the SV-direct peer of `btor2 verify-liveness`:
     /// `--request A --grant G` (`AG(A → AF G)`), with repeatable `--fairness F` (under
     /// `⋀ GF F`), or repeatable `--response "A => G"` (the conjunction; 0.5 merges
@@ -2505,8 +2498,8 @@ struct SvVerifyAutoArgs {
     expect: ExpectArgs,
 }
 
-/// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify-bad` /
-/// `verify-liveness` / `verify-recoverability`).
+/// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify-liveness` /
+/// `verify-recoverability`, the structural checks and `sv mutate`).
 #[derive(Args, Debug)]
 struct SvLiftArgs {
     /// Primary SystemVerilog source file (.sv / .v). Omit when using `--design-dir`.
@@ -2599,15 +2592,6 @@ struct SvLiftArgs {
     /// over-approximation that drops its fan-in cone. API: `lift.cutpoints`.
     #[arg(long = "cutpoint", value_name = "SIGNAL")]
     cutpoint: Vec<String>,
-}
-
-/// Arguments for `mununu sv verify-bad` — SV-direct safety portfolio.
-#[derive(Args, Debug)]
-struct SvVerifyArgs {
-    #[command(flatten)]
-    lift: SvLiftArgs,
-    #[command(flatten)]
-    ci: CiArgs,
 }
 
 /// Arguments for `mununu sv verify-liveness` — SV-direct response liveness.
@@ -7234,7 +7218,6 @@ fn handle_sv(command: SvCommand) -> Result<(), String> {
         SvCommand::Cegar(args) => sv_cegar(args),
         SvCommand::ExtractSva(args) => sv_extract_sva(args),
         SvCommand::VerifyAuto(args) => sv_verify_auto(*args),
-        SvCommand::Verify(args) => sv_verify(args),
         SvCommand::VerifyLiveness(args) => sv_verify_liveness(args),
         SvCommand::VerifyRecoverability(args) => sv_verify_recoverability(args),
         SvCommand::CheckFsm(args) => sv_check_fsm(args),
@@ -7408,29 +7391,6 @@ impl SvLiftArgs {
             (None, None) => "<none>".to_string(),
         }
     }
-}
-
-/// `mununu sv verify-bad` — lift SV and decide `bad`-reachability with the portfolio.
-fn sv_verify(args: SvVerifyArgs) -> Result<(), String> {
-    use mununu_core::adapter::sv_verify::sv_verify_safety;
-    use mununu_core::verdict::PropertyVerdict;
-
-    let file = args.lift.primary_display();
-    let outcome = sv_verify_safety(&read_sv_lift(&args.lift)?)?;
-    let summary = serde_json::json!({
-        "file": file,
-        "outcome": PropertyVerdict::from(outcome.verdict).as_str(),
-        "reachable_by": outcome.reachable_by,
-        "unreachable_by": outcome.unreachable_by,
-        "contradiction": outcome.verdict
-            == mununu_core::adapter::reach_portfolio::ReachVerdict::Contradiction,
-    });
-    print_json_summary(&summary)?;
-    ci_gate_exit(
-        PropertyVerdict::from(outcome.verdict).as_str(),
-        args.ci.fail_on,
-    );
-    Ok(())
 }
 
 /// `mununu sv verify-liveness` — lift SV and decide `AG(request → AF grant)`.

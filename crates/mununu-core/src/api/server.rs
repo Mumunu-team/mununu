@@ -241,10 +241,11 @@ pub fn create_router() -> Router {
         )
         // Roadmap J2 — the same body, the plan only: per-property cost estimates, no engine.
         .route("/api/v1/sv/plan", post(handlers::sv_plan_handler))
-        // SV-direct verbs — lift SV (sv2v + Yosys) then decide a property in one call
-        // (safety / response-liveness / recoverability). Surface peers of the CLI
-        // `sv verify` / `verify-liveness` / `verify-recoverability`.
-        .route("/api/v1/sv/verify-bad", post(handlers::sv_verify_handler))
+        // SV-direct verbs — lift SV (yosys-slang) then decide a property in one call
+        // (response-liveness / recoverability). Surface peers of the CLI
+        // `sv verify-liveness` / `verify-recoverability`. (`/sv/verify-bad` was removed,
+        // mununu#1074: the lift reads the design with the assertions ignored, so no
+        // SystemVerilog input could reach the portfolio through it.)
         .route(
             "/api/v1/sv/verify-liveness",
             post(handlers::sv_verify_liveness_handler),
