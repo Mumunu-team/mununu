@@ -3295,6 +3295,36 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
             ));
         }
     }
+    // The annotation sidecar's init-policy overrides name signals that `setattr … w:<name>`
+    // writes into the same script (the sibling the first sweep missed).
+    for (name, _) in &yopts.init_policy_overrides {
+        if !is_valid_net_name(name) {
+            return Err(refuse_lift_input(
+                "the init-policy override's signal name",
+                name,
+                "a plain net name (letters, digits, `_`, `$`, `.`, a `[hi:lo]` select)",
+                "name the signal as the RTL declares it in the annotation sidecar",
+            ));
+        }
+    }
+    // Include directories are written as `-I<dir>` unquoted: a path with whitespace, a
+    // quote or a `;` would split or end the command, so it is refused with the path quoted back
+    // rather than failing inside yosys with no reason.
+    for dir in &yopts.extra_include_dirs {
+        let text = dir.display().to_string();
+        if text.is_empty()
+            || text
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, ';' | '"' | '\'' | '`'))
+        {
+            return Err(refuse_lift_input(
+                "the include directory",
+                &text,
+                "a path without whitespace, quotes or `;`",
+                "move or rename the directory (`-I` / `include_dirs`)",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -4578,6 +4608,21 @@ endmodule
                 &|o| o.additional_sources = vec![("x.sv; shell id".into(), String::new())],
                 "additional source name",
             ),
+            (
+                "init-policy override name with a command",
+                &|o| {
+                    o.init_policy_overrides = vec![(
+                        "q; shell id".into(),
+                        crate::adapter::systemverilog::annotation::InitPolicy::Zero,
+                    )]
+                },
+                "init-policy override's signal name",
+            ),
+            (
+                "include directory with a space",
+                &|o| o.extra_include_dirs = vec![PathBuf::from("inc dir")],
+                "include directory",
+            ),
         ];
         for (what, mutate, field) in hostile {
             let err = plan(*mutate).expect_err(what);
@@ -4600,6 +4645,16 @@ endmodule
                 o.additional_sources =
                     vec![("rtl/sub-mod_v2.sv".into(), "module s; endmodule\n".into())]
             }),
+            (
+                "a hierarchical override name and a plain include dir",
+                &|o| {
+                    o.init_policy_overrides = vec![(
+                        "core.q_reg[3:0]".into(),
+                        crate::adapter::systemverilog::annotation::InitPolicy::Zero,
+                    )];
+                    o.extra_include_dirs = vec![PathBuf::from("rtl/include")];
+                },
+            ),
         ];
         for (what, mutate) in plain {
             if let Err(e) = plan(*mutate) {
