@@ -10,7 +10,7 @@ tarball, `mununu.toml`, and your `mununu.lic`.
 
 ## Install (air-gapped or not)
 
-> Source of truth: [`compose.yaml`](compose.yaml) and [`DeploymentConfig`](../crates/mununu-core/src/deployment.rs#L44) (`[server] cors_origins`, `file_root`) — surface: CLI+API
+> Source of truth: [`compose.yaml`](compose.yaml) and [`DeploymentConfig`](../crates/mununu-core/src/deployment.rs#L29) (`[server] cors_origins`, `file_root`) — surface: CLI+API
 
 ```bash
 # 1. the image — from the tarball you received (no internet needed) …

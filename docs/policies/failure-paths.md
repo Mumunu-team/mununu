@@ -32,7 +32,7 @@ When a lift or a run fails, the first instrument is the report: `diagnostics.fro
 
 ## Rule 5 — a remedy is something the user can do, or it says there is none
 
-> Source of truth: [`AdapterError`](../../crates/mununu-core/src/adapter/mod.rs#L447) + [`AdapterWarning`](../../crates/mununu-core/src/adapter/mod.rs#L381) + [`BottomReason`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — every refusal, abstention and warning text a report or an error carries
+> Source of truth: [`AdapterError`](../../crates/mununu-core/src/adapter/mod.rs#L567) + [`AdapterWarning`](../../crates/mununu-core/src/adapter/mod.rs#L501) + [`BottomReason`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — every refusal, abstention and warning text a report or an error carries
 
 Added 2026-11-19 from an audit of about 90 refusal and remedy messages (mununu#1106). The reason a path was taken (Rule 1) is half of the contract; the other half is what the reader is told to do about it. The audit found messages that named a flag no verb has (`--variable-bounds` on the XState adapter; `--timeout-ms` in an `sv verify-auto` note), a flag of a different verb (nine exact-engine refusals offering `--engine explicit`, which `btor2 verify` rejects), an input the verb does not take ("supply an `init` via a sidecar" on a verb with no sidecar), a mechanism that was retired (the antecedent shadow register, after inputs-in-the-state), two versions of one requirement twenty lines apart (yosys ≥ 0.40 and ≥ 0.67), and about forty that offered a Rust identifier, a roadmap step or a tier name as the fix. A wrong remedy costs the user more than no remedy: they spend the time, and then stop trusting the next message.
 
