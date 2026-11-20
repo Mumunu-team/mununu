@@ -5,6 +5,8 @@
 > citations point at existing files only to identify where each idea
 > *would* land; the sketches are intentionally incomplete — they show
 > shapes, not implementations.
+>
+> Note (2026-11-20): `adapter/systemverilog/kripke.rs` and `kripke_smt.rs` were removed with the native SystemVerilog parser (commit 4f81f897); the references to them below are historical and no longer link to a file.
 
 ## Preface
 
@@ -574,7 +576,7 @@ impl PredicateImage<'_> {
 
 **Map to mununu.** Stage 4 *algorithm*. Replaces the per-guard
 constant-enumeration loop at
-[`kripke_smt.rs:enumerate_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L110)
+`kripke_smt.rs:enumerate_values`
 with an all-SMT predicate-tuple enumeration. Single largest expected
 runtime win at the Caliptra scale.
 
@@ -1333,15 +1335,15 @@ cover the KMTS pivot's literature anchors and lift verbatim into
 |---|---|---|---|---|---|
 | 1 | Kurshan 1994 — Localization | Stage 2 | [`adapter/domain.rs`](../../crates/mununu-core/src/adapter/domain.rs) (`Ignored` variant) | [`adapter/partition/`](../../crates/mununu-core/src/adapter/partition/) — **live (A.3)** | A.3 ✓ |
 | 2 | Clarke et al. 2000 — CEGAR | Stage 6 | [`verify/orchestrator.rs`](../../crates/mununu-core/src/verify/orchestrator.rs) | `verify/refine.rs` | A.5 |
-| 3 | Graf–Saidi 1997 — Predicate Abstraction | Stage 4 | [`kripke_smt.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs) | `adapter/sidecar/predicate_image.rs` | A.4 |
-| 4 | Jain–Kroening TCAD 2008 — Word-Level | Stage 3 + 4 refinement | [`kripke_smt.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs) | `adapter/systemverilog/wp_refine.rs` | A.4–A.5 |
+| 3 | Graf–Saidi 1997 — Predicate Abstraction | Stage 4 | `kripke_smt.rs` | `adapter/sidecar/predicate_image.rs` | A.4 |
+| 4 | Jain–Kroening TCAD 2008 — Word-Level | Stage 3 + 4 refinement | `kripke_smt.rs` | `adapter/systemverilog/wp_refine.rs` | A.4–A.5 |
 | 5 | VCEGAR TACAS 2007 | Stage 6 driver shape | [`crates/mununu-cli/src/main.rs`](../../crates/mununu-cli/src/main.rs) | `mununu verify --cegar` flag | A.5 |
-| 6 | AVR NFM 2019 — SyGuS seed | Stage 3 | [`kripke.rs:scan_significant_constants`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) | `adapter/sidecar/predicate_seed.rs` | A.4 |
+| 6 | AVR NFM 2019 — SyGuS seed | Stage 3 | `kripke.rs:scan_significant_constants` | `adapter/sidecar/predicate_seed.rs` | A.4 |
 | 7 | AVR TACAS 2020 — tool | Phase B reference | n/a | `adapter/btor2/avr_bridge.rs` | B (conditional) |
 | 8 | Goel–Sakallah VMCAI 2021 — SyGuS lemmas | Future | n/a | `adapter/sidecar/sygus_extend.rs` | post-B |
 | 9 | Andraus–Sakallah Reveal 2008 — Datapath | Stage 2 | [`adapter/domain.rs`](../../crates/mununu-core/src/adapter/domain.rs) | [`adapter/partition/mod.rs::DatapathUf`](../../crates/mununu-core/src/adapter/partition/mod.rs) (type shipped, heuristic deferred) | A.3 follow-up — see `phase-a3-followup-datapath-uf.md` (a planning note, not tracked) |
-| 10 | Bryant–Kroening TACAS 2007 — BV abstraction | Stage 4 inner | [`kripke_smt.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs) | `adapter/sidecar/bv_abstraction.rs` | A.4 |
-| 11 | Hoder–Bjørner–de Moura CAV 2006 — Fast PA | Stage 4 algorithm | [`kripke_smt.rs:enumerate_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L110) | `predicate_image.rs::all_abstract_edges` | A.4 |
+| 10 | Bryant–Kroening TACAS 2007 — BV abstraction | Stage 4 inner | `kripke_smt.rs` | `adapter/sidecar/bv_abstraction.rs` | A.4 |
+| 11 | Hoder–Bjørner–de Moura CAV 2006 — Fast PA | Stage 4 algorithm | `kripke_smt.rs:enumerate_values` | `predicate_image.rs::all_abstract_edges` | A.4 |
 | 12 | Cimatti IC3-IA TACAS 2014 | Phase B substrate | n/a | external | B (conditional) |
 | 13 | Lahiri–Bryant TOCL 2007 — Indexed | Stage 4 extension (C) | n/a | `adapter/extraction/array_predicate.rs` | post-A |
 | 14 | Yang–Goel–Sakallah FMCAD 2023 — Datapath in IC3 | Phase B engine choice | n/a | n/a | B (conditional) |

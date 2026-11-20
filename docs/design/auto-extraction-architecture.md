@@ -5,6 +5,8 @@
 > not, since they describe code that does not yet exist. Once Phase A.3
 > lands, §2 sub-sections graduate to live anchors. Companion doc:
 > [`abstraction-literature.md`](abstraction-literature.md).
+>
+> Note (2026-11-20): `adapter/systemverilog/kripke.rs` and `kripke_smt.rs` were removed with the native SystemVerilog parser (commit 4f81f897); the references to them below are historical and no longer link to a file.
 
 ## Context
 
@@ -230,7 +232,7 @@ the substrate every later stage reads.
 The `adapter::partition` module computes per-signal classifications
 (`Kept` / `Dropped { reason }` / `Datapath { uf_symbol }`) via the
 [`DepGraphBuilder`](../../crates/mununu-core/src/adapter/partition/dep_graph.rs)
-trait. SV ([`Module`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs))
+trait. SV (`Module`)
 and BTOR2 ([`Btor2File`](../../crates/mununu-core/src/adapter/btor2/dep_graph.rs))
 implement the trait against their frontend IRs; the extraction adapter
 ships a preview-only impl ([`ExtractionSpec`](../../crates/mununu-core/src/adapter/extraction/dep_graph.rs)).
@@ -238,7 +240,7 @@ The `Dropped` classifications convert to
 [`AbstractionType::Ignored`](../../crates/mununu-core/src/adapter/domain.rs)
 in the sidecar resolver via [`apply_partition_drops`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs)
 on BTOR2 and the inline rule in
-[`kripke::build_kripke_with_config`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs)
+`kripke::build_kripke_with_config`
 on SV.
 
 **Live Rust shape** (matches the shipped types — see
@@ -305,7 +307,7 @@ pub fn collect_syntactic_predicates<F: FrontendIR>(ir: &F) -> Vec<PredicateSeed>
 ```
 
 **Landing.** Folded into existing
-[`kripke::scan_significant_constants`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs)
+`kripke::scan_significant_constants`
 (SV) and a new sibling on the BTOR2 side
 (`adapter/btor2/predicate_seed.rs`).
 
@@ -314,7 +316,7 @@ pub fn collect_syntactic_predicates<F: FrontendIR>(ir: &F) -> Vec<PredicateSeed>
 ### Stage 4 — SMT predicate-image discovery
 
 **New algorithm; same data contract.** Today
-[`kripke_smt.rs:enumerate_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L110)
+`kripke_smt.rs:enumerate_values`
 runs one Z3 query per guard per signal, extracting constants — *per
 signal in isolation*. The new algorithm (per Hoder–Bjørner–de Moura CAV
 2006) does an **all-SMT enumeration of abstract predicate tuples** under

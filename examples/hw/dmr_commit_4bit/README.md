@@ -4,6 +4,8 @@
 > been reproduced under simulation in `hw-verif:latest`. Per
 > [CLAUDE.md §Claims Integrity rule 8](../../../CLAUDE.md), the SAT /
 > UNSAT pair below is "LTS witness only — not reproduced in simulation."
+>
+> Note (2026-11-20): `adapter/systemverilog/kripke.rs` and `kripke_smt.rs` were removed with the native SystemVerilog parser (commit 4f81f897); the references to them below are historical and no longer link to a file.
 
 This directory illustrates the assume/guarantee contract pattern from
 [`docs/archive/design/black-box-modules.md`](../../../docs/archive/design/black-box-modules.md)
@@ -97,7 +99,7 @@ y_a_post = flip_en ? (y_a ^ (4'b0001 << flip_idx)) : y_a;
 XOR support landed on this branch via `BinOp::BitXor` in
 [crates/mununu-core/src/adapter/systemverilog/ast.rs](../../../crates/mununu-core/src/adapter/systemverilog/ast.rs),
 [parser.rs:parse_bitxor_expr](../../../crates/mununu-core/src/adapter/systemverilog/parser.rs),
-and [kripke.rs](../../../crates/mununu-core/src/adapter/systemverilog/kripke.rs).
+and `kripke.rs`.
 Three parser tests confirm precedence (`& > ^ > |`) and the DMR
 fault-injection pattern (`x ^ (4'b0001 << idx)`) parses correctly.
 
@@ -147,9 +149,9 @@ honesty caveats:
 
 ## Why this scope, not more
 
-The SystemVerilog adapter at [`crates/mununu-core/src/adapter/systemverilog/kripke.rs`](../../../crates/mununu-core/src/adapter/systemverilog/kripke.rs)
-has a hard state cap of 2^18 ([kripke.rs:207](../../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L207))
-and auto-abstracts signal widths > 4 bits ([kripke.rs:918](../../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L918)).
+The SystemVerilog adapter at `crates/mununu-core/src/adapter/systemverilog/kripke.rs`
+has a hard state cap of 2^18 (`kripke.rs:207`)
+and auto-abstracts signal widths > 4 bits (`kripke.rs:918`).
 A full 32-bit FMA datapath does not fit; a 4-bit commit gate fits
 comfortably (81 reachable states on the intact design, 161 on the
 broken).
@@ -171,9 +173,9 @@ and apply to any SV file fed to the Kripke pipeline:
   assigns.
 - **XOR (`^`)** is the natural primitive for the fault mask; supported
   on this branch.
-- **No `concat()`** — sidesteps the LSB-truncation in [kripke.rs:1551](../../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L1551).
+- **No `concat()`** — sidesteps the LSB-truncation in `kripke.rs:1551`.
 - **Every register has an explicit reset value** — sidesteps the
-  fall-back-to-false unsoundness at [kripke.rs:1405](../../../crates/mununu-core/src/adapter/systemverilog/kripke.rs#L1405).
+  fall-back-to-false unsoundness at `kripke.rs:1405`.
 - **All datapath widths ≤ 4 bits** — within auto-abstract scope.
 
 ## Provenance and honesty

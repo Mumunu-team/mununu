@@ -1,6 +1,8 @@
 # §Phase 10 UF-mode routing architecture
 
 > **Status: planning** — describes the chosen routing for §Phase 10 stages 3.b + 3.c implementation. Code anchors are pre-implementation references; the `Source of truth` anchors graduate to live citations once stage 3.b ships.
+>
+> Note (2026-11-20): `adapter/systemverilog/kripke.rs` and `kripke_smt.rs` were removed with the native SystemVerilog parser (commit 4f81f897); the references to them below are historical and no longer link to a file.
 
 ## Problem statement
 
@@ -36,7 +38,7 @@ When `SvAnnotation::memories[].abstraction == Uf` for at least one memory, the B
 
 - **R.5b UF wrapping infrastructure is already there.** [`kmts_lift.rs::collect_uf_wrapped_nids`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs) reads the sidecar's `uf_wrap` list and walks them through the predicate-image SMT queries. Extending the same map to carry array sorts (in addition to bit-vector sorts) is the "narrow extension" the §Phase 10 stage-3 plan called for — it matches `evaluate_pure`'s existing UF-substitution shape ([`kmts_lift.rs:1242`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1242)).
 - **The predicate-cube state space is symbolic.** Each cube is a conjunction of predicate equalities `{p_1, ¬p_2, p_3, ...}`; there is no per-cell concrete enumeration. Array-typed cells coexist with bit-vector cells naturally; the predicate-image SMT query handles all sorts uniformly.
-- **`kripke_smt::discover_significant_values`** ([`systemverilog/kripke_smt.rs:20`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L20)) already operates at the SMT layer. Extending it to emit Z3 Array `select`/`store` for memory-typed registers is a localized addition — no bit-blaster surgery required.
+- **`kripke_smt::discover_significant_values`** (`systemverilog/kripke_smt.rs:20`) already operates at the SMT layer. Extending it to emit Z3 Array `select`/`store` for memory-typed registers is a localized addition — no bit-blaster surgery required.
 - **Future cohesion.** Once stage 3.b + 3.c ship, the routing decision is: small fixtures with no memory → bit-blast (cheap); fixtures with memory → predicate-cube lift. The two paths stay disjoint per the §Phase 10 plan's "no parallel pipelines" discipline.
 
 ### Why NOT the obvious alternatives
