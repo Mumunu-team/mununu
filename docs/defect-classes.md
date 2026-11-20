@@ -10,6 +10,20 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 ---
 
+### `abandoned-request-work`
+
+**What varies:** the work an HTTP request started that can outlive its response once the request times out or the client goes away: the handler body on the blocking pool, the engine threads and per-property budgets under it, the subprocess children, a thread with no budget poll, an MCP tool call.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| the blocking handler body | runs under a run budget whose cancel flag goes up when the future is dropped | mununu#1147 |
+| engine threads and per-property budgets under it | children of the request's budget (`Budget::child(&current(), …)`), so they see the cancel; the fault-reach handler's budget made a child | mununu#1147 |
+| a subprocess child (yosys, btormc, Pono, rIC3) | the helper polls the flag and kills the child, returning `Interrupted` with the reason | mununu#1147 |
+| a thread with no budget poll inside one operation (an OxiDD apply) | open: stops between stages only (mununu#996) | — |
+| an MCP tool call past `--request-timeout` | open: the call errors and the engine thread finishes on its own | — |
+
+**Enumerating test:** none in one table; `x1147_a_dropped_request_cancels_its_blocking_work` and `x1147_a_cancelled_run_budget_kills_the_child_it_waits_on` pin the first and third cases.
+
 ### `free-cell-in-atom-cone`
 
 **What varies:** the kind of free (next-less) cell a property atom's cone of influence reaches in the lifted BTOR2. The exact engine must read such a cell once per step; read once in the atom and again in the transition, the verdict is neither the may- nor the must-reading of the design.
