@@ -23,7 +23,7 @@ DIFF_CASES ?= 512
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
         experiment replay publish-prep frontier-smoke \
-        verify-repro docs-audit tracker-audit test-count-gate
+        verify-repro docs-audit tracker-audit test-count-gate review-gate
 
 help:
 	@echo "Build / test / lint:"
@@ -32,6 +32,7 @@ help:
 	@echo "  test-count-gate - the gate's negative control + the last make-test.log against the floor"
 	@echo "  test-fast      - cargo test --lib + integration tests, sub-minute (pre-commit gate)"
 	@echo "  tracker-audit  - open issues that a commit on main claims to close (non-zero when any)"
+	@echo "  review-gate    - the cross-host review / defect-class gate: its controls, and PR=<N> for one verdict"
 	@echo "  e2e            - SVA-verification e2e suite, one test per process (#[ignore]d; run inside the mununu-sva image)"
 	@echo "  e2e-oneshot    - same suite in a single libtest process (an aborting test loses the run)"
 	@echo "  e2e-parallel   - same suite under cargo-nextest, one process per test, E2E_JOBS in flight"
@@ -322,3 +323,9 @@ endif
 tracker-audit:
 	scripts/tracker_audit.sh --control
 	scripts/tracker_audit.sh
+
+# The review gate's negative controls (docs/policies/cross-host-review.md, fix-the-class.md).
+# `make review-gate PR=<N>` also prints the verdict for one pull request; it changes nothing.
+review-gate:
+	python3 scripts/pr_review_gate.py --control
+	@if [ -n "$(PR)" ]; then python3 scripts/pr_review_gate.py --pr "$(PR)"; fi
