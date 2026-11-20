@@ -38,8 +38,8 @@ impl ControllabilityChecker {
 
         if !shared_controllable.is_empty() {
             return Err(CltsError::CompositionError(format!(
-                "controllable actions shared between automata: {:?}",
-                shared_controllable
+                "controllable actions shared between automata: {}",
+                shared_controllable.join(", ")
             )));
         }
 
@@ -55,8 +55,8 @@ impl ControllabilityChecker {
 
         if !shared_internal.is_empty() {
             return Err(CltsError::CompositionError(format!(
-                "internal actions shared between automata: {:?}",
-                shared_internal
+                "internal actions shared between automata: {}",
+                shared_internal.join(", ")
             )));
         }
 

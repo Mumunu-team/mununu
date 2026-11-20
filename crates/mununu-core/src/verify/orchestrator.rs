@@ -331,15 +331,15 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     let (main_text, props_text) = split_main_and_props(&assembled);
     let main_doc = crate::context_dsl::parse(&main_text).map_err(|e| {
         VerifyError::AssembledCtxdslParseFailed {
-            message: format!("{e:?}"),
-            snippet: snippet_around_error(&main_text, &format!("{e:?}")),
+            message: e.to_string(),
+            snippet: snippet_around_error(&main_text, &e.to_string()),
         }
     })?;
     let sidecar_docs = if let Some(props) = props_text.as_deref() {
         let sidecar = crate::context_dsl::parse(props).map_err(|e| {
             VerifyError::AssembledCtxdslParseFailed {
-                message: format!("{e:?}"),
-                snippet: snippet_around_error(props, &format!("{e:?}")),
+                message: e.to_string(),
+                snippet: snippet_around_error(props, &e.to_string()),
             }
         })?;
         vec![sidecar]
@@ -348,7 +348,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     };
     let realized = crate::context_dsl::realize_context(&main_doc, &sidecar_docs).map_err(|e| {
         VerifyError::RealizeFailed {
-            message: format!("{e:?}"),
+            message: e.to_string(),
         }
     })?;
 
@@ -720,15 +720,15 @@ pub fn inspect_project(
     let (main_text, props_text) = split_main_and_props(&assembled);
     let main_doc = crate::context_dsl::parse(&main_text).map_err(|e| {
         VerifyError::AssembledCtxdslParseFailed {
-            message: format!("{e:?}"),
-            snippet: snippet_around_error(&main_text, &format!("{e:?}")),
+            message: e.to_string(),
+            snippet: snippet_around_error(&main_text, &e.to_string()),
         }
     })?;
     let sidecar_docs = if let Some(props) = props_text.as_deref() {
         let sidecar = crate::context_dsl::parse(props).map_err(|e| {
             VerifyError::AssembledCtxdslParseFailed {
-                message: format!("{e:?}"),
-                snippet: snippet_around_error(props, &format!("{e:?}")),
+                message: e.to_string(),
+                snippet: snippet_around_error(props, &e.to_string()),
             }
         })?;
         vec![sidecar]
@@ -737,7 +737,7 @@ pub fn inspect_project(
     };
     let realized = crate::context_dsl::realize_context(&main_doc, &sidecar_docs).map_err(|e| {
         VerifyError::RealizeFailed {
-            message: format!("{e:?}"),
+            message: e.to_string(),
         }
     })?;
 
@@ -1420,7 +1420,7 @@ fn dispatch_c_codesign(
         VerifyError::AdapterTranslationFailed {
             source_id: source_id.to_string(),
             adapter: "c-codesign".to_string(),
-            message: format!("{err:?}"),
+            message: err.to_string(),
         }
     })?;
 

@@ -25,7 +25,7 @@ pub fn parse(content: &str) -> Result<Btor2File, AdapterError> {
 
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.len() < 2 {
-            return Err(parse_err(source_line, format!("malformed line: {line:?}")));
+            return Err(parse_err(source_line, format!("malformed line: `{line}`")));
         }
 
         let nid = parse_nid(tokens[0], source_line)?;
@@ -1514,8 +1514,9 @@ pub fn check_sorts(file: &Btor2File) -> Result<(), String> {
                                 return bad(
                                     line.nid,
                                     format!(
-                                        "{op:?} result is {res} bit(s) but operand {i} (node {}) \
+                                        "{} result is {res} bit(s) but operand {i} (node {}) \
                                          is {wi}",
+                                        op.keyword(),
                                         args[i].nid()
                                     ),
                                 );
@@ -1537,7 +1538,7 @@ pub fn check_sorts(file: &Btor2File) -> Result<(), String> {
                         {
                             return bad(
                                 line.nid,
-                                format!("{op:?} compares {a} bit(s) with {b} bit(s)"),
+                                format!("{} compares {a} bit(s) with {b} bit(s)", op.keyword()),
                             );
                         }
                     }

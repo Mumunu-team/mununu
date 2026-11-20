@@ -280,7 +280,7 @@ pub fn sv_verify_recoverability_explained(
     String,
 > {
     parse_predicate_expr(target).map_err(|e| {
-        format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
+        format!("recoverability target `{target}` is not a register-comparison atom: {e}")
     })?;
     let (lifted, names) = lift.lift_named()?;
     let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
@@ -337,7 +337,7 @@ pub fn sv_verify_recoverability_refined_explained(
     String,
 > {
     parse_predicate_expr(target).map_err(|e| {
-        format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
+        format!("recoverability target `{target}` is not a register-comparison atom: {e}")
     })?;
     let (lifted, names) = lift.lift_named()?;
     let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;

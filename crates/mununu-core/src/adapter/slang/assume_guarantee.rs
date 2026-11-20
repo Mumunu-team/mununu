@@ -194,7 +194,7 @@ pub fn guard_with_disable(body: &str, disable: &str, existential: bool) -> Resul
         existential,
     )?;
     let f = crate::mu_calculus::parser::parse(body)
-        .map_err(|e| format!("formula does not parse: {e:?}"))?;
+        .map_err(|e| format!("formula does not parse: {e}"))?;
     if guards_the_start(&f, f.root(), existential) {
         return Ok(guarded);
     }
@@ -260,7 +260,7 @@ pub fn root_is_existential(formula: &str) -> bool {
 
 fn guard_blocks(formula: &str, g: &Guards, existential: bool) -> Result<String, String> {
     let f = crate::mu_calculus::parser::parse(formula)
-        .map_err(|e| format!("formula does not parse: {e:?}"))?;
+        .map_err(|e| format!("formula does not parse: {e}"))?;
     let pol = if existential {
         Polarity::Existential
     } else {
@@ -268,7 +268,7 @@ fn guard_blocks(formula: &str, g: &Guards, existential: bool) -> Result<String, 
     };
     let out = rel(&f, f.root(), g, pol)?;
     crate::mu_calculus::parser::parse(&out)
-        .map_err(|e| format!("relativized formula does not parse ({e:?}): {out}"))?;
+        .map_err(|e| format!("relativized formula does not parse ({e}): {out}"))?;
     Ok(out)
 }
 

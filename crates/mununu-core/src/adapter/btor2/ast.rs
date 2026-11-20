@@ -109,6 +109,28 @@ pub enum Node {
     Justice { signals: Vec<Operand> },
 }
 
+impl Node {
+    /// The BTOR2 keyword of the line that declared this node (`sort`, `input`, `state`,
+    /// `const`, the operator's mnemonic, `init`, `next`, `bad`, `constraint`, `fair`,
+    /// `output`, `justice`), for a message that names a node.
+    pub fn kind_keyword(&self) -> &'static str {
+        match self {
+            Node::Sort { .. } => "sort",
+            Node::Input { .. } => "input",
+            Node::State { .. } => "state",
+            Node::Const { .. } => "const",
+            Node::Op { op, .. } => op.keyword(),
+            Node::Init { .. } => "init",
+            Node::Next { .. } => "next",
+            Node::Bad { .. } => "bad",
+            Node::Constraint { .. } => "constraint",
+            Node::Fair { .. } => "fair",
+            Node::Output { .. } => "output",
+            Node::Justice { .. } => "justice",
+        }
+    }
+}
+
 /// Constant value representation (preserved at the original radix for fidelity).
 #[derive(Debug, Clone)]
 pub enum ConstValue {
@@ -536,5 +558,19 @@ impl Btor2File {
         self.lines
             .iter()
             .filter(|l| matches!(l.node, Node::Fair { .. }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// mununu#1121 — a node names itself by its BTOR2 keyword, an operator by its mnemonic.
+    #[test]
+    fn x1121_a_btor2_node_names_itself_by_its_keyword() {
+        let file = crate::adapter::btor2::parser::parse(
+            "1 sort bitvec 1\n2 input 1 a\n3 state 1 b\n4 and 1 2 3\n5 next 1 3 4\n6 bad 4\n",
+        )
+        .expect("parses");
+        let kinds: Vec<&str> = file.lines.iter().map(|l| l.node.kind_keyword()).collect();
+        assert_eq!(kinds, ["sort", "input", "state", "and", "next", "bad"]);
     }
 }

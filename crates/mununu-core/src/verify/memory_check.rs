@@ -408,7 +408,7 @@ impl MemoryCheckReport {
                 line.push_str(&format!(", fence_semantics = {fs}"));
             }
             if let Some(n) = &p.notes {
-                line.push_str(&format!(", notes = {:?}", n));
+                line.push_str(&format!(", notes = {n}"));
             }
             s.push_str(&line);
             s.push('\n');

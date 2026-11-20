@@ -1009,8 +1009,9 @@ fn refuse_merged_clock_domains(
                  gated, divided or muxed clock); the model has one implicit clock that ticks on \
                  every step, so lifting it would ignore the logic that gates or divides the \
                  clock and every verdict could be wrong. Clock domains: {}. Model the gating as \
-                 a clock enable (`if (en) q <= d;` on the root clock), or pass \
-                 `--merge-clock-domains` to accept the lockstep model explicitly.",
+                 a clock enable (`if (en) q <= d;` on the root clock); `--merge-clock-domains` \
+                 on `sv verify-auto` accepts the lockstep model explicitly, and the other verbs \
+                 have no such switch (a mununu limitation).",
                 d.net,
                 d.derived_from.as_deref().unwrap_or("logic"),
                 describe_clock_domains(domains)
@@ -1024,9 +1025,10 @@ fn refuse_merged_clock_domains(
             message: format!(
                 "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
                  clock, so lifting it would step every domain together and hide every crossing \
-                 defect. Run `mununu sv cdc-lint` to classify the crossings, verify each domain \
-                 on its own, or pass `--merge-clock-domains` to accept that under-approximation \
-                 explicitly.",
+                 defect. Run `mununu sv cdc-lint` to classify the crossings, or verify each \
+                 domain on its own; `--merge-clock-domains` on `sv verify-auto` accepts that \
+                 under-approximation explicitly, and the other verbs have no such switch (a \
+                 mununu limitation).",
                 domains.len(),
                 describe_clock_domains(domains)
             ),
@@ -2257,7 +2259,8 @@ fn lift_timeout_outcome(
             "adapter/yosys: `{tool}` exceeded the lift timeout and was killed. The lift runs \
              before any property is attempted, so this would otherwise hang with no output at \
              all. Raise or disable the cap with {}=<ms> (0 disables), or reduce the design \
-             (fewer sources, a narrower --top).",
+             (fewer sources, or a narrower top: `--top` on the `sv` verbs, the source's `top` \
+             key in a `mununu verify` config).",
             crate::adapter::LIFT_TIMEOUT_ENV
         ),
         location: None,
@@ -2907,8 +2910,9 @@ fn read_slang_hint(text: &str) -> String {
         hint.push_str(&format!(
             " — the design instantiates a module with no definition: sv-elab needs one for every \
              instantiated module (`read_verilog` lifted a missing one silently; a known flop \
-             primitive such as prim_flop / prim_sparse_fsm_flop is still stubbed automatically \
-             unless --no-auto-stub-flops). Add the module's source, or an empty stub module with \
+             primitive such as prim_flop / prim_sparse_fsm_flop is still stubbed automatically; \
+             `--no-auto-stub-flops` on `sv verify-auto` turns that off). Add the module's source, \
+             or an empty stub module with \
              its ports: marked `(* {MISSING_MODULE_ATTR} *)` it stands in for the missing module \
              exactly as the old reader did — outputs free, a VIOLATED over them withheld — and \
              unmarked (or `(* blackbox *)`) it is a deliberate cut that keeps its verdict under \

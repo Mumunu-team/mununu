@@ -15,4 +15,5 @@ mod licence_never_reaches_a_verdict_h1;
 mod no_links_into_untracked_paths_g4;
 mod one_yosys_minimum_version_1121;
 mod remedies_name_real_flags_1106;
+mod remedies_on_the_verb_1121;
 mod third_party_inventory_g1;

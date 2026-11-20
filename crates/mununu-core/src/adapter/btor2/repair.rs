@@ -408,7 +408,7 @@ pub fn localize(
                 }
                 Ok((BmcOutcome::NoCexWithin { .. }, _)) => continue,
                 Err(e) => {
-                    error = Some(format!("{e:?}"));
+                    error = Some(e.to_string());
                     break;
                 }
             }

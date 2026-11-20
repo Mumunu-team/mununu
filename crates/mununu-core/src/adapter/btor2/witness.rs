@@ -374,7 +374,7 @@ pub fn replay_witness(
         }
         input_frames.push(frame_of(&inputs, &ins));
         let step = simulate_one_step_probe(file, &regs, &ins, &probes)
-            .map_err(|e| format!("replay at frame {j}: {e:?}"))?;
+            .map_err(|e| format!("replay at frame {j}: {e}"))?;
         if !step.admissible {
             return Err(format!("a `constraint` fails at frame {j}"));
         }

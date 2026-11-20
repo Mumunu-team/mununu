@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Flags of other tools that a message may name because the user runs that tool.
-const FOREIGN_FLAGS: &[(&str, &str)] = &[
+pub(crate) const FOREIGN_FLAGS: &[(&str, &str)] = &[
     ("assert", "verilator"),
     ("build", "verilator"),
     ("cc", "verilator"),
@@ -43,14 +43,14 @@ const NOT_A_VARIABLE: &[&str] = &[
     concat!("MUNUNU", "_ENV_VAR_TEST_880"),
 ];
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .expect("the workspace root")
 }
 
-fn rust_files_under(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn rust_files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -156,7 +156,7 @@ fn cited_flags(lit: &str) -> BTreeSet<String> {
 }
 
 /// The string literals of a file's non-test code that read as prose (six or more words).
-fn prose_literals(src: &str) -> Vec<(usize, String)> {
+pub(crate) fn prose_literals(src: &str) -> Vec<(usize, String)> {
     let body = match src.find("\n#[cfg(test)]") {
         Some(i) => &src[..i],
         None => src,

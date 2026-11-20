@@ -4448,7 +4448,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                             e @ (native_bmc::BmcError::BudgetExpired { .. }
                             | native_bmc::BmcError::ResourceLimit { .. }),
                         ) => ("unknown", None, "native-bmc", Some(format!("stopped: {e}"))),
-                        Err(e) => return Err(format!("bmc-only: {e:?}")),
+                        Err(e) => return Err(format!("bmc-only: {e}")),
                     }
                 }
                 None => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
@@ -4456,7 +4456,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                         ("violated", Some(depth), "native-bmc", None)
                     }
                     Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
-                    Err(e) => return Err(format!("bmc-only: {e:?}")),
+                    Err(e) => return Err(format!("bmc-only: {e}")),
                 },
             },
             BmcEngineArg::Sat | BmcEngineArg::SatDyn => {
@@ -5814,7 +5814,7 @@ fn run_cegar_cli(
 
     // Parse the μ-calculus formula.
     let formula =
-        mu_parser::parse(params.formula).map_err(|e| format!("formula parse error: {e:?}"))?;
+        mu_parser::parse(params.formula).map_err(|e| format!("formula parse error: {e}"))?;
 
     // D1.6 — exact symbolic MC is a verify-auto-only engine: it needs the
     // reset-gated model + reset init that `sv verify-auto` builds. The raw
@@ -6693,7 +6693,7 @@ fn codesign_verify(args: CodesignVerifyArgs) -> Result<(), String> {
     // user's formula. Reuses the same path the `context eval`
     // subcommand uses.
     let context_doc = parse_context_doc(&composed.ctxdsl).map_err(|e| {
-        format!("composed CTXDSL failed to parse (this is a bug in codesign::compose): {e:?}")
+        format!("composed CTXDSL failed to parse (this is a bug in codesign::compose): {e}")
     })?;
     let sidecar_docs: Vec<ContextDoc> = Vec::new();
     let realized = realize_documents(&context_doc, &sidecar_docs)?;
@@ -10120,7 +10120,7 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
                 "  Domains: {}",
                 tmpl.domains
                     .iter()
-                    .map(|d| format!("{d:?}"))
+                    .map(|d| d.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             );

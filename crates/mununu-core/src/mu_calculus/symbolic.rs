@@ -564,7 +564,7 @@ impl SymbolicKmts {
             Node::Variable(v) => bindings
                 .get(v)
                 .cloned()
-                .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
+                .ok_or_else(|| format!("unbound fixpoint variable #{}", v.index()))?,
             Node::Not(n) => self.eval_node(f, *n, bindings)?.not(),
             Node::And(a, b) => self
                 .eval_node(f, *a, bindings)?

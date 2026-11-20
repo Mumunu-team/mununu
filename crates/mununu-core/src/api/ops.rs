@@ -432,7 +432,7 @@ pub(crate) fn template_ref_sidecar(
             Ok(())
         } else {
             Err(format!(
-                "template_ref: the {what} {text:?} is not a CTXDSL identifier (letters, digits \
+                "template_ref: the {what} `{text}` is not a CTXDSL identifier (letters, digits \
                  and `_`, not starting with a digit, not a keyword)"
             ))
         }
@@ -564,7 +564,7 @@ context Light {
     fn the_sidecar_builder_names_the_position_it_refuses() {
         let err = template_ref_sidecar(&tref("a b", &[("TARGET", "dim")]), "Light").unwrap_err();
         assert!(
-            err.contains("template id") && err.contains("\"a b\""),
+            err.contains("template id") && err.contains("`a b`"),
             "{err}"
         );
         let err = template_ref_sidecar(&tref("reachable", &[("TARGET", "dim")]), "L;").unwrap_err();
