@@ -308,7 +308,8 @@ impl fmt::Display for VerifyError {
             }
             VerifyError::UnknownAdapter { source_id, adapter } => write!(
                 f,
-                "source `{source_id}`: unknown adapter `{adapter}` (orchestrator dispatch doesn't know how to call this adapter yet)"
+                "source `{source_id}`: unknown adapter `{adapter}` (orchestrator dispatch doesn't know how to call this adapter yet; the adapters it dispatches: {})",
+                crate::verify::orchestrator::DISPATCH_ADAPTERS.join(", ")
             ),
             VerifyError::AdapterTranslationFailed {
                 source_id,

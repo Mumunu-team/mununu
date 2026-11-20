@@ -978,6 +978,19 @@ fn dispatch_adapter(
     }
 }
 
+/// The `[[sources]].adapter` values the dispatch above routes — the candidates an "unknown
+/// adapter" refusal lists (mununu#1121). Kept beside the match it mirrors.
+pub const DISPATCH_ADAPTERS: &[&str] = &[
+    "c-codesign",
+    "crewai",
+    "ctxdsl",
+    "extraction",
+    "langgraph",
+    "microcode",
+    "sv-yosys",
+    "xstate",
+];
+
 /// Emit a `tracing::warn!` line per dropped additional file when a
 /// single-file adapter is given more than one input. The verify
 /// pipeline accepts the over-specified `files = [...]` list but only
@@ -3147,7 +3160,7 @@ members = ["light", "ghost"]
             VerifyError::ConfigValidationFailed(issues) => {
                 assert!(issues.iter().any(|i| matches!(
                     i,
-                    crate::verify::config::ConfigIssue::CompositionUnknownMember { id } if id == "ghost"
+                    crate::verify::config::ConfigIssue::CompositionUnknownMember { id, .. } if id == "ghost"
                 )));
             }
             other => panic!("expected ConfigValidationFailed, got {other:?}"),

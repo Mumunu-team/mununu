@@ -137,11 +137,21 @@ pub enum AssembleError {
     /// be located.
     NoContextBlock { source_id: String },
     /// A composition member referenced a source id with no
-    /// corresponding `SourceCtxdsl`.
-    UnknownMember { id: String },
+    /// corresponding `SourceCtxdsl`. `declared` lists the source ids
+    /// that were given, sorted (mununu#1121).
+    UnknownMember { id: String, declared: Vec<String> },
     /// `AutomatonDiscovery::FirstAutomaton` was chosen for a source
     /// whose CTXDSL contains no `automaton <name> { ... }` declaration.
     NoAutomatonFound { source_id: String },
+}
+
+/// The source ids the assembler was given, sorted — what an [`AssembleError::UnknownMember`]
+/// lists (mununu#1121).
+fn declared_source_ids(sources: &[SourceCtxdsl]) -> Vec<String> {
+    let mut ids: Vec<String> = sources.iter().map(|s| s.source_id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 impl fmt::Display for AssembleError {
@@ -151,9 +161,10 @@ impl fmt::Display for AssembleError {
                 f,
                 "source `{source_id}` did not contain a parseable `context <name> {{ ... }}` block"
             ),
-            AssembleError::UnknownMember { id } => write!(
+            AssembleError::UnknownMember { id, declared } => write!(
                 f,
-                "[composition].members references unknown source id `{id}` (not present in the sources list)"
+                "[composition].members references unknown source id `{id}` (not present in the sources list: {})",
+                crate::adapter::candidate_list(id, declared.iter().map(String::as_str))
             ),
             AssembleError::NoAutomatonFound { source_id } => write!(
                 f,
@@ -214,6 +225,7 @@ pub fn assemble_unified_ctxdsl(
             if !sources.iter().any(|s| s.source_id == src_id) {
                 return Err(AssembleError::UnknownMember {
                     id: src_id.to_string(),
+                    declared: declared_source_ids(sources),
                 });
             }
             let names = all_automata_by_source
@@ -230,7 +242,10 @@ pub fn assemble_unified_ctxdsl(
         }
         // Source must exist.
         if !sources.iter().any(|s| s.source_id == *m) {
-            return Err(AssembleError::UnknownMember { id: m.clone() });
+            return Err(AssembleError::UnknownMember {
+                id: m.clone(),
+                declared: declared_source_ids(sources),
+            });
         }
         let names: Vec<String> = match discovery {
             AutomatonDiscovery::SourceId => vec![m.clone()],
@@ -551,7 +566,7 @@ mod tests {
         let err =
             assemble_unified_ctxdsl("Demo", &[], &comp, &[], &AutomatonDiscovery::FirstAutomaton)
                 .unwrap_err();
-        assert!(matches!(err, AssembleError::UnknownMember { id } if id == "ghost"));
+        assert!(matches!(err, AssembleError::UnknownMember { id, .. } if id == "ghost"));
     }
 
     // --------------------------------------------------------------
@@ -692,7 +707,7 @@ mod tests {
             &AutomatonDiscovery::FirstAutomaton,
         )
         .unwrap_err();
-        assert!(matches!(err, AssembleError::UnknownMember { id } if id == "ghost"));
+        assert!(matches!(err, AssembleError::UnknownMember { id, .. } if id == "ghost"));
     }
 
     #[test]

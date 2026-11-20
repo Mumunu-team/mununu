@@ -174,7 +174,11 @@ fn one_pass(
                         pn.push(n);
                     }
                     _ => {
-                        return PassResult::Unknown("predicate references unknown register".into());
+                        return PassResult::Unknown(PredicateExpr::unknown_register_reason(
+                            "predicate references unknown register",
+                            preds,
+                            name_to_nid.keys().map(String::as_str),
+                        ));
                     }
                 }
             }
@@ -379,6 +383,18 @@ struct AbsScope {
     bad_nx: Bool,
 }
 
+/// The named state registers of an encoded design — the names a predicate may use (the
+/// candidates an "unknown register" abstention lists, mununu#1121).
+fn state_register_names(
+    view: &crate::adapter::sidecar::predicate_image::btor2_encode::Btor2SmtView,
+) -> Vec<String> {
+    view.signals
+        .iter()
+        .filter(|s| s.kind == SignalKind::State)
+        .filter_map(|s| s.symbol.clone())
+        .collect()
+}
+
 /// Build the abstraction scope for `preds` over the exact transition — the shared
 /// cur/nx interface, the instantiated transition, and each predicate's z3 `Bool`
 /// over current- and next-state. Must be called inside a `with_z3_config` closure.
@@ -578,7 +594,13 @@ fn ic3_pass(
         };
         let scope = match build_abs_scope(&view, preds, &props) {
             Some(s) => s,
-            None => return Ic3Pass::Unknown("predicate references unknown register".into()),
+            None => {
+                return Ic3Pass::Unknown(PredicateExpr::unknown_register_reason(
+                    "predicate references unknown register",
+                    preds,
+                    state_register_names(&view).iter().map(String::as_str),
+                ));
+            }
         };
         let mk = || {
             let s = z3::Solver::new();

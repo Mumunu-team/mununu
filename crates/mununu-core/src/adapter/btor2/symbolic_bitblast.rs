@@ -1353,7 +1353,20 @@ impl BddBitBlaster {
     /// semantics bit-for-bit — including when a literal exceeds the register
     /// width. `And`/`Or`/`Not` map to the BDD boolean ops.
     pub fn predicate_bdd(&self, expr: &PredicateExpr) -> Result<BDDFunction, String> {
-        let unknown = |r: &str| format!("predicate references unknown register/signal `{r}`");
+        // mununu#1121 — name what the predicate may bind to: the register and input cells and
+        // the named combinational signals (every one when few, the nearest when many).
+        let unknown = |r: &str| {
+            format!(
+                "predicate references unknown register/signal `{r}` (the design's registers and named signals: {})",
+                crate::adapter::candidate_list(
+                    r,
+                    self.cells
+                        .iter()
+                        .map(|c| c.symbol.as_str())
+                        .chain(self.named_signals.keys().map(String::as_str)),
+                )
+            )
+        };
         match expr {
             PredicateExpr::Cmp {
                 register,

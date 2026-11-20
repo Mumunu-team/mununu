@@ -134,7 +134,7 @@ fn parse_sort(args: &[&str], source_line: usize) -> Result<Node, AdapterError> {
         }
         other => Err(parse_err(
             source_line,
-            format!("unknown sort kind '{other}'"),
+            format!("unknown sort kind '{other}' (expected `bitvec` or `array`)"),
         )),
     }
 }
@@ -188,9 +188,39 @@ fn parse_const(kw: &str, args: &[&str], source_line: usize) -> Result<Node, Adap
     Ok(Node::Const { sort, value })
 }
 
+/// The line keywords [`parse_node`] handles itself, before the operator table ([`Op::KEYWORDS`]).
+/// Together they are the candidates an "unknown BTOR2 keyword" refusal ranks (mununu#1121).
+const LINE_KEYWORDS: &[&str] = &[
+    "sort",
+    "input",
+    "state",
+    "init",
+    "next",
+    "bad",
+    "constraint",
+    "fair",
+    "output",
+    "justice",
+    "zero",
+    "one",
+    "ones",
+    "const",
+    "constd",
+    "consth",
+];
+
 fn parse_op(kw: &str, args: &[&str], source_line: usize) -> Result<Node, AdapterError> {
-    let op = Op::from_keyword(kw)
-        .ok_or_else(|| parse_err(source_line, format!("unknown BTOR2 keyword '{kw}'")))?;
+    let op = Op::from_keyword(kw).ok_or_else(|| {
+        let nearest =
+            crate::adapter::nearest_names(kw, LINE_KEYWORDS.iter().chain(Op::KEYWORDS).copied(), 3);
+        parse_err(
+            source_line,
+            format!(
+                "unknown BTOR2 keyword '{kw}' (nearest: {})",
+                nearest.join(", ")
+            ),
+        )
+    })?;
 
     let sort = parse_nid(arg(args, 0, source_line, "op sort")?, source_line)?;
     let arity = op.arity();

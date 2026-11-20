@@ -136,13 +136,21 @@ pub fn synthesize_refinement_predicate(
         let source_bool = match build(source, &cur) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable("source references an unknown register".into());
+                return RefineOutcome::Unavailable(PredicateExpr::unknown_register_reason(
+                    "source references an unknown register",
+                    source,
+                    name_to_nid.keys().map(String::as_str),
+                ));
             }
         };
         let target_bool = match build(target, &nx) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable("target references an unknown register".into());
+                return RefineOutcome::Unavailable(PredicateExpr::unknown_register_reason(
+                    "target references an unknown register",
+                    target,
+                    name_to_nid.keys().map(String::as_str),
+                ));
             }
         };
 

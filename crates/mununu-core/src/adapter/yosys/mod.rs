@@ -594,9 +594,14 @@ fn artifacts_from_cached(
 ) -> Result<SvFlattenArtifacts, AdapterError> {
     let frontend_used = frontend_from_tag(&hit.frontend_used).ok_or_else(|| AdapterError {
         kind: AdapterErrorKind::ParseError,
+        // mununu#1121 — `LiftCache::lookup` already treats such an entry as a miss, so a hit
+        // that reaches here is ours, not the user's; say so rather than send them to the cache.
         message: format!(
-            "adapter/yosys: lift cache entry names an unknown front end `{}`",
-            hit.frontend_used
+            "adapter/yosys: lift cache entry names an unknown front end `{}` (expected one of: {}); \
+             the cache lookup treats such an entry as a miss, so reaching this is a mununu defect \
+             (please report)",
+            hit.frontend_used,
+            lift_cache::FRONTEND_TAGS.join(", ")
         ),
         location: None,
     })?;

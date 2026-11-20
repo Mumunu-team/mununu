@@ -197,6 +197,9 @@ pub(super) fn frontend_tag(fe: super::SvFrontend) -> &'static str {
     }
 }
 
+/// The tags [`frontend_from_tag`] accepts — what a refusal of a stale entry lists (mununu#1121).
+pub(super) const FRONTEND_TAGS: &[&str] = &["slang", "verilog"];
+
 /// The front end a stored tag names; `None` for anything else (a corrupt entry).
 pub(super) fn frontend_from_tag(tag: &str) -> Option<super::SvFrontend> {
     match tag {
@@ -656,6 +659,13 @@ mod tests {
             super::super::SvFrontend::Slang,
         ] {
             assert_eq!(frontend_from_tag(frontend_tag(fe)), Some(fe));
+            assert!(FRONTEND_TAGS.contains(&frontend_tag(fe)));
+        }
+        for tag in FRONTEND_TAGS {
+            assert!(
+                frontend_from_tag(tag).is_some(),
+                "`{tag}` is listed but refused"
+            );
         }
         assert_eq!(frontend_from_tag("auto"), None);
         assert_eq!(frontend_from_tag(""), None);

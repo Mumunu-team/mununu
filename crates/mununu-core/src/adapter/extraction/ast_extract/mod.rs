@@ -48,7 +48,12 @@ pub fn extract_from_source(
                 .as_deref()
                 .and_then(parser::SourceLanguage::from_name)
         })
-        .ok_or_else(|| format!("Unknown language: {language}"))?;
+        .ok_or_else(|| {
+            format!(
+                "Unknown language: {language} (expected one of: {})",
+                parser::SourceLanguage::NAMES.join(", ")
+            )
+        })?;
 
     let parsed = parser::parse_source(source_code, lang)?;
 

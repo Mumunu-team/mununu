@@ -1406,6 +1406,63 @@ impl ControllerMode {
             _ => Err(normalized),
         }
     }
+
+    /// Every mode, in the order the CLI and the API list them.
+    pub const ALL: [ControllerMode; 7] = [
+        ControllerMode::Projection,
+        ControllerMode::Functional,
+        ControllerMode::Permissive,
+        ControllerMode::SignatureMemory,
+        ControllerMode::ProductGame,
+        ControllerMode::ParityGame,
+        ControllerMode::Gr1,
+    ];
+
+    /// The user-facing spelling of this mode: what `--controller-mode` / `controller_mode`
+    /// document, and what [`Self::from_normalized_name`] parses back.
+    pub fn name(self) -> &'static str {
+        match self {
+            ControllerMode::Projection => "projection",
+            ControllerMode::Functional => "functional",
+            ControllerMode::Permissive => "permissive",
+            ControllerMode::SignatureMemory => "signature-memory",
+            ControllerMode::ProductGame => "product-game",
+            ControllerMode::ParityGame => "parity-game",
+            ControllerMode::Gr1 => "gr1",
+        }
+    }
+
+    /// The accepted mode names, one per variant — the single list the CLI and the API print on
+    /// an unknown mode (mununu#1121: the API's hand-written copy had lost `gr1`).
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|mode| mode.name()).collect()
+    }
+}
+
+#[cfg(test)]
+mod controller_mode_names_tests {
+    use super::ControllerMode;
+
+    /// mununu#1121 — the printed list covers every mode and every name parses back to its mode.
+    #[test]
+    fn x1121_controller_mode_names_cover_every_mode_and_round_trip() {
+        let names = ControllerMode::names();
+        assert_eq!(names.len(), ControllerMode::ALL.len());
+        for expected in [
+            "projection",
+            "functional",
+            "permissive",
+            "signature-memory",
+            "product-game",
+            "parity-game",
+            "gr1",
+        ] {
+            assert!(names.contains(&expected), "{names:?} lacks {expected}");
+        }
+        for mode in ControllerMode::ALL {
+            assert_eq!(ControllerMode::from_normalized_name(mode.name()), Ok(mode));
+        }
+    }
 }
 
 /// Extended controller synthesis configuration, combining evaluation, diagnostics, and post-processing knobs.
