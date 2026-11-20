@@ -1335,9 +1335,10 @@ impl<'m> Ic3<'m> {
                         tracing::warn!(why, "ic3: the converged invariant failed its check");
                         Ic3Outcome::Stopped {
                             frames,
-                            reason: format!(
-                                "the converged invariant failed its direct check: {why}"
-                            ),
+                            reason: crate::adapter::owner::mununu_defect(&format!(
+                                "IC3 converged but its invariant failed the direct check ({why}); \
+                                 the verdict is withheld"
+                            )),
                         }
                     }
                 });

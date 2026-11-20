@@ -10453,8 +10453,11 @@ fn resolve_formula_name(
         "context __template_sidecar {{\n  mu_formulas {{\n    formula {formula_name} {{\n      over {automaton};\n      body = {};\n    }}\n  }}\n}}\n",
         inst.formula
     );
-    let sidecar_doc = parse_context_doc(&sidecar_ctxdsl)
-        .map_err(|e| format!("internal error: generated template CTXDSL failed to parse: {e}"))?;
+    let sidecar_doc = parse_context_doc(&sidecar_ctxdsl).map_err(|e| {
+        mununu_core::adapter::owner::mununu_defect(&format!(
+            "the template `{template_id}` expanded to CTXDSL that does not parse ({e})"
+        ))
+    })?;
     sidecar_docs.push(sidecar_doc);
 
     eprintln!(

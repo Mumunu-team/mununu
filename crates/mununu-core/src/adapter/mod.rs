@@ -192,6 +192,8 @@ pub mod langgraph;
 pub mod liveness_rescue;
 pub mod memory_budget;
 pub mod microcode;
+/// mununu#1121 U2.10 — the owner clause of a message that reports a gap.
+pub mod owner;
 pub mod partial_json;
 pub mod partition;
 pub mod pono;

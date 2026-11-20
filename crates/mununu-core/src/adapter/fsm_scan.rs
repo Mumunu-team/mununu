@@ -297,8 +297,11 @@ pub fn fsm_liveness_scan(
             }
             // Reachable: can it always be left? `AG EF (reg != v)` over the post-reset model.
             let formula = format!("nu X. ((mu Y. (({name} != {v}) || <> Y)) && [] X)");
-            let parsed = crate::mu_calculus::parser::parse(&formula)
-                .map_err(|e| format!("absorption formula for `{name}`: {e}"))?;
+            let parsed = crate::mu_calculus::parser::parse(&formula).map_err(|e| {
+                crate::adapter::owner::mununu_defect(&format!(
+                    "the absorption formula mununu built for `{name}` did not parse: {e}"
+                ))
+            })?;
             match crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict(&seeded, &parsed)
             {
                 Ok(crate::adapter::btor2::symbolic_bitblast::ExactVerdict::Holds) => {}

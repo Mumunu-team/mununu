@@ -790,11 +790,15 @@ pub(crate) fn compile_boolean_subtree(
                     parser::bv_width(file, r_sort),
                 );
                 if lw.is_none() || lw != rw {
-                    return Err(err(format!(
-                        "adapter/btor2/bad_monitor: relational leaf `{atom}` compares widths \
-                         {} and {}; only same-width operands are compiled",
-                        width_or_unknown(lw),
-                        width_or_unknown(rw)
+                    return Err(err(crate::adapter::owner::mununu_limitation(
+                        &format!(
+                            "adapter/btor2/bad_monitor: relational leaf `{atom}` compares widths \
+                             {} and {}; the monitor compiles same-width operands only and does \
+                             not extend them",
+                            width_or_unknown(lw),
+                            width_or_unknown(rw)
+                        ),
+                        Some("compare equal-width signals, or a slice of the wider one"),
                     )));
                 }
                 let cmp_kw = btor2_cmp_keyword(op);
@@ -803,19 +807,25 @@ pub(crate) fn compile_boolean_subtree(
                 appended.push(format!("{n} {cmp_kw} {bool_sort} {l_nid} {r_nid}"));
                 Ok(n)
             }
-            Ok(_) => Err(err(format!(
-                "adapter/btor2/bad_monitor: leaf atom `{atom}` uses an addend / select shape not \
-                 supported by the compound monitor"
+            Ok(_) => Err(err(crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "adapter/btor2/bad_monitor: leaf atom `{atom}` uses an addend / select shape \
+                     the compound monitor does not compile"
+                ),
+                Some("the monitor takes `REG op VALUE` and `REG op REG` leaves"),
             ))),
             Err(e) => Err(err(format!(
                 "adapter/btor2/bad_monitor: leaf atom `{atom}` did not parse as a predicate \
                  expression: {e}"
             ))),
         },
-        other => Err(err(format!(
-            "adapter/btor2/bad_monitor: compound safety monitor accepts `REG op VALUE` atoms, \
-             `&&`, `||`, `!`, `true` and `false` only; found {}",
-            other.kind_name()
+        other => Err(err(crate::adapter::owner::mununu_limitation(
+            &format!(
+                "adapter/btor2/bad_monitor: compound safety monitor accepts `REG op VALUE` atoms, \
+                 `&&`, `||`, `!`, `true` and `false` only; found {}",
+                other.kind_name()
+            ),
+            None,
         ))),
     }
 }
@@ -1410,10 +1420,13 @@ pub fn emit_bounded_chain_monitor(
                     })?;
                     Ok(if v { self.one } else { self.zero })
                 }
-                other => Err(err(format!(
-                    "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, `||`, \
-                     boxes and `e throughout b[->1]` blocks only; found {}",
-                    other.kind_name()
+                other => Err(err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, \
+                         `||`, boxes and `e throughout b[->1]` blocks only; found {}",
+                        other.kind_name()
+                    ),
+                    None,
                 ))),
             }
         }

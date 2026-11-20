@@ -5778,10 +5778,14 @@ fn template_annotations(
         );
         for (k, v) in args {
             if v.contains('"') {
-                return Err(err(format!(
-                    "verify_auto: template `{}`: the value of `{k}` contains a double quote, \
-                     which the annotation form cannot carry",
-                    tref.template
+                return Err(err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "verify_auto: template `{}`: the value of `{k}` contains a double \
+                         quote, which the annotation form cannot carry (no other form carries \
+                         a template argument)",
+                        tref.template
+                    ),
+                    None,
                 )));
             }
             line.push_str(&format!(" {k}=\"{v}\""));
@@ -6555,11 +6559,24 @@ fn check_antecedent_vacuity(
                         "`{name}`: the antecedent-vacuity check could not run on `$rose({atom})` \
                          ({decline})."
                     ),
-                    detail:
-                        "The reach rescue declined the reachability question (a leaf it cannot \
-                             compile, or the slice was spent); the row's HOLDS is neither shown \
-                             vacuous nor non-vacuous."
-                            .into(),
+                    detail: format!(
+                        "The reach rescue declined the reachability question: {}. The row's \
+                         HOLDS is neither shown vacuous nor non-vacuous.",
+                        match &decline {
+                            crate::adapter::reach_rescue::RescueDecline::ShapeNotReducible
+                            | crate::adapter::reach_rescue::RescueDecline::MonitorEmissionFailed(
+                                _,
+                            ) => crate::adapter::owner::mununu_limitation(
+                                "the lane does not compile this leaf",
+                                None,
+                            ),
+                            crate::adapter::reach_rescue::RescueDecline::MonitoredDesignUnparseable(
+                                _,
+                            ) => crate::adapter::owner::mununu_defect(
+                                "the lane's own monitor did not re-parse",
+                            ),
+                        }
+                    ),
                     items: vec![atom.clone()],
                     property: Some(name.clone()),
                 });
@@ -7302,7 +7319,9 @@ pub(crate) fn verify_auto_impl(
                     kind: t.kind,
                     formula: formula_str.clone(),
                     outcome: VerifyOutcome::Skipped {
-                        reason: format!("formula failed to parse: {e}"),
+                        reason: crate::adapter::owner::mununu_defect(&format!(
+                            "the translator emitted a formula the evaluator rejects ({e})"
+                        )),
                     },
                     seeded_predicates: Vec::new(),
                     counterexample: None,
@@ -7698,11 +7717,14 @@ pub(crate) fn verify_auto_impl(
             report.notes.push(VerificationNote {
                 kind: "array-atom-unsupported".into(),
                 level: NoteLevel::ScopeCaveat,
-                summary: format!(
-                    "`{}`: the atom names `{mem}`, which is a MEMORY (a BTOR2 array state), not a \
-                     scalar register; memory atoms are not supported as cube dimensions and the \
-                     property cannot be decided from them",
-                    t.name
+                summary: crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "`{}`: the atom names `{mem}`, which is a MEMORY (a BTOR2 array state), \
+                         not a scalar register; memory atoms are not carried as cube dimensions \
+                         and the property cannot be decided from them",
+                        t.name
+                    ),
+                    Some("rephrase the property over a scalar register, as `detail` says"),
                 ),
                 detail:
                     "mununu#518 — arrays are encoded as SMT `Array` constants resolved through \
@@ -10096,9 +10118,11 @@ fn attribute_portfolio_contradiction(
             "`{}`: reach portfolio members CONTRADICT each other — {detail}",
             prop.name
         ),
-        detail: "One member is unsound on this design. The row is ⊥, not a pick; a bigger budget \
-                 cannot help and the disagreement must be investigated."
-            .to_string(),
+        detail: crate::adapter::owner::mununu_defect(
+            "One member is unsound on this design. The row is ⊥, not a pick; a bigger budget \
+             cannot help and the disagreement must be investigated (the members and their \
+             verdicts are in `summary`)",
+        ),
         items: Vec::new(),
         property: Some(prop.name.clone()),
     });

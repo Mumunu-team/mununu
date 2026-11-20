@@ -200,13 +200,14 @@ fn uf_lift_to_adapter_output(
 ) -> Result<AdapterOutput, AdapterError> {
     Err(AdapterError {
         kind: super::AdapterErrorKind::UnsupportedConstruct,
-        message: "§Phase 10 stage 3.b: UF-mode routing dispatched correctly, but the destination \
-                  `uf_lift_to_adapter_output` is a stub — stage 3.c populates the actual \
-                  `predicate_cube_lift` integration + Z3 Array theory term construction. \
-                  See docs/design/phase10-uf-routing.md for the design + open questions. \
-                  Until stage 3.c ships, switch the affected memory's sidecar declaration \
-                  to `abstraction: havoc` for a sound over-approximating safety verdict."
-            .to_string(),
+        message: crate::adapter::owner::mununu_limitation(
+            "the sidecar declares a memory with `abstraction: uf`, and the uninterpreted-function \
+             memory lift behind it is not built",
+            Some(
+                "switch that memory's sidecar declaration to `abstraction: havoc` for a sound \
+                 over-approximating safety verdict",
+            ),
+        ),
         location: None,
     })
 }
@@ -362,15 +363,17 @@ mod tests {
             ..Default::default()
         };
         let err = Btor2Adapter::translate(STAGE3B_BTOR2_WITH_MEMORY, &opts)
-            .expect_err("UF stub must error until stage 3.c ships");
+            .expect_err("UF stub must error until the UF memory lift ships");
+        // mununu#1121 U2.10 — the stub names whose gap it is and the declaration that works today.
         assert!(
-            err.message.contains("stage 3.b") || err.message.contains("3.b"),
-            "stub error must identify stage 3.b dispatch; got: {}",
+            err.message.contains("`abstraction: uf`")
+                && err.message.contains("a mununu limitation"),
+            "stub error must name the UF declaration and the owner; got: {}",
             err.message
         );
         assert!(
-            err.message.contains("stage 3.c") || err.message.contains("3.c"),
-            "stub error must point at stage 3.c; got: {}",
+            err.message.contains("`abstraction: havoc`"),
+            "stub error must point at the havoc declaration; got: {}",
             err.message
         );
         // Confirm we did NOT reach the bit-blast path: that path's

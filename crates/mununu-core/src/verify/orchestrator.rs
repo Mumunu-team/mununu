@@ -3222,6 +3222,47 @@ formula = "true"
         );
     }
 
+    /// mununu#1121 U2.10 seam — the candidate list the unknown-adapter message quotes
+    /// ([`DISPATCH_ADAPTERS`]) is the dispatch's own arm list: every
+    /// name in it dispatches (to a translation result or a translation failure on empty input),
+    /// never to `UnknownAdapter`. `sv-yosys` has its own test above, and `c-codesign` runs
+    /// clang on its input, so both are checked by name only.
+    #[test]
+    fn every_adapter_the_unknown_adapter_message_lists_is_one_the_dispatch_takes() {
+        let listed = DISPATCH_ADAPTERS;
+        assert!(listed.contains(&"sv-yosys") && listed.contains(&"c-codesign"));
+        for &name in listed {
+            if name == "sv-yosys" || name == "c-codesign" {
+                continue;
+            }
+            let result = dispatch_adapter(
+                name,
+                "src0",
+                std::path::Path::new("work.txt"),
+                "",
+                &[],
+                &std::collections::BTreeMap::new(),
+                std::path::Path::new("."),
+                &ClusterCoiInputs::default(),
+            );
+            assert!(
+                !matches!(result, Err(VerifyError::UnknownAdapter { .. })),
+                "`{name}` is listed as dispatched but the dispatch does not know it"
+            );
+        }
+        let unknown = dispatch_adapter(
+            "made-up-adapter",
+            "src0",
+            std::path::Path::new("work.txt"),
+            "",
+            &[],
+            &std::collections::BTreeMap::new(),
+            std::path::Path::new("."),
+            &ClusterCoiInputs::default(),
+        );
+        assert!(matches!(unknown, Err(VerifyError::UnknownAdapter { .. })));
+    }
+
     #[test]
     fn source_read_failure_propagates() {
         let temp = tempdir().unwrap();

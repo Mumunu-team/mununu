@@ -58,10 +58,13 @@ impl FormatAdapter for PromelaAdapter {
         if !program.inlines.is_empty() {
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
-                message: format!(
-                    "{} inline definition(s) parsed but expansion is not yet supported; \
-                     inline calls will be treated as unknown identifiers",
-                    program.inlines.len()
+                message: crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "{} inline definition(s) parsed but not expanded; inline calls are \
+                         treated as unknown identifiers",
+                        program.inlines.len()
+                    ),
+                    None,
                 ),
                 location: None,
             });
@@ -71,8 +74,10 @@ impl FormatAdapter for PromelaAdapter {
         if !program.traces.is_empty() || !program.notraces.is_empty() {
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
-                message: "trace/notrace assertions are parsed but not yet fully supported"
-                    .to_string(),
+                message: crate::adapter::owner::mununu_limitation(
+                    "trace/notrace assertions are parsed but not checked",
+                    None,
+                ),
                 location: None,
             });
         }

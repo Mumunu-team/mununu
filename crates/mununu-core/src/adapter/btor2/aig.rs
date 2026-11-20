@@ -699,10 +699,13 @@ impl BvTermBackend for AigBackend<'_> {
                 bit(g.and(a_min, b_m1))
             }
             Op::Read | Op::Write => {
-                return Err(format!(
-                    "aig: node {nid} is an array operation ({}); the bit-level SAT engines \
-                     take no arrays yet",
-                    op.keyword()
+                return Err(crate::adapter::owner::mununu_limitation(
+                    &format!(
+                        "aig: node {nid} is an array operation ({}); the bit-level SAT engines \
+                         take no arrays",
+                        op.keyword()
+                    ),
+                    Some("the SMT members take arrays"),
                 ));
             }
         };
@@ -784,9 +787,13 @@ impl AigModel {
                                 sort: Sort::Array { .. }
                             })
                         ) {
-                            format!(
-                                "aig: `{}` is an array; the bit-level SAT engines take no arrays yet",
-                                symbol.clone().unwrap_or_else(|| line.nid.to_string())
+                            crate::adapter::owner::mununu_limitation(
+                                &format!(
+                                    "aig: `{}` is an array; the bit-level SAT engines take no \
+                                     arrays",
+                                    symbol.clone().unwrap_or_else(|| line.nid.to_string())
+                                ),
+                                Some("the SMT members take arrays"),
                             )
                         } else {
                             format!("aig: node {} has no bit-vector sort", line.nid)
