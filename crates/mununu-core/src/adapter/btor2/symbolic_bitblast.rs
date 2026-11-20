@@ -9474,7 +9474,7 @@ pub(crate) fn bdd_nodes_height(f: &BDDFunction) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    /// A mux on internal logic is not read as the register behind its arm. The EmTech
+    /// A mux on internal logic is not read as the register behind its arm. The the tutorial's
     /// `sensor_monitor` output `ch_trip = link_fault ? 3'b111 : data_q` (with `data_q`'s pinned
     /// reset mux beneath it) was resolved to `data_q`, so `AG(link_fault → ch_trip == 7)` came
     /// back VIOLATED: the engine read `data_q == 7` under `link_fault`, which is reachable, while

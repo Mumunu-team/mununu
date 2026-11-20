@@ -596,15 +596,13 @@ fn every_flag_a_message_names_is_on_the_verb_that_produced_it() {
     );
     // The union check still covers every other module; make sure the files listed here are a
     // subset of what the sibling test scans, so nothing escapes both.
-    let scanned: BTreeSet<String> = rust_files_under(&root.join("crates/mununu-core/src/adapter"))
-        .into_iter()
-        .map(|p| p.display().to_string())
-        .collect();
+    // mununu#1153 — compared by path components, not display strings: on Windows the scan's
+    // paths carry backslashes and a `/`-spelled literal never matched (five red OS-matrix runs).
+    let scanned = rust_files_under(&root.join("crates/mununu-core/src/adapter"));
     for (suffix, _) in REACH {
+        let tail = Path::new("crates/mununu-core").join(suffix);
         assert!(
-            scanned
-                .iter()
-                .any(|p| p.ends_with(&format!("crates/mununu-core/{suffix}"))),
+            scanned.iter().any(|p| p.ends_with(&tail)),
             "{suffix} is outside the sibling test's scan"
         );
     }
