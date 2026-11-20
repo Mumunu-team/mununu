@@ -40,7 +40,7 @@ mununu exposes 11 visible top-level commands (plus the hidden `internal-engine-e
 **Proposal (Decide).**
 - `btor2 verify-liveness` absorbs `-all` (`--response A=>C` repeatable), `-under-fairness` (`--fairness`) and `verify-justice` (`--justice`, `--rung`); the `sv` side gets the same flags. Four verbs become one per family.
 - `btor2 verify-safety` gets an API route or is removed (it duplicates a portfolio member).
-- `sv verify` is renamed `sv verify-bad` (it checks yosys-lowered `bad` lines, not the SVA fragment), so "verify" without a suffix means the full property set only in `sv verify-auto`. Alternative: remove it.
+- `sv verify` is renamed `sv verify-bad` (it checks yosys-lowered `bad` lines, not the SVA fragment), so "verify" without a suffix means the full property set only in `sv verify-auto`. Alternative: remove it. *(Removed 2026-11-20, mununu#1074: the slang-only lift reads the design with its assertions ignored, so no SystemVerilog input could reach the portfolio through the verb.)*
 - `context eval` gets `--json` emitting the same envelope as `/context/verify`; the route is renamed `/context/eval` to match. `/context/synthesize` → `/context/synth`, `/context/graphs` → `/context/graph`, `/verify/memory-check` → `/memory/check`; `/synth/gr1` folds into `/context/synth` with `controller_mode: "gr1"`.
 
 ### 2.3 Verdict envelope

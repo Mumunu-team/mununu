@@ -1688,16 +1688,6 @@ pub struct Btor2GameResponse {
     pub attack_exists: Option<bool>,
 }
 
-/// The SV → BTOR2 lift inputs shared by the SV-direct verb endpoints
-/// (`/api/v1/sv/verify`, `/sv/verify-liveness`, `/sv/verify-recoverability`). These
-/// lift the module (yosys-slang) and then decide the corresponding BTOR2 property,
-/// returning the same `Btor2Verify*Response` shapes — one call, no `emit-btor2` step.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SvVerifyRequest {
-    /// The SV design and how to lift it (the CLI's shared lift flags).
-    pub lift: SvLiftRequest,
-}
-
 /// Request for `POST /api/v1/sv/verify-liveness` — the SV lift fields plus the
 /// response-liveness atoms.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]

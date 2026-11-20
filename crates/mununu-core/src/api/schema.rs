@@ -35,7 +35,6 @@ use super::models::{
     SvCdcLintResponse, SvCheckFsmRequest, SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest,
     SvVerifyAutoResponse, SvVerifyLivenessAllReport, SvVerifyLivenessReport,
     SvVerifyLivenessRequest, SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest,
-    SvVerifyRequest,
 };
 
 /// JSON Schema (Draft 2019-09) for `POST /api/v1/sv/verify-auto` request bodies.
@@ -146,7 +145,7 @@ pub fn btor2_verify_request_schema() -> serde_json::Value {
 }
 
 /// JSON Schema for `POST /api/v1/btor2/verify` responses. Also the response shape
-/// for `POST /api/v1/sv/verify-bad` (SV → BTOR2 lift then decide).
+/// (the removed `POST /api/v1/sv/verify-bad` shared it — mununu#1074).
 pub fn btor2_verify_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(Btor2VerifyResponse))
         .expect("Btor2VerifyResponse schema must serialise as JSON")
@@ -191,12 +190,6 @@ pub fn btor2_check_fsm_request_schema() -> serde_json::Value {
 pub fn btor2_check_fsm_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(Btor2CheckFsmResponse))
         .expect("Btor2CheckFsmResponse schema must serialise as JSON")
-}
-
-/// JSON Schema for `POST /api/v1/sv/verify-bad` request bodies (SV lift + BTOR2 verify).
-pub fn sv_verify_request_schema() -> serde_json::Value {
-    serde_json::to_value(schema_for!(SvVerifyRequest))
-        .expect("SvVerifyRequest schema must serialise as JSON")
 }
 
 /// JSON Schema for `POST /api/v1/sv/verify-liveness` request bodies.
@@ -810,14 +803,6 @@ mod tests {
         drift_check(
             "docs/api-schemas/btor2-check-fsm-response.schema.json",
             &btor2_check_fsm_response_schema(),
-        );
-    }
-
-    #[test]
-    fn api_schema_drift_sv_verify_request() {
-        drift_check(
-            "docs/api-schemas/sv-verify-request.schema.json",
-            &sv_verify_request_schema(),
         );
     }
 

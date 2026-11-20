@@ -59,7 +59,6 @@ branch on its shape instead of on the exit code.
 
 | File | Endpoint | Direction | Response schema |
 |------|----------|-----------|-----------------|
-| [`sv-verify-request.schema.json`](sv-verify-request.schema.json) | `POST /api/v1/sv/verify-bad` | Request body | `btor2-verify-response.schema.json` |
 | [`sv-verify-liveness-request.schema.json`](sv-verify-liveness-request.schema.json) | `POST /api/v1/sv/verify-liveness` | Request body | `btor2-verify-liveness-response.schema.json` |
 | [`sv-verify-recoverability-request.schema.json`](sv-verify-recoverability-request.schema.json) | `POST /api/v1/sv/verify-recoverability` | Request body | `btor2-verify-recoverability-response.schema.json` |
 | [`sv-check-fsm-request.schema.json`](sv-check-fsm-request.schema.json) | `POST /api/v1/sv/check-fsm` | Request body | `btor2-check-fsm-response.schema.json` |
