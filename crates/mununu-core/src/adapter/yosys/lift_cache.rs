@@ -339,7 +339,7 @@ impl LiftCache {
 /// manifest. Directories that do not exist are skipped (a tool would not read them either);
 /// an unreadable file or a tree over the caps is an error, so the lift bypasses the cache
 /// rather than key on a partial view.
-pub(super) fn collect_include_files(dirs: &[PathBuf]) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn collect_include_files(dirs: &[PathBuf]) -> Result<Vec<(String, String)>, String> {
     let mut roots: Vec<PathBuf> = dirs.to_vec();
     roots.sort();
     roots.dedup();
