@@ -22,8 +22,10 @@ fn count_writers(dir: &Path, root: &Path, out: &mut BTreeMap<String, usize>) {
             count_writers(&path, root, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
             let text = std::fs::read_to_string(&path).expect("a source file is UTF-8");
-            let n = text.matches("std::env::set_var(").count()
-                + text.matches("std::env::remove_var(").count();
+            // mununu#1144 — the `use std::env;` spelling counts too (`env::set_var(` matches
+            // both).
+            let n =
+                text.matches("env::set_var(").count() + text.matches("env::remove_var(").count();
             if n > 0 {
                 let rel = path.strip_prefix(root).expect("under src/");
                 out.insert(rel.to_string_lossy().replace('\\', "/"), n);

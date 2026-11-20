@@ -78,6 +78,21 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 **Enumerating test:** none; the OS matrix on `main` is the detector.
 
+### `policy-scan-blind-spot`
+
+**What varies:** the shapes of product code a repository gate must scan, and the spellings of the thing it looks for. A gate that passes on an input it was written to refuse is worse than no gate: it reports PASS.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| product code after a mid-file `#[cfg(test)] mod` | the module is blanked by brace depth, line numbers kept (`tests/policy/source_scan.rs`) | mununu#1144 |
+| the `use std::env;` spelling of a read or a write | matched (`env::var(`, `env::var_os(`, `env::set_var(`, `env::remove_var(`) | mununu#1144 |
+| a quote inside a comment | not a string literal | mununu#1144 |
+| "Yosys N.NN or later / or newer", any case | a version mention | mununu#1144 |
+| an ignored test's runner | one predicate, `is_orphan`, tested on its rows | mununu#1144 |
+| an `e2e_` test that skips when its tool is absent | `manual:`, naming the image that has the tool | mununu#1144 |
+
+**Enumerating test:** `x1144_a_mid_file_test_module_is_skipped_and_the_code_after_it_kept` and each gate's extended control.
+
 ### `prose-anchored-test`
 
 **What varies:** which words of a user-facing message a test depends on. A rewording that keeps the meaning breaks the test; one that changes the meaning but keeps the words passes.

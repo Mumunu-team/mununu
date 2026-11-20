@@ -3042,7 +3042,9 @@ mod tests {
             "{out:?}"
         );
         assert!(
-            t0.elapsed() < std::time::Duration::from_secs(1),
+            // mununu#1144 — a bound on "promptly", wide enough for a loaded host; the verdict
+            // assertion above carries the content.
+            t0.elapsed() < std::time::Duration::from_secs(10),
             "{:?}",
             t0.elapsed()
         );
@@ -3071,7 +3073,9 @@ mod tests {
             "{out:?}"
         );
         assert!(
-            t0.elapsed() < std::time::Duration::from_secs(1),
+            // mununu#1144 — a bound on "promptly", wide enough for a loaded host; the verdict
+            // assertion above carries the content.
+            t0.elapsed() < std::time::Duration::from_secs(10),
             "{:?}",
             t0.elapsed()
         );

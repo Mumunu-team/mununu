@@ -29,6 +29,9 @@ pub(crate) const FOREIGN_FLAGS: &[(&str, &str)] = &[
     ("trace", "verilator"),
     ("ast-json", "slang"),
     ("ignore-assertions", "yosys read_slang"),
+    ("ignore-timing", "yosys read_slang"),
+    ("empty-blackboxes", "yosys read_slang"),
+    ("memory", "docker"),
     ("features", "cargo"),
     ("language", "tree-sitter"),
 ];
@@ -157,18 +160,52 @@ fn cited_flags(lit: &str) -> BTreeSet<String> {
 
 /// The string literals of a file's non-test code that read as prose (six or more words).
 pub(crate) fn prose_literals(src: &str) -> Vec<(usize, String)> {
-    let body = match src.find("\n#[cfg(test)]") {
-        Some(i) => &src[..i],
-        None => src,
-    };
+    // mununu#1144 — every test module blanked, lines kept: the scan used to stop at the first
+    // `#[cfg(test)]`, a test-only helper well before the end of four large files.
+    let blanked = crate::source_scan::blank_test_modules_keeping_lines(src);
+    let body = blanked.as_str();
     let mut out = Vec::new();
     let mut in_lit: Option<usize> = None;
     let mut buf = String::new();
     let mut escaped = false;
+    let mut in_comment = false;
+    let mut in_char = false;
+    let mut char_escaped = false;
+    let mut prev = '\0';
+    let bytes = body.as_bytes();
     for (i, c) in body.char_indices() {
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+            }
+            prev = c;
+            continue;
+        }
+        if in_char {
+            // A char literal (`'"'`, `'\''`) is not a string's quote (mununu#1144 — past the
+            // first test module the scan met `matches!(c, '"' | '\'')` and opened a literal
+            // on the `"` inside it).
+            if char_escaped {
+                char_escaped = false;
+            } else if c == '\\' {
+                char_escaped = true;
+            } else if c == '\'' {
+                in_char = false;
+            }
+            prev = c;
+            continue;
+        }
         match in_lit {
             None => {
-                if c == '"' {
+                // A `//` outside a literal opens a comment to the end of the line: a quote in
+                // a doc comment is not a string (mununu#1144).
+                if c == '/' && prev == '/' {
+                    in_comment = true;
+                } else if c == '\''
+                    && (bytes.get(i + 2) == Some(&b'\'') || bytes.get(i + 1) == Some(&b'\\'))
+                {
+                    in_char = true;
+                } else if c == '"' {
                     in_lit = Some(i);
                     buf.clear();
                     escaped = false;
@@ -194,6 +231,7 @@ pub(crate) fn prose_literals(src: &str) -> Vec<(usize, String)> {
                 }
             }
         }
+        prev = c;
     }
     out
 }
