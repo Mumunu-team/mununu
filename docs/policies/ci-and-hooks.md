@@ -8,6 +8,21 @@
 
 `make ci` = `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace`. (2026-10-26: the `test-api` target the #553 follow-up had added was a duplicate recompile — the workspace build unifies mununu-core's `api` + `ast-extract` features through mununu-cli's edge, so the 119 `api::` tests run in `cargo test --workspace`; the separate CI step ran the root package's lib, 0 tests; the hook's per-crate run now asks mununu-core for the unified features.) The same command runs locally, in the pre-commit hook (`./scripts/setup-hooks.sh`) and in GitHub Actions; a CI failure a contributor cannot reproduce with `make ci` means the contract is broken. (2026-10-27: CI caches the dependency build across runs — `Swatinem/rust-cache` on the container's bind-mounted `/cargo-target` and cargo registry, saved from `main` only; a hit leaves only the workspace crates to compile, a miss is the full compile. The `make ci` line is the same either way.) `security-audit` runs `cargo audit`; `dependency-check` is non-blocking. CI-exact reproduction inside the pinned container: [`docs/dev-container.md`](../dev-container.md); finer cargo recipes: [`docs/build-recipes.md`](../build-recipes.md).
 
+## Required checks on `main` (2026-11-20)
+
+> Source of truth: [`os-matrix.yml`](../../.github/workflows/os-matrix.yml) and [`ci.yml`](../../.github/workflows/ci.yml) — surface: CI-only — branch protection is a repository setting, not a file
+
+Branch protection on `main` requires five checks on a PR's head before it can merge: `lint-and-test`
+(the `make ci` job) and the OS matrix's four jobs, `linux`, `macos`, `windows` and
+`same tests on every OS`. Administrators are included; direct pushes are refused.
+
+Two incidents produced this. On 2026-11-20 a PR merged with `lint-and-test` failing, because a
+merge watcher read the checks before the long one had registered, and `main` was red until the
+fix-forward. The same day the OS matrix, which then ran only after a merge, was found red on
+Windows for five merges in a row (mununu#1153): a policy test compared a displayed path against a
+forward-slash literal. A check that runs after the merge can only report a broken `main`; a
+required check on the PR prevents it. The OS matrix therefore runs on every PR (about 18 minutes).
+
 ## The SVA e2e set and the `mununu-sva` image
 
 > Source of truth: [`scripts/e2e-sweep.sh`](../../scripts/e2e-sweep.sh) · [`docker/Dockerfile.sva`](../../docker/Dockerfile.sva) — surface: CLI-only — a test sweep run in the image, not a shipped verb
