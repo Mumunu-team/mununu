@@ -1044,6 +1044,15 @@ keeps that reading as an explicit choice: `diagnostics.merged_clock_domains` lis
 the `clock-domains-merged` soundness caveat says what a verdict is worth. A design clocked on a
 single edge of a single net, falling edge included, is one domain and lifts as before.
 
+A clock net driven by the **output of a black box** (a PLL, a clock generator, a black-boxed or
+auto-stubbed clock gate — the cell's body is not in the lifted design) is taken as a root clock and
+ticks on every step. That is right for an independent source and neither an over- nor an
+under-approximation of a cell that gates or divides its input, and the scan cannot tell the two
+apart, so `sv verify-auto` adds a `clock-rooted-at-black-box` note per such net (the cell type, the
+net, the number of storage cells it clocks; mununu#1148) and the domain list prints it as
+`rooted at black box \`<cell>\``. If the cell gates or divides, provide its source or model the
+gating as a clock enable on the root clock.
+
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 
 > Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L129) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)

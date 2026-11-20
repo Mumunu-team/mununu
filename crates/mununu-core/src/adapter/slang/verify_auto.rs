@@ -6160,6 +6160,31 @@ pub(crate) fn prepare_model(
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
             .collect();
     }
+    // mununu#1148 — a clock rooted at a black-box output ticks in lockstep with the model's
+    // step. SOUNDNESS: right for an independent source (a PLL); for a black-boxed or auto-stubbed
+    // clock gate or divider it is NEITHER an over- nor an under-approximation of the gated
+    // design, so the report names the cell, the net and the flops it clocks.
+    for d in clock_domains.iter().filter(|d| d.black_box_root.is_some()) {
+        let cell = d.black_box_root.clone().unwrap_or_default();
+        report.notes.push(VerificationNote {
+            kind: "clock-rooted-at-black-box".into(),
+            level: NoteLevel::ScopeCaveat,
+            summary: format!(
+                "clock `{}` is rooted at the output of black box `{cell}` and clocks {} storage \
+                 cell(s); the model ticks it on every step",
+                d.net, d.cells
+            ),
+            detail: "The cell's body is not in the lifted design, so the scan cannot tell an \
+                     independent clock source (a PLL — the lockstep model is right) from a cell \
+                     that gates or divides its input (the lockstep model is neither an over- nor \
+                     an under-approximation of the gated design, and no verdict on the flops it \
+                     clocks transfers on its own). If the cell gates or divides, provide its \
+                     source or model the gating as a clock enable on the root clock."
+                .into(),
+            items: vec![d.net.clone(), cell.clone(), d.cells.to_string()],
+            property: None,
+        });
+    }
     report.diagnostics.blackboxed_modules = blackboxed_modules;
     report.diagnostics.auto_provided_stubs = auto_provided_stubs;
     // Which RTL front end produced this lift — provenance on the report.

@@ -1307,6 +1307,12 @@ pub struct ClockDomain {
     /// gates or divides it, so a derived domain is refused like a second domain (see
     /// [`refuse_merged_clock_domains`]).
     pub derived_from: Option<String>,
+    /// mununu#1148 — `Some(cell type)` when the net is rooted at the output of a black-box
+    /// instance (a PLL, a clock generator, a black-boxed or auto-stubbed clock gate): the model
+    /// ticks it every step like a root clock, which is right for an independent source and
+    /// neither an over- nor an under-approximation of a cell that gates or divides its input.
+    /// The report names it so the reader knows which it is.
+    pub black_box_root: Option<String>,
 }
 
 /// `clk_a (posedge, 3 cells), clk_b (posedge, 1 cell)`.
@@ -1324,6 +1330,10 @@ pub fn describe_clock_domains(domains: &[ClockDomain]) -> String {
                     .as_ref()
                     .map(|t| format!(", derived: driven by `{t}`"))
                     .unwrap_or_default()
+                    + &d.black_box_root
+                        .as_ref()
+                        .map(|t| format!(", rooted at black box `{t}`"))
+                        .unwrap_or_default()
             )
         })
         .collect::<Vec<_>>()
@@ -1584,6 +1594,7 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
     };
     let mut count: std::collections::BTreeMap<(String, bool), usize> = Default::default();
     let mut derived: std::collections::BTreeMap<(String, bool), String> = Default::default();
+    let mut rooted: std::collections::BTreeMap<(String, bool), String> = Default::default();
     for body in modules.values() {
         let names = net_names(body);
         let drivers = clock_drivers(body);
@@ -1620,6 +1631,9 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
                             if let Some(t) = bit.as_i64().and_then(|b| drivers.derived_from(b)) {
                                 derived.entry((net.clone(), edge)).or_insert(t);
                             }
+                            if let Some(t) = bit.as_i64().and_then(|b| drivers.black_box_root(b)) {
+                                rooted.entry((net.clone(), edge)).or_insert(t);
+                            }
                             *count.entry((net, edge)).or_default() += 1;
                         }
                     }
@@ -1638,6 +1652,9 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
                 if let Some(t) = bit.as_i64().and_then(|b| drivers.derived_from(b)) {
                     derived.entry((net.clone(), edge)).or_insert(t);
                 }
+                if let Some(t) = bit.as_i64().and_then(|b| drivers.black_box_root(b)) {
+                    rooted.entry((net.clone(), edge)).or_insert(t);
+                }
                 *count.entry((net, edge)).or_default() += 1;
             }
         }
@@ -1646,6 +1663,7 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
         .into_iter()
         .map(|((net, posedge), cells)| ClockDomain {
             derived_from: derived.get(&(net.clone(), posedge)).cloned(),
+            black_box_root: rooted.get(&(net.clone(), posedge)).cloned(),
             net,
             posedge,
             cells,
@@ -1717,12 +1735,31 @@ impl ClockDrivers {
                 // SOUNDNESS: a non-`$` driver is a black-box instance (its body is not in the
                 // flattened design). Its output is taken as a root clock, as the B1 census
                 // counted PLL outputs: the model ticks it every step, which is what an
-                // independent clock source does. A black box that DIVIDES its input clock would
-                // be missed here; the lift's black-box notes name every such cell.
+                // independent clock source does. A black box that gates or DIVIDES its input
+                // clock is ticked the same way — neither an over- nor an under-approximation of
+                // that cell — so the scan names the root (`black_box_root`) and the report says
+                // which cell it is (mununu#1148).
                 Some(_) => return None,
             }
         }
         self.driver.get(&at).map(|(ty, _)| ty.clone())
+    }
+
+    /// mununu#1148 — `Some(cell type)` when `bit`, after any inverters and buffers, is driven
+    /// by a black-box instance's output (a non-`$` cell): a root the model ticks every step
+    /// without knowing whether the cell gates or divides its input. `None` for a top-level
+    /// input, an undriven net or a `$`-cell (the derived case, [`Self::derived_from`]).
+    fn black_box_root(&self, bit: i64) -> Option<String> {
+        let mut at = bit;
+        for _ in 0..=self.driver.len() {
+            match self.driver.get(&at) {
+                None => return None,
+                Some((ty, Some(next))) if CLOCK_PASS_THROUGH.contains(&ty.as_str()) => at = *next,
+                Some((ty, _)) if ty.starts_with('$') => return None,
+                Some((ty, _)) => return Some(ty.clone()),
+            }
+        }
+        None
     }
 }
 
@@ -3616,19 +3653,22 @@ mod tests {
                     net: "clk_a".into(),
                     posedge: false,
                     cells: 1,
-                    derived_from: None
+                    derived_from: None,
+                    black_box_root: None
                 },
                 ClockDomain {
                     net: "clk_a".into(),
                     posedge: true,
                     cells: 2,
-                    derived_from: None
+                    derived_from: None,
+                    black_box_root: None
                 },
                 ClockDomain {
                     net: "clk_b".into(),
                     posedge: true,
                     cells: 1,
-                    derived_from: None
+                    derived_from: None,
+                    black_box_root: None
                 },
             ]
         );
@@ -3939,6 +3979,52 @@ endmodule
         );
     }
 
+    /// mununu#1148 — a clock rooted at a black-box output (a PLL, or a black-boxed clock gate
+    /// the scan cannot see into) is named as such: the model ticks it every step, which is right
+    /// for an independent source and neither an over- nor an under-approximation of a gating
+    /// cell, and the reader must know which it is. Through the public description, which the
+    /// parent prints without the root (fails there).
+    #[test]
+    fn x1148_a_clock_rooted_at_a_black_box_output_is_named_in_the_description() {
+        let json = r#"{"modules": {"top": {
+            "netnames": {
+                "clk": {"hide_name": 0, "bits": [2]}, "en": {"hide_name": 0, "bits": [3]},
+                "gclk": {"hide_name": 0, "bits": [4]}, "gclk_n": {"hide_name": 0, "bits": [5]}
+            },
+            "cells": {
+                "cg": {"type": "prim_clock_gating", "port_directions": {"clk_i": "input", "en_i": "input", "clk_o": "output"},
+                       "connections": {"clk_i": [2], "en_i": [3], "clk_o": [4]}},
+                "inv": {"type": "$not", "port_directions": {"A": "input", "Y": "output"},
+                        "connections": {"A": [4], "Y": [5]}},
+                "on_root": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                            "connections": {"CLK": [2], "D": [9], "Q": [10]}},
+                "on_gated": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                             "connections": {"CLK": [4], "D": [9], "Q": [11]}},
+                "on_gated_n": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                               "connections": {"CLK": [5], "D": [9], "Q": [12]}}
+            }
+        }}}"#;
+        let domains = clock_domains(json);
+        let text = describe_clock_domains(&domains);
+        assert!(
+            text.contains("gclk (posedge, 1 cell, rooted at black box `prim_clock_gating`)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("gclk_n (posedge, 1 cell, rooted at black box `prim_clock_gating`)"),
+            "through the inverter too: {text}"
+        );
+        // The root clock's own entry carries no root (`gclk …` also ends in `clk …`, so the
+        // check is on the entry's start, not on a substring).
+        assert!(text.starts_with("clk (posedge, 1 cell), "), "{text}");
+        let gated = domains.iter().find(|d| d.net == "gclk").expect("gclk");
+        assert_eq!(gated.black_box_root.as_deref(), Some("prim_clock_gating"));
+        assert_eq!(
+            gated.derived_from, None,
+            "a black-box root is not a derived clock"
+        );
+    }
+
     /// Roadmap B2 — one domain on a derived clock is refused like a second domain, naming the
     /// net and its driver; `merge_clock_domains` lets it through; one rooted domain lifts.
     #[test]
@@ -3948,6 +4034,7 @@ endmodule
             posedge: true,
             cells: 2,
             derived_from: Some("$and".into()),
+            black_box_root: None,
         }];
         let Err(e) = refuse_merged_clock_domains(&gated, &YosysOptions::default()) else {
             panic!("a lone gated clock must not lift as the model's clock");
