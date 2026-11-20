@@ -88,9 +88,11 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | Case | Behaviour | Landed |
 |---|---|---|
 | a path separator or a Unix path in an expected string | build the expected path with the same join the code uses | mununu#999, mununu#1153 |
-| a wall-clock bound on a race between portfolio members | assert the verdict on every host and pin the member at a seam | mununu#998, mununu#1054, mununu#1065 |
+| which portfolio members had reported when the first verdict stopped the rest | assert the verdict on every host; pin the attribution with scripted members, whose finish order the test fixes | mununu#1054, mununu#1065 |
+| a wall-clock bound standing in for "did not wait for the stuck member" or "started no member" | the stub never returns (so an outcome at all is the claim), or every stub would decide (so an outcome that credits none is) | mununu#996, mununu#726, mununu#816 |
+| a process state read right after an asynchronous kill | poll up to a grace that still separates a leak from a slow death | mununu#998 |
 
-**Enumerating test:** none; the OS matrix on `main` is the detector.
+**Enumerating test:** for the portfolio rows, `adapter::reach_portfolio::tests::scripted` (the full driver) and `scripted::owned` (the owned-only driver): every member's runner is a parameter of the drivers (`Runners`), each test fixes which members have reported when the first verdict lands, and the whole outcome is compared. The detectors that race the real engines stay (`portfolio_decides_reachable_without_subprocess`, `owned_only_excludes_external_engines_on_small_counter`), and the OS matrix on `main` remains the detector for the class. The portfolio rows were checked against the four red OS-matrix runs of 2026-11-14 to 11-17 (five tests, each an assertion on which members had finished).
 
 ### `prose-anchored-test`
 
