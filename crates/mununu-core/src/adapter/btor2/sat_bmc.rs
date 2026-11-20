@@ -350,6 +350,12 @@ fn dynamic_search(
     let mut pending: Vec<(usize, usize, i32)> = Vec::new();
     // Every depth below `refuted_below` is refuted; `encoded` frames are in the solver.
     let (mut refuted_below, mut encoded) = (0u32, 0u32);
+    // mununu#1141 — a BTOR2 witness of `bad` at frame f must satisfy the `constraint`s on
+    // frames 0..=f only; the window asks for a bad at any of several frames at once, so a
+    // constraint is not a unit clause but is tied to a per-frame selector `s_k` ("the chosen
+    // bad lies at frame k or later"): `s_k → constraint@k`, `s_k → s_(k-1)`, `bad@f → s_f`. A
+    // bad at f whose every continuation later breaks a constraint stays a counterexample.
+    let mut selectors: Vec<i32> = Vec::new();
     let mut jump = 1u32;
     let mut conflicts = step.first_conflicts.max(1);
     loop {
@@ -361,12 +367,18 @@ fn dynamic_search(
             .min(opts.max_depth.saturating_add(1));
         for k in encoded..target {
             let f = k as usize;
+            let s_k = u.fresh();
+            if let Some(&s_prev) = selectors.last() {
+                u.solver.add_clause([-s_k, s_prev]);
+            }
+            selectors.push(s_k);
             for &c in &model.constraints {
                 let cl = u.encode(c, f)?;
-                u.solver.add_clause([cl]);
+                u.solver.add_clause([-s_k, cl]);
             }
             for (bi, &b) in model.bads.iter().enumerate() {
                 let l = u.encode(b, f)?;
+                u.solver.add_clause([-l, s_k]);
                 pending.push((f, bi, l));
             }
         }
@@ -725,6 +737,35 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// mununu#1141 — the dynamic step asserted every frame's `constraint` as a unit clause, so
+    /// a `bad` at frame f whose every continuation breaks a constraint later in the window was
+    /// "refuted". A counter that reaches `bad` at frame 1 and breaks `constraint (c != 2)` at
+    /// frame 2 on every path is a counterexample of depth 1 (BTOR2 needs the constraints on
+    /// frames 0..=1 only); on the parent the window [1, 3) reports it refuted and the run ends
+    /// with "no counterexample through depth 4".
+    #[test]
+    fn x1141_the_dynamic_step_assumes_constraints_only_up_to_the_bad_frame() {
+        const COUNTER: &str = "1 sort bitvec 2\n2 state 1 c\n3 zero 1\n4 init 1 2 3\n5 one 1\n\
+6 add 1 2 5\n7 next 1 2 6\n8 sort bitvec 1\n9 constd 1 1\n10 eq 8 2 9\n11 bad 10\n\
+12 constd 1 2\n13 neq 8 2 12\n14 constraint 13\n";
+        let file = crate::adapter::btor2::parser::parse(COUNTER).expect("parse");
+        let out = sat_bmc(
+            &file,
+            &SatBmcOptions {
+                max_depth: 4,
+                dynamic_step: Some(DynamicStep::default()),
+                ..Default::default()
+            },
+        )
+        .expect("sat-bmc runs");
+        match out {
+            SatBmcOutcome::Violated { depth, .. } => assert_eq!(depth, 1, "{out:?}"),
+            other => panic!(
+                "the depth-1 counterexample is real (the constraint holds on frames 0..=1): {other:?}"
+            ),
+        }
     }
 
     /// The dynamic step finds the same first-depth counterexample: a window that covers depth 7

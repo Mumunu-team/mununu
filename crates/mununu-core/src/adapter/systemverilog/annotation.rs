@@ -1125,7 +1125,7 @@ impl SvAnnotation {
                 entry.values.push(DiscoveredValue {
                     name: variant,
                     value: v_signed,
-                    from: Some("R-S4: case-literal equivalence class".to_string()),
+                    from: Some("case-literal equivalence class".to_string()),
                 });
                 added_now.push(v_signed);
             }
@@ -2299,7 +2299,7 @@ mod tests {
                 .from
                 .as_deref()
                 .unwrap_or("")
-                .contains("R-S4")
+                .contains("case-literal equivalence class")
         );
         // Abstraction forced to Discover so the sidecar resolver
         // picks up the discovered_values + catch_all.

@@ -1,0 +1,39 @@
+name: Review gate
+
+# A sensitive pull request carries a review written on the other machine, and a fix says which
+# defect class it belongs to (docs/policies/cross-host-review.md, docs/policies/fix-the-class.md).
+# The verdict is posted as the commit status `review-gate` on the pull request's head, so that
+# branch protection can require it. The negative controls run first: a green gate is not vacuous.
+#
+# `pull_request_target` and `issue_comment` both run the script from `main`, never from the pull
+# request, and nothing from the pull request is checked out or executed.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-gate:
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Negative controls
+        run: python3 scripts/pr_review_gate.py --control
+      - name: Gate the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: python3 scripts/pr_review_gate.py --pr "$PR_NUMBER" --post

@@ -77,9 +77,10 @@ impl fmt::Display for ComposeError {
             }
             ComposeError::PostSpliceParseFailed { error, .. } => write!(
                 f,
-                "post-splice CTXDSL failed to parse: {error}\n\
-                 this is a bug in codesign::compose — the assembled text is included \
-                 in the error variant for diagnosis."
+                "{}",
+                crate::adapter::owner::mununu_defect(&format!(
+                    "post-splice CTXDSL failed to parse: {error}"
+                ))
             ),
             ComposeError::NoContextBlock => write!(
                 f,
