@@ -621,8 +621,8 @@ impl BddBitBlaster {
             return Err(format!(
                 "symbolic bit-blaster: design has {total_bits} register+input bits \
                  (> {cap}) after cone-of-influence restriction (R-F5.6) — abstained on the BIT CAP; \
-                 the property's cone is too wide to bit-blast; raise MUNUNU_BDD_MAX_BITS, or use \
-                 `--engine explicit`"
+                 the property's cone is too wide to bit-blast; raise MUNUNU_BDD_MAX_BITS, \
+                 {OTHER_ENGINE_REMEDY}"
             ));
         }
 
@@ -975,13 +975,12 @@ impl BddBitBlaster {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
             Err(_) => {
-                return Err(
+                return Err(format!(
                     "exact bit-blaster: BDD arena exhausted during build (a wide op overran \
-                            the node budget in one apply) — abstained on the NODE budget; the cone \
-                            does not compress to a tractable BDD; raise MUNUNU_BDD_ARENA_NODES, or \
-                            use `--engine explicit`"
-                        .into(),
-                );
+                     the node budget in one apply) — abstained on the NODE budget; the cone \
+                     does not compress to a tractable BDD; raise MUNUNU_BDD_ARENA_NODES, \
+                     {OTHER_ENGINE_REMEDY}"
+                ));
             }
         }
 
@@ -2303,13 +2302,51 @@ fn arena_nodes_override() -> Option<usize> {
 /// BDD op ABSTAINS (`Err` → the caller routes to `--engine explicit`) instead of `.unwrap()`-panicking.
 /// A panic here aborts the process (SIGABRT) on the unwind of the exhausted manager — `catch_unwind`
 /// cannot save it — so a hot-path op that can exhaust the arena must propagate, never `unwrap`.
+/// mununu#1121 (U2.2) — the closing clause of every exact-engine abstention: after the knob, the
+/// other engines by the verbs that reach them. The exact engine runs under the `btor2 verify`
+/// verbs and `sv verify-*`, which take no `--engine explicit` (the SAT members run beside it
+/// there), as well as under `sv verify-auto` and `sv mutate`, which do (the cegar verbs refuse
+/// `--engine exact-symbolic` and never reach it); "or use `--engine explicit`" alone was a flag
+/// of another verb for most of its readers.
+pub(crate) const OTHER_ENGINE_REMEDY: &str = "or decide the property with another engine: the \
+     predicate-cube engine (`--engine explicit` on `sv verify-auto` and `sv mutate`; `--engine \
+     cube` on `btor2 verify`), or, for a safety property, the SAT members (BMC, k-induction, \
+     IC3) of the `btor2 verify` portfolio and of `sv verify-auto`'s re-plan, which run beside \
+     this one — there this is one member's abstention, not the row's verdict";
+
+/// mununu#1121 (U2.3) — what the user can do about an atom over a primary input this engine
+/// refused, by the cause. The antecedent shadow register the old text offered was retired by
+/// inputs-in-the-state (mununu#677); with that lift on, a named uncontrollable input is sampled
+/// and the refusal does not fire, so the remaining causes are the opt-out, a controllable input
+/// on the game verbs, or a defect.
+fn input_atom_remedy(input_state_opted_out: bool, controllable_input: bool) -> String {
+    if input_state_opted_out {
+        "Inputs-in-the-state — which samples the input into the state, so the atom is a state \
+         predicate — is OFF for this run: drop `--no-input-state` on `sv verify-auto` (API \
+         `input_state: false`; MUNUNU_NO_INPUT_STATE on any verb) and the atom is decided."
+            .to_string()
+    } else if controllable_input {
+        "A controllable input is not sampled on the game verbs (folded into the state it would \
+         be fixed before the controller moves, which changes who wins): write the atom over the \
+         register the input drives, or decide the property with the predicate-cube engine where \
+         the verb takes `--engine explicit`."
+            .to_string()
+    } else {
+        "Inputs-in-the-state is on and the input is not controllable, so this refusal should \
+         not have fired: a mununu defect — please report it with the BTOR2 and the formula \
+         (mununu#1121)."
+            .to_string()
+    }
+}
+
 #[inline]
 fn oom<T, E: std::fmt::Debug>(r: Result<T, E>) -> Result<T, String> {
     r.map_err(|_e| {
-        "symbolic bit-blaster: BDD arena exhausted (OxiDD OutOfMemory) — abstained on the NODE \
-         budget; the cone does not compress to a tractable BDD; raise MUNUNU_BDD_ARENA_NODES, or \
-         use `--engine explicit`"
-            .to_string()
+        format!(
+            "symbolic bit-blaster: BDD arena exhausted (OxiDD OutOfMemory) — abstained on the \
+             NODE budget; the cone does not compress to a tractable BDD; raise \
+             MUNUNU_BDD_ARENA_NODES, {OTHER_ENGINE_REMEDY}"
+        )
     })
 }
 
@@ -4136,7 +4173,7 @@ impl BddBitBlaster {
             return Err(format!(
                 "abstained on the NODE budget ({live} of {} live BDD nodes) — the property's cone \
                  does not compress to a tractable BDD; raise MUNUNU_BDD_ARENA_NODES (which scales \
-                 the node budget), or use `--engine explicit`",
+                 the node budget), {OTHER_ENGINE_REMEDY}",
                 self.node_budget
             ));
         }
@@ -5172,7 +5209,7 @@ impl ExactModel {
                 return Err(format!(
                     "symbolic bit-blaster: abstained on the ITERATION budget ({n} > {}) — the \
                      property's reachable diameter is too large to bit-blast; raise \
-                     MUNUNU_BDD_ITER_BUDGET, or use `--engine explicit`",
+                     MUNUNU_BDD_ITER_BUDGET, {OTHER_ENGINE_REMEDY}",
                     self.iter_budget
                 ));
             }
@@ -5253,7 +5290,7 @@ impl ExactModel {
                      the ARENA rather than the design. The bail POINT is DETERMINISTIC (same step \
                      on any machine); only its duration varies. Raise MUNUNU_BDD_FIXPOINT_NODES / \
                      MUNUNU_BDD_FIXPOINT_ITERS (and MUNUNU_BDD_ARENA_NODES past the arena-derived \
-                     ceiling), or use `--engine explicit`",
+                     ceiling), {OTHER_ENGINE_REMEDY}",
                     self.node_soft, self.iter_soft
                 ));
             }
@@ -5273,7 +5310,7 @@ impl ExactModel {
                      NON-DETERMINISTIC — a faster or less busy machine may DECIDE the same \
                      property from the same command, and this ⊥ is not distinguishable in the \
                      report from a real one. Unset MUNUNU_BDD_TIME_BUDGET_MS for the deterministic \
-                     fixpoint NODE budget instead, or use `--engine explicit`"
+                     fixpoint NODE budget instead, {OTHER_ENGINE_REMEDY}"
                 ));
             }
             // mununu#816 — a fixpoint step is ONE uninterruptible OxiDD apply (oxidd 0.13 has no
@@ -6318,12 +6355,11 @@ fn verdict_with_witness_catching(
         exact_symbolic_verdict_with_witness_inner(btor2_content, formula, controllable, opts)
     }))
     .unwrap_or_else(|_| {
-        Err(
+        Err(format!(
             "symbolic bit-blaster: BDD arena overflow while building the transition relation \
              — abstained on the NODE budget (the cone does not compress to a tractable BDD); \
-             raise MUNUNU_BDD_ARENA_NODES, or use `--engine explicit`"
-                .to_string(),
-        )
+             raise MUNUNU_BDD_ARENA_NODES, {OTHER_ENGINE_REMEDY}"
+        ))
     })
 }
 
@@ -6519,9 +6555,10 @@ impl ExactSession {
         let mut lifted_sampled: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut prepare_notes: Vec<String> = Vec::new();
+        let input_state_opted_out = !opts.input_state_enabled
+            || crate::adapter::env_var::read("MUNUNU_NO_INPUT_STATE").is_some();
         let file = {
-            let opt_out = !opts.input_state_enabled
-                || crate::adapter::env_var::read("MUNUNU_NO_INPUT_STATE").is_some();
+            let opt_out = input_state_opted_out;
             match (!opt_out)
                 .then(|| {
                     crate::adapter::btor2::input_state::lift_atom_inputs_excluding(
@@ -6603,9 +6640,10 @@ impl ExactSession {
         // SVA `input |=> next-state` shape — the antecedent input and the transition input
         // are the same physical signal in the same cycle, but the engine treats them as
         // independent, yielding a spurious verdict. Refuse to decide rather than emit an
-        // unsound Holds/Violated. The default `explicit` cube engine handles input-antecedent
-        // properties correctly (it shadow-registers the antecedent). Proper fix in this
-        // engine = guarded modalities / an antecedent shadow register — deferred (deep).
+        // unsound Holds/Violated. Inputs-in-the-state (mununu#677) is the fix in this engine:
+        // a named uncontrollable input the atoms read is sampled into the state above, so the
+        // guards here fire only with the lift opted out, for a controllable input on the game
+        // verbs, or on a defect — `input_atom_remedy` names each (mununu#1121).
         let input_leaf_names: std::collections::HashSet<String> = sts
             .leaf_cells()
             .map_err(|e| format!("exact MC: {e}"))?
@@ -6616,10 +6654,10 @@ impl ExactSession {
         if let Some(bad) = seed_regs.iter().find(|r| input_leaf_names.contains(*r)) {
             return Err(format!(
                 "exact MC: atom references primary input `{bad}`. The exact-symbolic engine \
-             leaves inputs free/quantified, so a temporal property that pins an input \
-             (e.g. an SVA `input |=> next-state` lift) decouples the antecedent from its \
-             consequent and would report an unsound verdict. Use the default `explicit` \
-             cube engine, or lift the antecedent through a shadow register."
+                 leaves inputs free/quantified, so a temporal property that pins an input \
+                 (e.g. an SVA `input |=> next-state` lift) decouples the antecedent from its \
+                 consequent and would report an unsound verdict. {}",
+                input_atom_remedy(input_state_opted_out, controllable.contains(bad))
             ));
         }
 
@@ -6693,13 +6731,8 @@ impl ExactSession {
                     .join(", ");
                 // mununu#661 — on the two-player path the env inputs were lifted above, so what is
                 // left here is a CONTROLLABLE input (or an anonymous one): say so.
-                let ctrl_note = if derived_inputs.iter().any(|n| controllable.contains(n)) {
-                    " A controllable input stays a per-step choice — folded into the state it would \
-                 be fixed before the controller moves, which changes who wins — so an atom over \
-                 it is refused on the game verbs."
-                } else {
-                    ""
-                };
+                let controllable_input = derived_inputs.iter().any(|n| controllable.contains(n));
+                let remedy = input_atom_remedy(input_state_opted_out, controllable_input);
                 let anon_note = if anonymous_cuts.is_empty() {
                     String::new()
                 } else {
@@ -6713,10 +6746,9 @@ impl ExactSession {
                 };
                 return Err(format!(
                     "exact MC: atom `{reg}` is combinationally driven by primary input(s) {inputs}. \
-                 The exact-symbolic engine leaves inputs free/quantified, so a temporal property \
-                 whose antecedent depends on inputs decouples the antecedent from its consequent \
-                 and would report an unsound verdict. Use the default `explicit` cube engine, or \
-                 lift the antecedent through a shadow register.{ctrl_note}{anon_note}"
+                     The exact-symbolic engine leaves inputs free/quantified, so a temporal \
+                     property whose antecedent depends on inputs decouples the antecedent from \
+                     its consequent and would report an unsound verdict. {remedy}{anon_note}"
                 ));
             }
         }
@@ -7205,18 +7237,18 @@ pub fn exact_ladder_with(
     let start = Instant::now();
     let remaining = |b: Option<Duration>| b.map(|b| b.saturating_sub(start.elapsed()));
     let mut notes: Vec<String> = Vec::new();
-    let prepare =
-        |o: &ExactSymbolicOptions| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let prepare = |o: &ExactSymbolicOptions| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ExactSession::prepare(btor2_content, formula, controllable, o)
         }))
         .unwrap_or_else(|_| {
-            Err("symbolic bit-blaster: BDD arena overflow while building the transition relation \
+            Err(format!(
+                "symbolic bit-blaster: BDD arena overflow while building the transition relation \
                  — abstained on the NODE budget (the cone does not compress to a tractable BDD); \
-                 raise MUNUNU_BDD_ARENA_NODES, or use `--engine explicit`"
-                .to_string())
+                 raise MUNUNU_BDD_ARENA_NODES, {OTHER_ENGINE_REMEDY}"
+            ))
         })
-        };
+    };
     let mut budget = budget;
     let mut session = match prepare(opts) {
         Ok(s) => s,
@@ -13134,6 +13166,81 @@ mod tests {
         );
     }
 
+    /// mununu#1121 (U2.2) — an exact-engine abstention names the other engines by the verbs
+    /// that reach them. "or use `--engine explicit`" was a flag of another verb for the `btor2
+    /// verify` and `sv verify-*` readers; the SAT members run beside this engine there.
+    #[test]
+    fn x1121_an_exact_abstention_names_the_other_engines_by_the_verbs_that_take_them() {
+        let text = oom::<(), ()>(Err(())).expect_err("an arena exhaustion is an abstention");
+        assert!(
+            text.contains("MUNUNU_BDD_ARENA_NODES"),
+            "the knob first: {text}"
+        );
+        assert!(
+            text.contains("`--engine cube` on `btor2 verify`")
+                && text.contains("`--engine explicit` on `sv verify-auto`"),
+            "each flag with the verbs that take it: {text}"
+        );
+        assert!(
+            text.contains("BMC, k-induction, IC3") && text.contains("one member's abstention"),
+            "the SAT members and what this abstention is to the row: {text}"
+        );
+        assert!(
+            !text.ends_with("use `--engine explicit`"),
+            "no bare flag of another verb: {text}"
+        );
+    }
+
+    /// mununu#1121 (U2.3) — the input-atom refusal names the cause the run can change: with
+    /// inputs-in-the-state opted out, the opt-out itself. The antecedent shadow register the
+    /// old text offered was retired by mununu#677 and could not be followed.
+    #[test]
+    fn x1121_the_input_atom_refusal_names_the_opt_out_that_caused_it() {
+        const ANONYMOUS_CUT: &str = "1 sort bitvec 1\n2 input 1 in_valid\n3 state 1\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+        let presented =
+            crate::mu_calculus::parser::parse("nu Y.(((accept == 0) || [] (v == 1)) && [] Y)")
+                .expect("parse");
+        let err = exact_symbolic_verdict_with_options(
+            ANONYMOUS_CUT,
+            &presented,
+            &ExactSymbolicOptions {
+                input_state_enabled: false,
+                ..Default::default()
+            },
+        )
+        .expect_err("opted out, the atom over the input is refused");
+        assert!(
+            err.contains("drop `--no-input-state`") && err.contains("`input_state: false`"),
+            "the opt-out is the remedy, on both surfaces: {err}"
+        );
+        assert!(
+            !err.contains("shadow register"),
+            "a retired mechanism: {err}"
+        );
+    }
+
+    /// mununu#1121 (U2.3) — the seam: the three causes and their remedies.
+    #[test]
+    fn x1121_the_input_atom_remedy_follows_the_cause() {
+        let opted_out = input_atom_remedy(true, false);
+        assert!(opted_out.contains("`--no-input-state`"), "{opted_out}");
+        let game = input_atom_remedy(false, true);
+        assert!(
+            game.contains("controllable input") && game.contains("register the input drives"),
+            "{game}"
+        );
+        let defect = input_atom_remedy(false, false);
+        assert!(
+            defect.contains("mununu defect") && defect.contains("please report"),
+            "{defect}"
+        );
+        for r in [&opted_out, &game, &defect] {
+            assert!(!r.contains("shadow"), "{r}");
+        }
+    }
+
     /// mununu#1086 — with inputs-in-the-state OFF the anonymous cut net cannot be sampled, so an
     /// atom whose cone reaches it is REFUSED like one reaching a named cut (the #476 guard), and
     /// the refusal names the cell by its synthesized name and says what it is.
@@ -15107,7 +15214,8 @@ mod tests {
             .expect_err("an atom over the controllable input is refused");
         assert!(
             err.contains("combinationally driven by primary input")
-                && err.contains("controllable input stays"),
+                && err.contains("controllable input is not sampled on the game verbs")
+                && err.contains("register the input drives"),
             "{err}"
         );
     }
