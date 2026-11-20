@@ -37,6 +37,9 @@ pub enum ApiError {
     },
     /// Not found (404)
     NotFound { resource: String },
+    /// mununu#1147 — the server is running its limit of tool-running requests; `max` is the
+    /// limit (`mununu server --max-tool-requests`).
+    Busy { max: usize },
 }
 
 impl fmt::Display for ApiError {
@@ -45,6 +48,7 @@ impl fmt::Display for ApiError {
             ApiError::BadRequest { message, .. } => write!(f, "Bad request: {}", message),
             ApiError::Internal { message, .. } => write!(f, "Internal error: {}", message),
             ApiError::NotFound { resource } => write!(f, "Resource not found: {}", resource),
+            ApiError::Busy { max } => write!(f, "Server busy: {}", busy_message(*max)),
         }
     }
 }
@@ -84,6 +88,12 @@ impl ApiError {
                 format!("Resource not found: {}", resource),
                 None,
             ),
+            ApiError::Busy { max } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVER_BUSY",
+                busy_message(*max),
+                None,
+            ),
         };
         (
             status,
@@ -107,6 +117,14 @@ impl IntoResponse for ApiError {
 }
 
 /// API result type
+/// mununu#1147 — the 503's text: the limit, and the one flag that raises it.
+fn busy_message(max: usize) -> String {
+    format!(
+        "the server is running its limit of {max} tool-running request(s); retry when one \
+         finishes, or start `mununu server --max-tool-requests <n>` with a larger limit"
+    )
+}
+
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Convert string errors to ApiError

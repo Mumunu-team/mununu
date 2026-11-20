@@ -10,6 +10,20 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 ---
 
+### `abandoned-request-work`
+
+**What varies:** the work an HTTP request started that can outlive its response once the request times out or the client goes away: the handler body on the blocking pool, the engine threads and per-property budgets under it, the subprocess children, a thread with no budget poll, an MCP tool call.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| the blocking handler body | runs under a run budget whose cancel flag goes up when the future is dropped | mununu#1147 |
+| engine threads and per-property budgets under it | children of the request's budget (`Budget::child(&current(), …)`), so they see the cancel; the fault-reach handler's budget made a child | mununu#1147 |
+| a subprocess child (yosys, btormc, Pono, rIC3) | the helper polls the flag and kills the child, returning `Interrupted` with the reason | mununu#1147 |
+| a thread with no budget poll inside one operation (an OxiDD apply) | open: stops between stages only (mununu#996) | — |
+| an MCP tool call past `--request-timeout` | open: the call errors and the engine thread finishes on its own | — |
+
+**Enumerating test:** none in one table; `x1147_a_dropped_request_cancels_its_blocking_work` and `x1147_a_cancelled_run_budget_kills_the_child_it_waits_on` pin the first and third cases.
+
 ### `free-cell-in-atom-cone`
 
 **What varies:** the kind of free (next-less) cell a property atom's cone of influence reaches in the lifted BTOR2. The exact engine must read such a cell once per step; read once in the atom and again in the transition, the verdict is neither the may- nor the must-reading of the design.
@@ -76,9 +90,11 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | Case | Behaviour | Landed |
 |---|---|---|
 | a path separator or a Unix path in an expected string | build the expected path with the same join the code uses | mununu#999, mununu#1153 |
-| a wall-clock bound on a race between portfolio members | assert the verdict on every host and pin the member at a seam | mununu#998, mununu#1054, mununu#1065 |
+| which portfolio members had reported when the first verdict stopped the rest | assert the verdict on every host; pin the attribution with scripted members, whose finish order the test fixes | mununu#1054, mununu#1065 |
+| a wall-clock bound standing in for "did not wait for the stuck member" or "started no member" | the stub never returns (so an outcome at all is the claim), or every stub would decide (so an outcome that credits none is) | mununu#996, mununu#726, mununu#816 |
+| a process state read right after an asynchronous kill | poll up to a grace that still separates a leak from a slow death | mununu#998 |
 
-**Enumerating test:** none; the OS matrix on `main` is the detector.
+**Enumerating test:** for the portfolio rows, `adapter::reach_portfolio::tests::scripted` (the full driver) and `scripted::owned` (the owned-only driver): every member's runner is a parameter of the drivers (`Runners`), each test fixes which members have reported when the first verdict lands, and the whole outcome is compared. The detectors that race the real engines stay (`portfolio_decides_reachable_without_subprocess`, `owned_only_excludes_external_engines_on_small_counter`), and the OS matrix on `main` remains the detector for the class. The portfolio rows were checked against the four red OS-matrix runs of 2026-11-14 to 11-17 (five tests, each an assertion on which members had finished).
 
 ### `prose-anchored-test`
 

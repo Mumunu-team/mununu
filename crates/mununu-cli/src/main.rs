@@ -642,6 +642,16 @@ enum Commands {
         /// the API's. The directory must exist and hold an `index.html`.
         #[arg(long = "ui-dir", value_name = "DIR")]
         ui_dir: Option<PathBuf>,
+        /// The HTTP request timeout, in seconds (default 30). A request past it is answered
+        /// 408 `REQUEST_TIMEOUT` and the work it started — the lift's tools, the engines — is
+        /// cancelled (mununu#1147).
+        #[arg(long = "request-timeout", value_name = "SECONDS", default_value_t = 30)]
+        request_timeout: u64,
+        /// How many tool-running requests (`/api/v1/sv/*`, `/api/v1/btor2/*`, `/api/v1/verify`,
+        /// `/api/v1/codesign/verify`, `/api/v1/memory/check`) may run at once (default 4). One
+        /// more is refused at once with 503 `SERVER_BUSY`, naming this flag.
+        #[arg(long = "max-tool-requests", value_name = "N", default_value_t = 4)]
+        max_tool_requests: usize,
     },
     /// Start the Model Context Protocol server: the tools `context_eval` (CTXDSL sources in,
     /// verdicts out — the request and response of `POST /api/v1/context/eval`, byte for byte)
@@ -3643,7 +3653,13 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Verify(args) => handle_verify(args),
         Commands::Memory { command } => handle_memory(*command),
         Commands::Licence { command } => handle_licence(command),
-        Commands::Server { addr, ui_dir, .. } => {
+        Commands::Server {
+            addr,
+            ui_dir,
+            request_timeout,
+            max_tool_requests,
+            ..
+        } => {
             use std::net::SocketAddr;
             let addr: SocketAddr = addr
                 .parse()
@@ -3663,8 +3679,16 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 .enable_all()
                 .build()
                 .map_err(|e| format!("Failed to create runtime: {}", e))?;
-            rt.block_on(mununu_core::api::start_server(addr, ui_dir.as_deref()))
-                .map_err(|e| format!("Server error: {}", e))?;
+            let limits = mununu_core::api::server::ApiLimits {
+                request_timeout: std::time::Duration::from_secs(request_timeout),
+                max_tool_requests,
+            };
+            rt.block_on(mununu_core::api::start_server(
+                addr,
+                ui_dir.as_deref(),
+                limits,
+            ))
+            .map_err(|e| format!("Server error: {}", e))?;
             Ok(())
         }
         Commands::Mcp {

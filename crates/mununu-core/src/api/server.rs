@@ -20,11 +20,34 @@ use tower_http::{
 use crate::api::handlers;
 
 /// Start the HTTP server
+/// mununu#1147 — the server's two limits: the request timeout (a request past it is answered
+/// 408 and the work it started is cancelled through its run budget) and how many tool-running
+/// requests may run at once (one more is refused 503 `SERVER_BUSY`, naming the flag).
+#[derive(Clone, Debug)]
+pub struct ApiLimits {
+    pub request_timeout: Duration,
+    pub max_tool_requests: usize,
+}
+
+/// The defaults of `mununu server --request-timeout` / `--max-tool-requests`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_MAX_TOOL_REQUESTS: usize = 4;
+
+impl Default for ApiLimits {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            max_tool_requests: DEFAULT_MAX_TOOL_REQUESTS,
+        }
+    }
+}
+
 pub async fn start_server(
     addr: SocketAddr,
     ui_dir: Option<&std::path::Path>,
+    limits: ApiLimits,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let app = create_router_with_ui(ui_dir);
+    let app = create_router_with_ui_and_limits(ui_dir, &limits);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("Server listening on {}", addr);
@@ -39,7 +62,14 @@ pub async fn start_server(
 /// port, no CORS story). Paths that are not files fall back to `index.html` so the client-side
 /// router works on a reload; `/api/v1/*` is matched first and stays the API's.
 pub fn create_router_with_ui(ui_dir: Option<&std::path::Path>) -> Router {
-    let app = create_router();
+    create_router_with_ui_and_limits(ui_dir, &ApiLimits::default())
+}
+
+pub fn create_router_with_ui_and_limits(
+    ui_dir: Option<&std::path::Path>,
+    limits: &ApiLimits,
+) -> Router {
+    let app = create_router_with_limits(limits);
     match ui_dir {
         None => app,
         Some(dir) => {
@@ -105,6 +135,122 @@ fn port_ok(tail: &str) -> bool {
 /// Create the API router. Public so the MCP seam test can drive a route in-process
 /// (`tower::ServiceExt::oneshot`) and compare its body with the tool's `structuredContent`.
 pub fn create_router() -> Router {
+    create_router_with_limits(&ApiLimits::default())
+}
+
+/// mununu#1147 — the tool-running routes: the lift and the engines run behind these, so they
+/// are the ones the concurrency limit covers. The CTXDSL routes (parse, realize, evaluate in
+/// process) are not limited.
+fn tool_routes() -> Router {
+    Router::new()
+        .route(
+            "/api/v1/codesign/verify",
+            post(handlers::codesign_verify_handler),
+        )
+        .route("/api/v1/verify", post(handlers::verify_project_handler))
+        .route("/api/v1/btor2/cegar", post(handlers::btor2_cegar_handler))
+        // Multi-engine safety portfolio — decide `bad`-reachability across every
+        // sound engine (exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3), merged under the
+        // differential-oracle discipline. Surface peer of the CLI `mununu btor2 verify`.
+        .route("/api/v1/btor2/verify", post(handlers::btor2_verify_handler))
+        // P2 response-liveness at scale — AG(request → AF grant) via liveness-to-
+        // safety + the portfolio. Surface peer of the CLI `mununu btor2 verify-liveness`.
+        .route(
+            "/api/v1/btor2/verify-liveness",
+            post(handlers::btor2_verify_liveness_handler),
+        )
+        // P2 recoverability — AG EF good ("can it always get back?"), the branching
+        // property SVA cannot state. Surface peer of `mununu btor2 verify-recoverability`.
+        .route(
+            "/api/v1/btor2/verify-recoverability",
+            post(handlers::btor2_verify_recoverability_handler),
+        )
+        // P1 auto FSM-recoverability scan — discover FSM-like state registers and
+        // decide recoverability of each to its idle/reset value with no user input.
+        // Surface peer of the CLI `mununu btor2 check-fsm`.
+        .route(
+            "/api/v1/btor2/check-fsm",
+            post(handlers::btor2_check_fsm_handler),
+        )
+        // P2.5-F two-player game — decide controllable-reachability of `good` under an input partition
+        // (controller vs environment) and synthesize the winner's strategy (controller Mealy strategy or
+        // environment counterstrategy). Surface peer of the CLI `mununu btor2 game`.
+        .route("/api/v1/btor2/game", post(handlers::btor2_game_handler))
+        // cegar-extraction Stage 2 — SV-direct CEGAR one-call (sv2v +
+        // Yosys → flattened BTOR2 → cegar_refine_loop). Surface peer of
+        // the CLI `mununu sv cegar`; lets the extraction-tab SV workflow
+        // run CEGAR without a manual emit-btor2-per-module step.
+        .route("/api/v1/sv/cegar", post(handlers::sv_cegar_handler))
+        // Track-H SVA front-end (XL.6a) — slang extracts + translates the
+        // design's SVA to mu-calculus. Surface peer of `mununu sv extract-sva`
+        // and the extraction-tab SVA panel. No verification (that is verify-auto).
+        .route(
+            "/api/v1/sv/extract-sva",
+            post(handlers::sv_extract_sva_handler),
+        )
+        // Track-H no-sidecar verify (XL.6b) — extract SVA + verify each property
+        // against the model. Surface peer of `mununu sv verify-auto` + the UI panel.
+        .route(
+            "/api/v1/sv/verify-auto",
+            post(handlers::sv_verify_auto_handler),
+        )
+        // Roadmap J2 — the same body, the plan only: per-property cost estimates, no engine.
+        .route("/api/v1/sv/plan", post(handlers::sv_plan_handler))
+        // SV-direct verbs — lift SV (yosys-slang) then decide a property in one call
+        // (response-liveness / recoverability). Surface peers of the CLI
+        // `sv verify-liveness` / `verify-recoverability`. (`/sv/verify-bad` was removed,
+        // mununu#1074: the lift reads the design with the assertions ignored, so no
+        // SystemVerilog input could reach the portfolio through it.)
+        .route(
+            "/api/v1/sv/verify-liveness",
+            post(handlers::sv_verify_liveness_handler),
+        )
+        .route(
+            "/api/v1/sv/verify-recoverability",
+            post(handlers::sv_verify_recoverability_handler),
+        )
+        // SV-direct auto FSM illegal-encoding scan (lift + scan, one call). Surface peer
+        // of the CLI `sv check-fsm` and the BTOR2-direct `/api/v1/btor2/check-fsm`.
+        .route("/api/v1/sv/check-fsm", post(handlers::sv_check_fsm_handler))
+        // SV-direct partial-write preflight (mununu#469) — lift + report the
+        // registers the verifier can't keep faithfully, no model checking. Surface
+        // peer of the CLI `sv lint`.
+        .route("/api/v1/sv/lint", post(handlers::sv_lint_handler))
+        .route("/api/v1/sv/cdc-lint", post(handlers::sv_cdc_lint_handler))
+        // SV-direct mutation (#468) — apply a named structural fault + re-verify to
+        // check the property verdicts flip (property adequacy), or list targets.
+        // Surface peer of the CLI `sv mutate`.
+        .route("/api/v1/sv/mutate", post(handlers::sv_mutate_handler))
+        .route("/api/v1/memory/check", post(handlers::memory_check_handler))
+}
+
+/// mununu#1147 — at most `max` requests inside `router` at once, server-wide (one semaphore
+/// across its routes); one more is refused at once with 503 `SERVER_BUSY` naming the flag,
+/// never queued behind a lift.
+fn limit_tool_routes(router: Router, max: usize) -> Router {
+    use axum::error_handling::HandleErrorLayer;
+    router.layer(
+        ServiceBuilder::new()
+            .layer(HandleErrorLayer::new(
+                move |err: axum::BoxError| async move { tool_limit_error(max, err) },
+            ))
+            .layer(tower::load_shed::LoadShedLayer::new())
+            .layer(tower::limit::GlobalConcurrencyLimitLayer::new(max.max(1))),
+    )
+}
+
+fn tool_limit_error(max: usize, err: axum::BoxError) -> crate::api::error::ApiError {
+    if err.is::<tower::load_shed::error::Overloaded>() {
+        crate::api::error::ApiError::Busy { max }
+    } else {
+        crate::api::error::ApiError::Internal {
+            message: format!("the tool-request limit layer failed: {err}"),
+            source: None,
+        }
+    }
+}
+
+pub fn create_router_with_limits(limits: &ApiLimits) -> Router {
     // mununu#934 — the API has no authentication and runs tools, so a browser page from any
     // origin must not be able to read its answers: loopback origins (the UI dev server, a local
     // client) and the deployment's `[server] cors_origins` only. The bundle's UI is same-origin
@@ -189,85 +335,6 @@ pub fn create_router() -> Router {
             post(handlers::contract_review_handler),
         )
         .route(
-            "/api/v1/codesign/verify",
-            post(handlers::codesign_verify_handler),
-        )
-        .route("/api/v1/verify", post(handlers::verify_project_handler))
-        .route("/api/v1/btor2/cegar", post(handlers::btor2_cegar_handler))
-        // Multi-engine safety portfolio — decide `bad`-reachability across every
-        // sound engine (exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3), merged under the
-        // differential-oracle discipline. Surface peer of the CLI `mununu btor2 verify`.
-        .route("/api/v1/btor2/verify", post(handlers::btor2_verify_handler))
-        // P2 response-liveness at scale — AG(request → AF grant) via liveness-to-
-        // safety + the portfolio. Surface peer of the CLI `mununu btor2 verify-liveness`.
-        .route(
-            "/api/v1/btor2/verify-liveness",
-            post(handlers::btor2_verify_liveness_handler),
-        )
-        // P2 recoverability — AG EF good ("can it always get back?"), the branching
-        // property SVA cannot state. Surface peer of `mununu btor2 verify-recoverability`.
-        .route(
-            "/api/v1/btor2/verify-recoverability",
-            post(handlers::btor2_verify_recoverability_handler),
-        )
-        // P1 auto FSM-recoverability scan — discover FSM-like state registers and
-        // decide recoverability of each to its idle/reset value with no user input.
-        // Surface peer of the CLI `mununu btor2 check-fsm`.
-        .route(
-            "/api/v1/btor2/check-fsm",
-            post(handlers::btor2_check_fsm_handler),
-        )
-        // P2.5-F two-player game — decide controllable-reachability of `good` under an input partition
-        // (controller vs environment) and synthesize the winner's strategy (controller Mealy strategy or
-        // environment counterstrategy). Surface peer of the CLI `mununu btor2 game`.
-        .route("/api/v1/btor2/game", post(handlers::btor2_game_handler))
-        // cegar-extraction Stage 2 — SV-direct CEGAR one-call (sv2v +
-        // Yosys → flattened BTOR2 → cegar_refine_loop). Surface peer of
-        // the CLI `mununu sv cegar`; lets the extraction-tab SV workflow
-        // run CEGAR without a manual emit-btor2-per-module step.
-        .route("/api/v1/sv/cegar", post(handlers::sv_cegar_handler))
-        // Track-H SVA front-end (XL.6a) — slang extracts + translates the
-        // design's SVA to mu-calculus. Surface peer of `mununu sv extract-sva`
-        // and the extraction-tab SVA panel. No verification (that is verify-auto).
-        .route(
-            "/api/v1/sv/extract-sva",
-            post(handlers::sv_extract_sva_handler),
-        )
-        // Track-H no-sidecar verify (XL.6b) — extract SVA + verify each property
-        // against the model. Surface peer of `mununu sv verify-auto` + the UI panel.
-        .route(
-            "/api/v1/sv/verify-auto",
-            post(handlers::sv_verify_auto_handler),
-        )
-        // Roadmap J2 — the same body, the plan only: per-property cost estimates, no engine.
-        .route("/api/v1/sv/plan", post(handlers::sv_plan_handler))
-        // SV-direct verbs — lift SV (yosys-slang) then decide a property in one call
-        // (response-liveness / recoverability). Surface peers of the CLI
-        // `sv verify-liveness` / `verify-recoverability`. (`/sv/verify-bad` was removed,
-        // mununu#1074: the lift reads the design with the assertions ignored, so no
-        // SystemVerilog input could reach the portfolio through it.)
-        .route(
-            "/api/v1/sv/verify-liveness",
-            post(handlers::sv_verify_liveness_handler),
-        )
-        .route(
-            "/api/v1/sv/verify-recoverability",
-            post(handlers::sv_verify_recoverability_handler),
-        )
-        // SV-direct auto FSM illegal-encoding scan (lift + scan, one call). Surface peer
-        // of the CLI `sv check-fsm` and the BTOR2-direct `/api/v1/btor2/check-fsm`.
-        .route("/api/v1/sv/check-fsm", post(handlers::sv_check_fsm_handler))
-        // SV-direct partial-write preflight (mununu#469) — lift + report the
-        // registers the verifier can't keep faithfully, no model checking. Surface
-        // peer of the CLI `sv lint`.
-        .route("/api/v1/sv/lint", post(handlers::sv_lint_handler))
-        .route("/api/v1/sv/cdc-lint", post(handlers::sv_cdc_lint_handler))
-        // SV-direct mutation (#468) — apply a named structural fault + re-verify to
-        // check the property verdicts flip (property adequacy), or list targets.
-        // Surface peer of the CLI `sv mutate`.
-        .route("/api/v1/sv/mutate", post(handlers::sv_mutate_handler))
-        .route("/api/v1/memory/check", post(handlers::memory_check_handler))
-        .route(
             "/api/v1/codesign/reconcile-labels",
             post(handlers::codesign_reconcile_labels_handler),
         )
@@ -275,14 +342,17 @@ pub fn create_router() -> Router {
             "/api/v1/codesign/emit-chaotic-stub",
             post(handlers::codesign_emit_chaotic_stub_handler),
         )
+        .merge(limit_tool_routes(tool_routes(), limits.max_tool_requests))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
                 .layer(cors)
                 .layer(DefaultBodyLimit::max(1_048_576))
+                // mununu#1147 — past the timeout the handler future is dropped, which cancels
+                // the budget its blocking body runs under (`handlers::blocking`).
                 .layer(TimeoutLayer::with_status_code(
                     axum::http::StatusCode::REQUEST_TIMEOUT,
-                    Duration::from_secs(30),
+                    limits.request_timeout,
                 )),
         )
 }
@@ -454,5 +524,72 @@ mod ui_dir_tests {
         assert!(l("http://[::1]") && l("http://[::1]:5173"));
         assert!(!l("http://localhost:") && !l("http://localhost:80x") && !l("ftp://localhost"));
         assert!(!l("http://[::2]:80") && !l("http://[::1]x") && !l("http://localhost.example"));
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    //! mununu#1147 — the tool-request limit refuses by name and is server-wide.
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get(app: axum::Router, uri: &str) -> (StatusCode, String) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Two routes under one limit of 1: the second concurrent request, on the other route, is
+    /// refused 503 `SERVER_BUSY` naming `--max-tool-requests`; once the first finishes a new
+    /// one is served.
+    #[tokio::test]
+    async fn x1147_past_the_tool_request_limit_a_request_is_refused_by_name() {
+        let slow = || async {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            "ok"
+        };
+        let app = super::limit_tool_routes(
+            axum::Router::new()
+                .route("/a", axum::routing::get(slow))
+                .route("/b", axum::routing::get(slow)),
+            1,
+        );
+        let first = tokio::spawn(get(app.clone(), "/a"));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (status, body) = get(app.clone(), "/b").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains("SERVER_BUSY") && body.contains("--max-tool-requests"),
+            "{body}"
+        );
+        let (status, body) = first.await.expect("joined");
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
+        let (status, _) = get(app, "/b").await;
+        assert_eq!(status, StatusCode::OK, "served once the first finished");
+    }
+
+    /// The real router carries the limit on the tool routes and the timeout from the limits:
+    /// a non-tool route is not refused while a tool route is busy (the CTXDSL routes are not
+    /// limited), and the health route answers under a tiny timeout.
+    #[tokio::test]
+    async fn the_limit_covers_the_tool_routes_only() {
+        let app = super::create_router_with_limits(&super::ApiLimits {
+            request_timeout: std::time::Duration::from_secs(5),
+            max_tool_requests: 1,
+        });
+        let (status, _) = get(app, "/api/v1/health").await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
