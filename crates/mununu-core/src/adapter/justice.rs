@@ -437,6 +437,94 @@ fn l2s_undecided_note(
 }
 
 /// Decide every justice set of `btor2` under `opts` (see [`JusticeOptions`]).
+/// mununu#1140 — how long the parallel merge keeps reading the other rungs after the first
+/// definite verdict, so a co-completing rung that disagrees is seen (the reach portfolio's
+/// straggler grace, the same value).
+const RUNG_STRAGGLER_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// One rung's answer on the parallel channel: who, and either `(verdict, stage, notes-or-by)` or
+/// the reason it abstained.
+type RungResult = (
+    &'static str,
+    Result<(PropertyVerdict, &'static str, Vec<String>), String>,
+);
+
+/// What the parallel merge decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RungMerge {
+    verdict: PropertyVerdict,
+    decided_by: Vec<String>,
+    notes: Vec<String>,
+}
+
+impl RungMerge {
+    fn undecided() -> Self {
+        Self {
+            verdict: PropertyVerdict::Unknown,
+            decided_by: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+}
+
+/// mununu#1140 — the merge of the parallel rungs. The first definite verdict is taken, then the
+/// channel is read for [`RUNG_STRAGGLER_GRACE`] more so a rung that finishes just after it is
+/// seen: a second definite verdict that disagrees (HOLDS against VIOLATED) withholds BOTH as
+/// `Unknown` with a contradiction note — one rung is unsound, and the row must not ship
+/// whichever arrived first. An abstention is a note; a rung that agrees is recorded as such.
+fn merge_parallel_rungs(
+    rx: &std::sync::mpsc::Receiver<RungResult>,
+    mut pending: usize,
+    grace: std::time::Duration,
+) -> RungMerge {
+    let mut merged = RungMerge::undecided();
+    let mut first: Option<(&'static str, PropertyVerdict)> = None;
+    let mut grace_end: Option<std::time::Instant> = None;
+    while pending > 0 {
+        let next = match grace_end {
+            None => rx.recv().ok(),
+            Some(end) => rx
+                .recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
+                .ok(),
+        };
+        let Some((who, r)) = next else { break };
+        pending -= 1;
+        match r {
+            Ok((v, stage, mut by)) => match first {
+                None => {
+                    first = Some((who, v));
+                    merged.verdict = v;
+                    if who == "exact" {
+                        // `by` is the exact rung's notes (its cone size, …).
+                        merged.decided_by.push(stage.to_string());
+                        merged.notes.append(&mut by);
+                    } else {
+                        merged.decided_by.append(&mut by);
+                    }
+                    grace_end = Some(std::time::Instant::now() + grace);
+                }
+                Some((first_who, first_v)) if first_v != v => {
+                    // SOUNDNESS: two definite verdicts that cannot both be right; neither ships.
+                    merged.verdict = PropertyVerdict::Unknown;
+                    merged.notes.push(crate::adapter::owner::mununu_defect(&format!(
+                        "🔴 SOUNDNESS ALARM — the liveness rungs contradict each other: `{first_who}` \
+                         says {} and `{who}` says {}; both verdicts are withheld and retrying is \
+                         not the answer",
+                        first_v.as_str(),
+                        v.as_str()
+                    )));
+                }
+                Some(_) => merged.notes.push(format!(
+                    "{who} also decided {} (agrees with the first rung)",
+                    v.as_str()
+                )),
+            },
+            Err(e) => merged.notes.push(format!("{who}: {e}")),
+        }
+    }
+    merged
+}
+
 pub fn verify_justice_with(
     btor2: &str,
     opts: &JusticeOptions,
@@ -499,13 +587,19 @@ pub fn verify_justice_with(
                 // passed. Scoped threads make "returned" mean "nothing left running".
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let (tx, rx) = std::sync::mpsc::channel();
+                // mununu#1140 — the caller's run budget is thread-local: captured here and
+                // entered first in each rung thread, so the rungs' `Budget::child` calls bound
+                // themselves by it (and see its cancellation) instead of an unbounded default.
+                let outer_budget = crate::adapter::run_budget::current();
                 std::thread::scope(|scope| {
                     let exact_h = {
                         let tx = tx.clone();
                         let cancel = cancel.clone();
                         let (named, lits) = (&named, &lits);
+                        let outer_budget = &outer_budget;
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
+                            let _budget = crate::adapter::run_budget::enter(outer_budget);
                             let r = exact_rung(named, lits, total, Some(cancel));
                             let _ = tx.send(("exact", r));
                         })
@@ -514,8 +608,10 @@ pub fn verify_justice_with(
                         let tx = tx.clone();
                         let cancel = &*cancel;
                         let (named, lits) = (&named, &lits);
+                        let outer_budget = &outer_budget;
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
+                            let _budget = crate::adapter::run_budget::enter(outer_budget);
                             // mununu#986: without the exact member, which cannot be
                             // cancelled. The exact rung races beside this one with the whole
                             // budget, so that member's question is still asked; with it in, a
@@ -539,8 +635,10 @@ pub fn verify_justice_with(
                         let tx = tx.clone();
                         let cancel = &*cancel;
                         let named = &named;
+                        let outer_budget = &outer_budget;
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
+                            let _budget = crate::adapter::run_budget::enter(outer_budget);
                             // mununu#986: rIC3 as one `-e ic3` process, not its ~11-solver
                             // portfolio, which starved the l2s rung racing beside it.
                             let (v, by, n) = kliveness_rung(
@@ -559,31 +657,21 @@ pub fn verify_justice_with(
                         })
                     };
                     drop(tx);
-                    let mut pending = 3;
-                    while pending > 0 {
-                        let Ok((who, r)) = rx.recv() else { break };
-                        pending -= 1;
-                        match r {
-                            Ok((v, stage, mut by)) => {
-                                verdict = v;
-                                if who == "exact" {
-                                    // `by` is the exact rung's notes (its cone size, …).
-                                    decided_by.push(stage.to_string());
-                                    notes.append(&mut by);
-                                } else {
-                                    decided_by.append(&mut by);
-                                }
-                                break;
-                            }
-                            Err(e) => notes.push(format!("{who}: {e}")),
-                        }
-                    }
+                    let merged = merge_parallel_rungs(&rx, 3, RUNG_STRAGGLER_GRACE);
+                    verdict = merged.verdict;
+                    decided_by.append(&mut merged.decided_by.clone());
+                    notes.extend(merged.notes);
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     // Joined explicitly so a panicking rung abstains (as the detached thread
-                    // did) instead of re-panicking out of the scope.
-                    let _ = exact_h.join();
-                    let _ = l2s_h.join();
-                    let _ = kl_h.join();
+                    // did) instead of re-panicking out of the scope — and says so
+                    // (mununu#1140): a row left `unknown` by a dead rung is not a search result.
+                    for (who, h) in [("exact", exact_h), ("l2s", l2s_h), ("kliveness", kl_h)] {
+                        if h.join().is_err() {
+                            notes.push(crate::adapter::owner::mununu_defect(&format!(
+                                "{who}: ended without a result (it panicked)"
+                            )));
+                        }
+                    }
                 });
             }
             JusticeRung::Both => {
@@ -662,6 +750,72 @@ pub fn verify_justice_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1140 — two rungs that disagree within the grace merge to `Unknown` with a
+    /// contradiction note; two that agree keep the first verdict and note the second; an
+    /// abstention is a note. The seam the parallel ladder reaches its verdict through.
+    #[test]
+    fn x1140_disagreeing_parallel_rungs_merge_to_unknown_with_a_contradiction_note() {
+        let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
+        tx.send((
+            "exact",
+            Ok((PropertyVerdict::Holds, "exact", vec!["cone 5b".into()])),
+        ))
+        .unwrap();
+        tx.send((
+            "l2s",
+            Ok((PropertyVerdict::Violated, "l2s", vec!["l2s:native".into()])),
+        ))
+        .unwrap();
+        tx.send(("kliveness", Err("no bound within the slice".into())))
+            .unwrap();
+        drop(tx);
+        let m = merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250));
+        assert_eq!(m.verdict, PropertyVerdict::Unknown, "{m:?}");
+        assert!(
+            m.notes
+                .iter()
+                .any(|n| n.contains("contradict") && n.contains("`exact`") && n.contains("`l2s`")),
+            "{:?}",
+            m.notes
+        );
+        assert!(
+            m.notes.iter().any(|n| n.contains("kliveness: no bound")),
+            "{:?}",
+            m.notes
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
+        tx.send((
+            "l2s",
+            Ok((PropertyVerdict::Violated, "l2s", vec!["l2s:native".into()])),
+        ))
+        .unwrap();
+        tx.send(("exact", Ok((PropertyVerdict::Violated, "exact", vec![]))))
+            .unwrap();
+        drop(tx);
+        let m = merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250));
+        assert_eq!(m.verdict, PropertyVerdict::Violated);
+        assert_eq!(m.decided_by, vec!["l2s:native".to_string()]);
+        assert!(
+            m.notes.iter().any(|n| n.contains("exact also decided")),
+            "{:?}",
+            m.notes
+        );
+
+        // A single definite verdict with the channel closing: taken, no wait past the close.
+        let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
+        tx.send(("exact", Ok((PropertyVerdict::Holds, "exact", vec![]))))
+            .unwrap();
+        drop(tx);
+        let started = std::time::Instant::now();
+        let m = merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250));
+        assert_eq!(m.verdict, PropertyVerdict::Holds);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "the closed channel ends the drain"
+        );
+    }
 
     /// The #985 tier's shrunk design: `r0` runs 0, 0, 1, 1, … on every path, so the constraint
     /// `r0 == 0` fails at step 2 and no infinite path satisfies the constraints: the justice

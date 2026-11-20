@@ -761,7 +761,7 @@ fn run_controllability_aware_lift(
         .map(|w| w.message.clone())
         .collect();
     warnings.push(format!(
-        "[R.6.7 V.6 controllability-aware lift] cubes={}, mayonly={}, sharp={}, hyper_must={}, env_labels={}, ctrl_labels={}",
+        "controllability-aware lift: cubes={}, may-only={}, definite={}, hyper-must={}, env_labels={}, ctrl_labels={}",
         lift_result.cube_count, mayonly, sharp, hyper_must, env_label_count, ctrl_label_count
     ));
 
@@ -771,8 +771,8 @@ fn run_controllability_aware_lift(
     // existing graph view degrade gracefully (the warnings list +
     // numeric fields are the canonical summary).
     let summary_ctxdsl = format!(
-        "// R.6.7 / V.6 controllability-aware lift summary.\n\
-         // cubes={}\n// mayonly={}\n// sharp={}\n// hyper_must={}\n\
+        "// controllability-aware lift summary.\n\
+         // cubes={}\n// may-only={}\n// definite={}\n// hyper-must={}\n\
          // env_labels={} (Uncontrollable)\n// ctrl_labels={} (Controllable)\n\
          // Full CTXDSL emit from the lifted KMTS is a follow-up;\n\
          // the structured lift fields (state_count, warnings) are\n\
@@ -2702,7 +2702,7 @@ fn run_symbolic_cegar_response(
         lazy_lift_pending: false,
         approximant_reuse_enabled: false,
         warnings: vec![
-            "engine=symbolic (R-F5): BDD relation + WP refinement, no per-cube-pair SMT; \
+            "engine=symbolic: BDD relation + WP refinement, no per-cube-pair SMT; \
              simple + non-derived-compound predicates + bare []/<> fragment only"
                 .to_string(),
         ],
@@ -4986,15 +4986,14 @@ members = ["x"]
         // The handler returns a summary CTXDSL + the lift's
         // [R.6.7 V.6 ...] summary line in `warnings`.
         assert!(
-            out.ctxdsl
-                .contains("R.6.7 / V.6 controllability-aware lift summary"),
+            out.ctxdsl.contains("controllability-aware lift summary"),
             "summary CTXDSL must contain the V.6 marker; got: {}",
             out.ctxdsl
         );
         assert!(
             out.warnings
                 .iter()
-                .any(|w| w.contains("[R.6.7 V.6 controllability-aware lift]")),
+                .any(|w| w.contains("controllability-aware lift: cubes=")),
             "warnings must contain the lift summary line; got: {:?}",
             out.warnings
         );
@@ -5459,8 +5458,7 @@ endmodule
             .expect("legacy BTOR2 import should succeed");
         // Legacy BTOR2 adapter output — no V.6 summary marker.
         assert!(
-            !out.ctxdsl
-                .contains("R.6.7 / V.6 controllability-aware lift summary"),
+            !out.ctxdsl.contains("controllability-aware lift summary"),
             "V.6 marker must NOT appear when controllable_inputs is empty; got: {}",
             out.ctxdsl
         );

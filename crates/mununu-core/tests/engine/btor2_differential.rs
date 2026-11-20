@@ -426,6 +426,44 @@ pub fn design_strategy() -> BoxedStrategy<Design> {
         .boxed()
 }
 
+/// mununu#1141 — the plain draw with a `constraint` on every design (the low bit of a random
+/// expression over the registers and inputs). The exact engine refuses a constrained design, so
+/// the SAT tiers compare it against native BMC + k-induction instead. A constraint that no run
+/// satisfies makes every `bad` unreachable, which both engines must agree on too.
+pub fn constrained_design_strategy() -> BoxedStrategy<Design> {
+    (1u32..=3, 1usize..=3, 0usize..=2)
+        .prop_flat_map(|(width, regs, inputs)| {
+            let nexts = proptest::collection::vec(expr_strategy(regs, inputs, width, 3), regs);
+            let inits = proptest::collection::vec(0..(1u64 << width), regs);
+            let bad = prop_oneof![
+                (0..regs, 0..(1u64 << width)).prop_map(|(i, c)| (Some((i, c)), None)),
+                expr_strategy(regs, inputs, width, 2).prop_map(|e| (None, Some(e))),
+            ];
+            let constraint = expr_strategy(regs, inputs, width, 2);
+            (
+                Just(width),
+                Just(regs),
+                Just(inputs),
+                nexts,
+                inits,
+                bad,
+                constraint,
+            )
+        })
+        .prop_map(|(width, regs, inputs, nexts, inits, bad, constraint)| {
+            let mut em = Emitter::body(width, regs, inputs, &inits, &nexts);
+            let c = em.low_bit(&constraint);
+            em.push(format!("constraint {c}"));
+            let bad_nid = em.literal(&Literal::from(bad));
+            em.push(format!("bad {bad_nid}"));
+            Design {
+                text: em.lines.join("\n") + "\n",
+                oracle: None,
+            }
+        })
+        .boxed()
+}
+
 /// mununu#959 — an expression that may read the memory: a plain expression, a read, or a read
 /// combined with one.
 fn mem_expr_strategy(regs: usize, inputs: usize, width: u32) -> BoxedStrategy<Expr> {
@@ -1033,7 +1071,100 @@ fn the_conjunction_rewrite_collapses_an_alternating_set() {
 
 use mununu_core::adapter::btor2::ast::Node;
 use mununu_core::adapter::btor2::bit_blast::simulate_one_step_observe;
-use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome, sat_bmc};
+use mununu_core::adapter::btor2::sat_bmc::{DynamicStep, SatBmcOptions, SatBmcOutcome, sat_bmc};
+
+/// mununu#1141 — the oracle for a constrained draw: native BMC + k-induction to 16 (the exact
+/// engine refuses a `constraint`). `None` when it abstained.
+fn native_oracle(text: &str) -> Option<bool> {
+    let file = parser::parse(text).expect("parses");
+    match decide_bad_safety(&file, 16, Some(5_000))
+        .unwrap_or_else(|e| panic!("native engine refused a generated design: {e:?}\n{text}"))
+    {
+        SafetyVerdict::Violated { .. } => Some(true),
+        SafetyVerdict::Safe { .. } => Some(false),
+        _ => None,
+    }
+}
+
+/// mununu#1141 — the shipped dynamic step against native BMC + k-induction on constrained
+/// draws: a `Violated` must be a real constrained path (the replay checks every frame's
+/// constraint), and "no counterexample through 16" must not contradict a native counterexample.
+/// On the parent the step asserted every window frame's constraint as a unit clause, so a bad
+/// whose continuations later break the constraint was refuted — the kind of row only a
+/// constrained draw can catch.
+#[test]
+fn sat_bmc_dynamic_step_agrees_with_native_bmc_on_constrained_draws() {
+    let config = ProptestConfig {
+        cases: cases_from_env().max(96),
+        rng_seed: tier_seed(),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = std::cell::Cell::new((0usize, 0usize, 0usize));
+    runner
+        .run(&constrained_design_strategy(), |d| {
+            let file = parser::parse(&d.text).expect("parses");
+            let oracle = native_oracle(&d.text);
+            let out = sat_bmc(
+                &file,
+                &SatBmcOptions {
+                    max_depth: 16,
+                    dynamic_step: Some(DynamicStep::default()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("sat-bmc refused a generated design: {e}\n{}", d.text));
+            let (mut v, mut n, mut u) = tally.get();
+            match out {
+                SatBmcOutcome::Violated {
+                    depth,
+                    initial,
+                    inputs,
+                    ..
+                } => {
+                    prop_assert!(
+                        oracle != Some(false),
+                        "sat-bmc: violated at {depth}, native: safe\n{}",
+                        d.text
+                    );
+                    if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
+                        prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
+                    }
+                    v += 1;
+                }
+                SatBmcOutcome::NoCounterexample { depth } => {
+                    prop_assert!(
+                        oracle != Some(true),
+                        "sat-bmc: none to depth {depth}, native: reachable within 16\n{}",
+                        d.text
+                    );
+                    if oracle.is_some() {
+                        n += 1;
+                    } else {
+                        u += 1;
+                    }
+                }
+                SatBmcOutcome::Stopped { depth, reason } => {
+                    prop_assert!(
+                        false,
+                        "sat-bmc stopped at {depth} with no budget set: {reason}"
+                    );
+                }
+            }
+            tally.set((v, n, u));
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (v, n, u) = tally.get();
+    eprintln!(
+        "sat_bmc constrained tier: {v} violated (replayed), {n} unreachable (native agrees), {u} native-undecided"
+    );
+    assert!(
+        v > 0 && n > 0,
+        "the draw must exercise both answers: {v} violated, {n} unreachable"
+    );
+}
 
 fn state_bits(file: &Btor2File) -> u32 {
     file.lines
@@ -1111,53 +1242,58 @@ fn sat_bmc_equals_the_exact_engine_and_its_traces_replay() {
             let file = parser::parse(&d.text).expect("parses");
             let exact = exact_bad_reachable(&d.text).expect("exact decides");
             let bound = 1u32 << state_bits(&file);
-            let out = sat_bmc(
-                &file,
-                &SatBmcOptions {
-                    max_depth: bound,
-                    ..Default::default()
-                },
-            )
-            .unwrap_or_else(|e| panic!("sat-bmc refused a generated design: {e}\n{}", d.text));
-            let (mut v, mut n) = tally.get();
-            match out {
-                SatBmcOutcome::Violated {
-                    depth,
-                    initial,
-                    inputs,
-                    ..
-                } => {
-                    prop_assert!(
-                        exact,
-                        "sat-bmc: violated at {depth}, exact: unreachable\n{}",
-                        d.text
-                    );
-                    if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
-                        prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
+            // mununu#1141 — the member runs the default dynamic step; the tier used to run
+            // only the fixed step, so the shipped search had no cheap-tier oracle.
+            for dynamic_step in [None, Some(DynamicStep::default())] {
+                let out = sat_bmc(
+                    &file,
+                    &SatBmcOptions {
+                        max_depth: bound,
+                        dynamic_step,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|e| panic!("sat-bmc refused a generated design: {e}\n{}", d.text));
+                let (mut v, mut n) = tally.get();
+                match out {
+                    SatBmcOutcome::Violated {
+                        depth,
+                        initial,
+                        inputs,
+                        ..
+                    } => {
+                        prop_assert!(
+                            exact,
+                            "sat-bmc: violated at {depth}, exact: unreachable\n{}",
+                            d.text
+                        );
+                        if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
+                            prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
+                        }
+                        v += 1;
                     }
-                    v += 1;
+                    SatBmcOutcome::NoCounterexample { .. } => {
+                        prop_assert!(
+                            !exact,
+                            "sat-bmc: none to depth {bound}, exact: reachable\n{}",
+                            d.text
+                        );
+                        n += 1;
+                    }
+                    SatBmcOutcome::Stopped { depth, reason } => {
+                        prop_assert!(
+                            false,
+                            "sat-bmc stopped at {depth} with no budget set: {reason}"
+                        );
+                    }
                 }
-                SatBmcOutcome::NoCounterexample { .. } => {
-                    prop_assert!(
-                        !exact,
-                        "sat-bmc: none to depth {bound}, exact: reachable\n{}",
-                        d.text
-                    );
-                    n += 1;
-                }
-                SatBmcOutcome::Stopped { depth, reason } => {
-                    prop_assert!(
-                        false,
-                        "sat-bmc stopped at {depth} with no budget set: {reason}"
-                    );
-                }
+                tally.set((v, n));
             }
-            tally.set((v, n));
             Ok(())
         })
         .unwrap_or_else(|e| panic!("{e}"));
     let (v, n) = tally.get();
-    eprintln!("sat_bmc tier: {v} violated (replayed), {n} unreachable");
+    eprintln!("sat_bmc tier (fixed + dynamic step): {v} violated (replayed), {n} unreachable");
     assert!(
         v > 0 && n > 0,
         "the draw must exercise both answers: {v} violated, {n} unreachable"
@@ -1245,6 +1381,66 @@ fn ic3_equals_the_exact_engine_and_its_traces_replay() {
         .unwrap_or_else(|e| panic!("{e}"));
     let (v, n) = tally.get();
     eprintln!("ic3 tier: {v} violated (replayed), {n} safe (certified)");
+    assert!(
+        v > 0 && n > 0,
+        "the draw must exercise both answers: {v} violated, {n} safe"
+    );
+}
+
+/// mununu#1141 — IC3 against native BMC + k-induction on constrained draws (the #1056 / #1072
+/// class was found on HWMCC, never by a tier): a `Safe` must not contradict a native
+/// counterexample, a `Violated` must not contradict a native proof and must replay under the
+/// constraints.
+#[test]
+fn ic3_agrees_with_native_bmc_on_constrained_draws() {
+    let config = ProptestConfig {
+        cases: cases_from_env().max(96),
+        rng_seed: tier_seed(),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = std::cell::Cell::new((0usize, 0usize));
+    runner
+        .run(&constrained_design_strategy(), |d| {
+            let file = parser::parse(&d.text).expect("parses");
+            let oracle = native_oracle(&d.text);
+            let out = ic3(&file, &Ic3Options::default())
+                .unwrap_or_else(|e| panic!("ic3 refused a generated design: {e}\n{}", d.text));
+            let (mut v, mut n) = tally.get();
+            match out {
+                Ic3Outcome::Violated {
+                    depth,
+                    initial,
+                    inputs,
+                    ..
+                } => {
+                    prop_assert!(
+                        oracle != Some(false),
+                        "ic3: violated at {depth}, native: safe\n{}",
+                        d.text
+                    );
+                    if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
+                        prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
+                    }
+                    v += 1;
+                }
+                Ic3Outcome::Safe { .. } => {
+                    prop_assert!(
+                        oracle != Some(true),
+                        "ic3: safe, native: reachable within 16\n{}",
+                        d.text
+                    );
+                    n += 1;
+                }
+                _ => {}
+            }
+            tally.set((v, n));
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (v, n) = tally.get();
+    eprintln!("ic3 constrained tier: {v} violated (replayed), {n} safe (certified)");
     assert!(
         v > 0 && n > 0,
         "the draw must exercise both answers: {v} violated, {n} safe"

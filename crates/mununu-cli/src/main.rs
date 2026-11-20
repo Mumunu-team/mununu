@@ -5757,7 +5757,7 @@ fn run_symbolic_cegar_cli(
                 .map_err(|e| format!("serialize summary: {e}"))?
         );
     } else {
-        println!("Symbolic predicate-cube CEGAR (R-F5)");
+        println!("Symbolic predicate-cube CEGAR");
         println!("  fixture:              {fixture_label}");
         println!("  engine:               symbolic (BDD relation, no per-cube-pair SMT)");
         println!("  refinement iterations:{refinements}");
@@ -6687,7 +6687,9 @@ fn codesign_verify(args: CodesignVerifyArgs) -> Result<(), String> {
     // user's formula. Reuses the same path the `context eval`
     // subcommand uses.
     let context_doc = parse_context_doc(&composed.ctxdsl).map_err(|e| {
-        format!("composed CTXDSL failed to parse (this is a bug in codesign::compose): {e}")
+        mununu_core::adapter::owner::mununu_defect(&format!(
+            "the composed CTXDSL does not parse ({e})"
+        ))
     })?;
     let sidecar_docs: Vec<ContextDoc> = Vec::new();
     let realized = realize_documents(&context_doc, &sidecar_docs)?;

@@ -620,7 +620,7 @@ impl BddBitBlaster {
         if total_bits > cap {
             return Err(format!(
                 "symbolic bit-blaster: design has {total_bits} register+input bits \
-                 (> {cap}) after cone-of-influence restriction (R-F5.6) — abstained on the BIT CAP; \
+                 (> {cap}) after cone-of-influence restriction — abstained on the BIT CAP; \
                  the property's cone is too wide to bit-blast; raise MUNUNU_BDD_MAX_BITS, \
                  {OTHER_ENGINE_REMEDY}"
             ));
@@ -15355,7 +15355,7 @@ mod lever_gating_tests {
         let cases = [
             (
                 "symbolic bit-blaster: cone of 300 register+input bits (> 192) after \
-                 cone-of-influence restriction (R-F5.6) — abstained on the BIT CAP",
+                 cone-of-influence restriction — abstained on the BIT CAP",
                 AbstentionKind::BitCap,
             ),
             (
