@@ -549,9 +549,10 @@ pub fn accepted_safety_shapes() -> String {
 
 /// What the user can do about a `safety-shape-not-reducible`, and who owns the rest. A new
 /// reducer is not something a property can supply.
-pub const SHAPE_REMEDY: &str = "Write the assertion in one of those forms; a bigger budget cannot \
-     help. An assertion already in one of them that still declines is a mununu limitation, not \
-     something the property can change — please report the assertion (mununu#1121).";
+pub const SHAPE_REMEDY: &str = "Write the assertion in one of those forms — the fix is the \
+     property's shape, not a bigger budget. An assertion already in one of them that still \
+     declines is a mununu limitation, not something the property can change — please report the \
+     assertion (mununu#1121).";
 
 /// The compound-shape emission chain: `AG(boolean)` first, then `AG(A → AX C)`.
 ///
