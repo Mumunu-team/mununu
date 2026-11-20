@@ -9,7 +9,9 @@
 - **A temp directory with a space no longer breaks the lift (mununu#1138).** yosys now runs inside the lift's staging directory and the script names the staged files relative to it; before, the absolute staging path was written unquoted into the script and `read_slang` split it at the space (yosys's `File … not found`, naming half a path). Quoting could not fix it: `read_slang` takes a quoted token verbatim (measured on the issue).
 - **A new variable, `MUNUNU_LIFT_STAGING_ROOT`:** where the lift stages its per-call directory (default the system temp dir, `TMPDIR`). For a small or `noexec` `/tmp`.
 - **The lift cache's format is 4:** entries written by earlier builds miss once and are rebuilt; nothing to migrate.
-- **Refusal text:** the include-directory refusal now says why (slang takes `-I<dir>` as one unquoted token); a per-module output directory with a `"` or a line break is refused, naming `--output-dir` on `sv emit-btor2-per-module`. A per-module output directory with a space is accepted (the path is quoted to `write_btor`).
+- **Caller include directories are validated in the form the script writes — the canonical path.** A relative `-I rtl/inc` run from a working directory whose path has a space is refused now (naming the canonical path and the limit: slang takes `-I<dir>` as one unquoted token); before, it passed validation and split in the script. Move or rename the directory.
+- **`sv emit-btor2-per-module`:** a relative `--output-dir build/`, and the default (the source's parent), resolve against mununu's working directory as before — made absolute before the script, since yosys now runs inside the staging directory. A directory with a space is accepted (quoted to `write_btor`); one with a `"` or a line break is refused, naming `--output-dir`.
+- **`MUNUNU_LIFT_STAGING_ROOT` and `TMPDIR` may be relative:** the staging root is made absolute.
 - **No verdict or JSON shape change.** `diagnostics.blackboxed_modules[].source_file` still carries the user's invocation path for the primary source (the rewrite matches the staged name yosys now reports).
 
 ## Per consumer
@@ -35,4 +37,5 @@
 
 ## Not covered here
 
-- A caller include directory with whitespace is still refused: slang receives it as one unquoted token and there is no form that carries it. Move or rename the directory.
+- A caller include directory with whitespace (in its canonical path) is still refused: slang receives it as one unquoted token and there is no form that carries it. Move or rename the directory.
+- The Verilator counterexample replay still stages under the system temp dir directly: mununu#1176.

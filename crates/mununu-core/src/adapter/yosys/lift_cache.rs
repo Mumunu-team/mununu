@@ -502,10 +502,9 @@ mod tests {
             },
             attempt: AttemptManifest {
                 frontend: "slang",
-                script:
-                    "read_slang --ignore-assertions --ignore-timing /P/work.sv; hierarchy -auto-top"
-                        .into(),
-                cwd_in_staging_dir: false,
+                script: "read_slang --ignore-assertions --ignore-timing -I. work.sv; hierarchy -auto-top"
+                    .into(),
+                cwd_in_staging_dir: true,
                 plugin: None,
                 sv2v: None,
             },
@@ -588,7 +587,7 @@ mod tests {
         m.attempt.script.push_str("; opt_clean");
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
-        m.attempt.cwd_in_staging_dir = true;
+        m.attempt.cwd_in_staging_dir = false;
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
         m.attempt.plugin = Some(ToolIdentity {

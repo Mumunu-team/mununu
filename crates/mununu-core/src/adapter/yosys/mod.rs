@@ -142,10 +142,9 @@ pub struct YosysOptions {
     pub params: Vec<(String, String)>,
     /// Optional original path of the primary SV source. Used only to
     /// rewrite the `source_file` field of any auto-emitted black-box
-    /// sidecar (Document B task B3) — yosys sees the SV through a
-    /// per-call tempdir, so without this hint the sidecars would point
-    /// at `/tmp/.../work.sv`. The user expects the path of the file
-    /// they actually invoked mununu on.
+    /// sidecar (Document B task B3) — yosys sees the SV as `work.sv` inside a per-call staging
+    /// directory (mununu#1138), so without this hint the sidecars would name `work.sv`. The user
+    /// expects the path of the file they actually invoked mununu on.
     pub primary_source_path: Option<String>,
     /// The RTL front end: [`SvFrontend::Slang`] (the default and the only product front
     /// end); [`SvFrontend::Verilog`] is the dev-only oracle of `test_support` builds.
@@ -654,6 +653,14 @@ fn yosys_path_arg(path: &Path) -> String {
     }
 }
 
+/// mununu#1138 — a caller include directory as the script writes it: canonical (absolute), since
+/// yosys runs inside the staging directory; a directory that cannot be canonicalised (it does
+/// not exist yet, or a placeholder) is written as given. [`validate_lift_inputs`] checks this
+/// same form.
+fn script_include_dir(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+}
+
 struct LiftPlan {
     /// The staged primary, `<dir>/work.sv`.
     primary: PathBuf,
@@ -663,8 +670,9 @@ struct LiftPlan {
     /// The oracle's sv2v pass (`test_support` only; the product plans none).
     #[cfg(feature = "test_support")]
     sv2v: Option<Sv2vPlan>,
-    /// yosys runs inside the staging directory when it reads sv2v's output by its bare name
-    /// (mununu#806) — the names it mints depend on it. `None` on the product lift.
+    /// yosys runs inside the staging directory (mununu#1138 for every lift; the oracle did so
+    /// since mununu#806, when it reads sv2v's output by its bare name — the names it mints
+    /// depend on it). Always `Some`; the field stays an `Option` for the manifest's rule.
     yosys_cwd: Option<PathBuf>,
     /// The `-m` argument loading a slang plugin, when `MUNUNU_YOSYS_SLANG_PLUGIN` names one.
     plugin: Option<String>,
@@ -747,7 +755,7 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
     let script_include_dirs: Vec<PathBuf> = yopts
         .extra_include_dirs
         .iter()
-        .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+        .map(|d| script_include_dir(d))
         .collect();
     let slang_read = || {
         (
@@ -2041,11 +2049,15 @@ fn translate_sv_per_module_impl(
         Vec::new()
     };
 
-    // Choose output directory for the per-submodule BTOR2 files.
+    // Choose output directory for the per-submodule BTOR2 files. mununu#1138 — yosys runs
+    // inside the staging directory, so a caller's directory is made absolute first (a relative
+    // `--output-dir build/`, or the CLI's default — the source's parent, empty for a bare file
+    // name — used to resolve against mununu's working directory because yosys ran there).
     let out_dir = match &yopts.per_module_output_dir {
         Some(dir) => {
-            std::fs::create_dir_all(dir).map_err(io_err)?;
-            dir.clone()
+            let abs = per_module_output_dir(dir)?;
+            std::fs::create_dir_all(&abs).map_err(io_err)?;
+            abs
         }
         None => tmp.path().to_path_buf(),
     };
@@ -3372,8 +3384,12 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
     // path with whitespace, a quote or a `;` would split or end the command, and is refused
     // with the path quoted back rather than failing inside yosys with no reason. The staged
     // paths never carry one: yosys runs inside the staging directory.
+    // Validated in the form the script writes: the canonical path (yosys runs inside the
+    // staging directory, so a relative include directory is made absolute first — a relative
+    // `-I rtl/inc` under a working directory with a space is therefore refused here, where it
+    // used to pass and split in the script).
     for dir in &yopts.extra_include_dirs {
-        let text = dir.display().to_string();
+        let text = script_include_dir(dir).display().to_string();
         if text.is_empty()
             || text
                 .chars()
@@ -3387,20 +3403,32 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
             ));
         }
     }
-    // mununu#1138 — the per-module output directory is written as a quoted whole token to
-    // `write_btor`, which carries a space but not a quote or a line break.
-    if let Some(dir) = &yopts.per_module_output_dir {
-        let text = dir.display().to_string();
-        if text.is_empty() || text.chars().any(|c| matches!(c, '"' | '\n' | '\r')) {
-            return Err(refuse_lift_input(
-                "the per-module output directory",
-                &text,
-                "a path without a `\"` or a line break",
-                "move or rename the directory (`--output-dir` on `sv emit-btor2-per-module`)",
-            ));
-        }
-    }
     Ok(())
+}
+
+/// mununu#1138 — the per-module output directory as yosys must see it from inside the staging
+/// directory: absolute (a relative one resolves against mununu's working directory, an empty
+/// one — the CLI's default for a bare file name — is that directory), and refused for a `"` or
+/// a line break, which the quoted `write_btor` argument cannot carry. Pure: the caller creates it.
+fn per_module_output_dir(dir: &Path) -> Result<PathBuf, AdapterError> {
+    let cwd = || std::env::current_dir().map_err(io_err);
+    let abs = if dir.as_os_str().is_empty() {
+        cwd()?
+    } else if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        cwd()?.join(dir)
+    };
+    let text = abs.display().to_string();
+    if text.chars().any(|c| matches!(c, '"' | '\n' | '\r')) {
+        return Err(refuse_lift_input(
+            "the per-module output directory",
+            &text,
+            "a path without a `\"` or a line break",
+            "move or rename the directory (`--output-dir` on `sv emit-btor2-per-module`)",
+        ));
+    }
+    Ok(abs)
 }
 
 /// Emit the explicit control-slice cut-point pass: `cutpoint w:<sig> …; ` (empty
@@ -3636,10 +3664,17 @@ impl TempDir {
         let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
         // mununu#1138 — `MUNUNU_LIFT_STAGING_ROOT` moves the staging off the system temp dir
         // (a small or `noexec` `/tmp`); the default is the system's.
-        let mut base = crate::adapter::env_var::read("MUNUNU_LIFT_STAGING_ROOT")
+        let root = crate::adapter::env_var::read("MUNUNU_LIFT_STAGING_ROOT")
             .filter(|v| !v.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
+        // Absolute, whatever the variable or `TMPDIR` said: yosys runs inside the staging
+        // directory and its `-l` log and the outputs are named by their absolute paths.
+        let mut base = if root.is_absolute() {
+            root
+        } else {
+            std::env::current_dir().map_err(io_err)?.join(root)
+        };
         base.push(format!("{prefix}-{pid}-{tid_digits}-{seq}-{nanos}"));
         std::fs::create_dir_all(&base).map_err(io_err)?;
         let keep = crate::adapter::env_var::read("MUNUNU_KEEP_YOSYS_TMP")
@@ -5144,6 +5179,68 @@ endmodule
         assert_eq!(plan.btor_path, dir.join("design.btor"));
         assert_eq!(plan.hier_json_path, dir.join("hier.json"));
         assert_eq!(plan.staged[0].0, dir.join("work.sv"));
+    }
+
+    /// mununu#1138 — the per-module output directory reaches `write_btor` absolute whatever the
+    /// caller gave (yosys runs inside the staging directory): a relative directory resolves
+    /// against mununu's working directory, the CLI's empty default is that directory, an
+    /// absolute one is kept, and a `"` is refused by name.
+    #[test]
+    fn x1138_a_relative_per_module_output_directory_is_made_absolute_for_the_script() {
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            per_module_output_dir(Path::new("build/sub")).expect("relative"),
+            cwd.join("build/sub")
+        );
+        assert_eq!(per_module_output_dir(Path::new("")).expect("empty"), cwd);
+        let abs = cwd.join("out dir");
+        assert_eq!(per_module_output_dir(&abs).expect("absolute"), abs);
+        let script = build_per_module_script(
+            &[PathBuf::from("work.sv")],
+            "m",
+            &per_module_output_dir(Path::new("build"))
+                .expect("relative")
+                .join("m.btor2"),
+            false,
+            false,
+            &Default::default(),
+            &[],
+        );
+        assert!(
+            script.contains(&format!(
+                "write_btor {}",
+                cwd.join("build/m.btor2").display()
+            )),
+            "{script}"
+        );
+        let err = per_module_output_dir(Path::new("a\"b")).expect_err("a quote");
+        assert!(
+            err.message.contains("per-module output directory"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("--output-dir"), "{}", err.message);
+    }
+
+    /// mununu#1138 — an include directory is validated in the form the script writes: a
+    /// relative directory under a working directory with a space is refused (it would be
+    /// written canonical and split), and the refusal quotes that form.
+    #[test]
+    fn an_include_directory_is_validated_as_the_script_writes_it() {
+        let root = std::env::temp_dir().join(format!("mununu inc {}", std::process::id()));
+        std::fs::create_dir_all(root.join("inc")).expect("mkdir");
+        let yopts = YosysOptions {
+            extra_include_dirs: vec![root.join("inc")],
+            ..Default::default()
+        };
+        let err = validate_lift_inputs(&yopts).expect_err("a space in the canonical path");
+        assert!(err.message.contains("include directory"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(&root);
+        let fine = YosysOptions {
+            extra_include_dirs: vec![PathBuf::from("/no/such/dir")],
+            ..Default::default()
+        };
+        validate_lift_inputs(&fine).expect("a path that cannot be canonicalised is taken as given");
     }
 
     /// mununu#1138 — a yosys-native command (`write_btor`, `write_json`, `read_verilog`) takes

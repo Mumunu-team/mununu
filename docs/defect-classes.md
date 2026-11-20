@@ -40,17 +40,19 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 ### `lift-script-path`
 
-**What varies:** the paths the lift writes into the one yosys `-p` script, and whether the command that reads each strips quotes (yosys's own commands do; `read_slang` takes the token verbatim, measured 2026-11-20 on mununu#1138).
+**What varies:** the paths the lift writes into the one yosys `-p` script (and the `-l` log argument), and whether the command that reads each strips quotes (yosys's own commands do; `read_slang` takes the token verbatim, measured 2026-11-20 on mununu#1138). Since mununu#1138 yosys runs inside the staging directory, so every path the caller supplies must be absolute by the time it is written.
 
 | Case | Behaviour | Landed |
 |---|---|---|
 | a staged source, the staging directory's `-I`, the `write_json` / `write_btor` outputs | relative to the staging directory yosys runs in; the temp dir's path never reaches the script | mununu#1138 |
-| a caller include directory (`read_slang -I`, verbatim) | refused for whitespace, quotes or `;`, the limit named | mununu#1133, mununu#1138 |
-| a persisted per-module output path (`write_btor`) | quoted as one token; refused for a `"` or a line break | mununu#1138 |
+| a caller include directory (`read_slang -I`, verbatim) | written canonical (absolute); validated in that same form, refused for whitespace, quotes or `;`, the limit named — a relative directory under a working directory with a space is refused where it used to split | mununu#1133, mununu#1138 |
+| a per-module output path (`write_btor`, the per-module log) | made absolute (a relative `--output-dir`, or the CLI's default: the source's parent, empty for a bare file name, resolve against mununu's working directory); quoted as one token when it carries a space; refused for a `"` or a line break | mununu#1138 |
 | the dev-only oracle's `read_verilog` sources | quoted as one token | mununu#1138 |
-| a top module, parameter or signal name | validated against its grammar before the script | mununu#1133 |
+| a top module, parameter or signal name | validated against its grammar before the script, on the single-design lift (`plan_lift`) | mununu#1133 |
+| the staging root itself (`MUNUNU_LIFT_STAGING_ROOT`, `TMPDIR`) | made absolute before the per-call directory is created | mununu#1138 |
+| the Verilator replay's harness directory (`temp_dir()`, `make -C`) | open: a temp path with a space most likely breaks the replay | mununu#1176 |
 
-**Enumerating test:** none in one table; `x1138_the_lift_script_names_staged_files_relative_to_the_staging_directory` and `a_yosys_native_path_with_a_space_is_quoted_as_one_token` pin the first, third and fourth cases.
+**Enumerating test:** none in one table; `x1138_the_lift_script_names_staged_files_relative_to_the_staging_directory`, `x1138_a_relative_per_module_output_directory_is_made_absolute_for_the_script`, `an_include_directory_is_validated_as_the_script_writes_it` and `a_yosys_native_path_with_a_space_is_quoted_as_one_token` pin the first four rows and the sixth.
 
 ### `member-stop-reason`
 
