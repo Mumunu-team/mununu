@@ -1958,7 +1958,7 @@ mod tests {
     }
 
     /// A mux with the reset mux's SHAPE on an ordinary signal is a function, not an alias: the
-    /// EmTech `sensor_monitor` output `ch_trip = link_fault ? 3'b111 : data_q` (over the pinned
+    /// the tutorial's `sensor_monitor` output `ch_trip = link_fault ? 3'b111 : data_q` (over the pinned
     /// reset mux of `data_q`) was bound to `data_q`, and `link_fault |-> ch_trip == 7` came back
     /// VIOLATED although every engine finds `link_fault && ch_trip != 7` unreachable.
     #[test]
