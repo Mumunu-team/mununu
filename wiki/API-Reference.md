@@ -12,7 +12,7 @@ Start the server with:
 mununu serve --bind 127.0.0.1:3000
 ```
 
-All request and response bodies use `application/json`. CORS is open by default (`Access-Control-Allow-Origin: *`). The request body limit is 1 MiB and the request timeout is 30 s.
+All request and response bodies use `application/json`. CORS is open by default (`Access-Control-Allow-Origin: *`). The request body limit is 1 MiB. The request timeout is 30 s by default (`mununu server --request-timeout <seconds>`); a request past it is answered 408 and the work it started (the lift's tools, the engines) is cancelled. At most 4 tool-running requests (`/api/v1/sv/*`, `/api/v1/btor2/*`, `/api/v1/verify`, `/api/v1/codesign/verify`, `/api/v1/memory/check`) run at once by default (`--max-tool-requests <n>`); one more is refused at once with 503 `SERVER_BUSY` (mununu#1147).
 
 ---
 
@@ -1255,7 +1255,8 @@ All endpoints return errors in a consistent format:
 | HTTP Status | Code | Meaning |
 |-------------|------|---------|
 | 400 | `BAD_REQUEST` | Invalid input: parse errors, unknown formula/automaton names, both/neither of mutually-exclusive fields, malformed identifiers. |
-| 408 | `REQUEST_TIMEOUT` | The request exceeded the server's 30 s timeout. |
+| 408 | `REQUEST_TIMEOUT` | The request exceeded the server's timeout (30 s by default, `--request-timeout`); the work it started is cancelled. |
+| 503 | `SERVER_BUSY` | The server is running its limit of tool-running requests (4 by default, `--max-tool-requests`); retry when one finishes. |
 | 500 | `INTERNAL_ERROR` | Server-side failure during realization, synthesis, or evaluation. |
 
 > Note: `/codesign/reconcile-labels` and `/memory/check` are **advisory** — they return 200 OK with the warning/mismatch in the body rather than a 4xx.
