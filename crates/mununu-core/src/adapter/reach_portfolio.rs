@@ -548,8 +548,15 @@ fn run_sat_bmc(
     timed("sat-bmc", || match run() {
         Ok(SatBmcOutcome::Violated { .. }) => Ok(Some(true)),
         // mununu#1142 — a build that stopped (the cap, the wall, a peer's verdict) is a
-        // `Stopped` at depth 0 carrying the build's reason; the arms below report it as any
-        // other stop ("every depth below 0 refuted" is vacuously true).
+        // `Stopped` at depth 0 carrying the build's reason: a cancelled one keeps the reason
+        // (the model was never built — "every depth below 0 refuted" says nothing).
+        Ok(SatBmcOutcome::Stopped { depth: 0, reason })
+            if cancelled() && reason.starts_with("aig:") =>
+        {
+            Err(MemberStop::Cancelled(format!(
+                "SAT BMC stopped before its first depth ({reason})"
+            )))
+        }
         Ok(SatBmcOutcome::Stopped { depth, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("SAT BMC stopped; every depth below {depth} refuted"),
         )),
@@ -583,9 +590,11 @@ fn run_ic3(
         cancel: Some(std::sync::Arc::clone(&cancel)),
         max_frames: None,
     };
-    // mununu#1142 — one model per run, shared with the owned SAT BMC.
-    let built = shared_aig(aig, file, deadline, &cancel);
-    timed("ic3", || match ic3::ic3_built(file, built, &opts) {
+    // mununu#1142 — one model per run, shared with the owned SAT BMC; built inside the timed
+    // span, as the SAT member's is, so the two attribute the build alike.
+    timed("ic3", || {
+        let built = shared_aig(aig, file, deadline, &cancel);
+        match ic3::ic3_built(file, built, &opts) {
         Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
         Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
             // N5.4 — the engine replayed the trace already; with a witness asked for it is
@@ -609,7 +618,10 @@ fn run_ic3(
             Ok(Some(true))
         }
         // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
-        // reason; the arms below report it as any other stop.
+        // reason; a cancelled one keeps the reason (the model was never built).
+        Ok(Ic3Outcome::Stopped { frames: 0, reason }) if cancelled() && reason.starts_with("aig:") => {
+            Err(MemberStop::Cancelled(format!("IC3 stopped at frame 0 ({reason})")))
+        }
         Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("IC3 stopped at frame {frames}"),
         )),
@@ -617,6 +629,7 @@ fn run_ic3(
             "IC3 stopped at frame {frames} ({reason})"
         ))),
         Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
+        }
     })
 }
 
@@ -3119,8 +3132,23 @@ mod tests {
         let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         assert!(matches!(
             run_ic3(&file, later(), up, None, &cancelled),
-            Err(MemberStop::Cancelled(why)) if why.starts_with("IC3 stopped at frame 0")
+            Err(MemberStop::Cancelled(why)) if why.starts_with("IC3 stopped at frame 0 (aig:") && why.contains("7 nodes")
         ));
+        // A SAFE design shares the same way: the first member builds, the second proves on it.
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let safe = parser::parse(SAFE).expect("parse");
+        let shared = SharedAig::new();
+        assert!(matches!(
+            run_sat_bmc(&safe, later(), go(), None, &shared),
+            Err(MemberStop::Undecided(_))
+        ));
+        assert!(shared.get().is_some_and(Result::is_ok));
+        assert_eq!(
+            run_ic3(&safe, later(), go(), None, &shared),
+            Ok(Some(false)),
+            "the proof on the model the SAT member built"
+        );
     }
 
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:

@@ -1415,7 +1415,12 @@ pub fn ic3_built(
     let model = match built {
         Ok(model) => model,
         Err(BuildStop::Refused(why)) => return Err(why.clone()),
-        Err(stop) => {
+        Err(
+            stop @ (BuildStop::NodeCap { .. }
+            | BuildStop::Deadline { .. }
+            | BuildStop::RunBudget { .. }
+            | BuildStop::Cancelled { .. }),
+        ) => {
             return Ok(Ic3Outcome::Stopped {
                 frames: 0,
                 reason: stop.to_string(),

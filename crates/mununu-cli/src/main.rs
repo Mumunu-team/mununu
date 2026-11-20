@@ -4466,14 +4466,18 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
                     ..Default::default()
                 };
-                let model = mununu_core::adapter::btor2::aig::AigModel::build(&file)
+                // mununu#1142 — the model is built under `--timeout-ms` too; a build that stops
+                // is the same `unknown` + note as a search that stops.
+                let built = mununu_core::adapter::btor2::aig::AigModel::build_with(
+                    &file,
+                    &mununu_core::adapter::btor2::aig::BuildLimits::member(opts.deadline, None),
+                );
+                let outcome = mununu_core::adapter::btor2::sat_bmc::sat_bmc_built(&built, &opts)
                     .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?;
-                let outcome = mununu_core::adapter::btor2::sat_bmc::sat_bmc_model(&model, &opts)
-                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?;
-                if let (Some(path), Some(w)) = (
-                    &args.bmc_witness_out,
-                    mununu_core::adapter::btor2::sat_bmc::btor2_witness(&model, &outcome),
-                ) {
+                if let (Some(path), Ok(model)) = (&args.bmc_witness_out, &built)
+                    && let Some(w) =
+                        mununu_core::adapter::btor2::sat_bmc::btor2_witness(model, &outcome)
+                {
                     std::fs::write(path, w)
                         .map_err(|e| format!("--bmc-witness-out {}: {e}", path.display()))?;
                 }

@@ -97,8 +97,10 @@ pub enum BuildStop {
     Refused(String),
     /// The AIG passed the node cap.
     NodeCap { nodes: u32, cap: u32 },
-    /// The member's deadline, or the run budget, expired during the build.
+    /// The member's deadline expired during the build.
     Deadline { nodes: u32 },
+    /// The thread's run budget expired during the build.
+    RunBudget { nodes: u32 },
     /// The member's cancel flag went up during the build (a peer decided).
     Cancelled { nodes: u32 },
 }
@@ -107,14 +109,27 @@ impl std::fmt::Display for BuildStop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BuildStop::Refused(why) => f.write_str(why),
+            BuildStop::NodeCap { nodes, cap } if *cap >= MAX_NODES => write!(
+                f,
+                "aig: the model passed the node cap while being built ({nodes} nodes, cap \
+                 {cap}, the most the engine's literals can address — a limit of the technique); \
+                 a smaller design, or the SMT members"
+            ),
             BuildStop::NodeCap { nodes, cap } => write!(
                 f,
                 "aig: the model passed the node cap while being built ({nodes} nodes, cap \
-                 {cap}); MUNUNU_AIG_NODE_CAP raises the cap (at most {MAX_NODES})"
+                 {cap}); MUNUNU_AIG_NODE_CAP raises the cap (at most {MAX_NODES}), or the SMT \
+                 members take the design"
             ),
             BuildStop::Deadline { nodes } => write!(
                 f,
-                "aig: the deadline expired while the model was being built ({nodes} nodes so far)"
+                "aig: the member's deadline expired while the model was being built ({nodes} \
+                 nodes so far); more time on the verb's timeout, or a smaller design"
+            ),
+            BuildStop::RunBudget { nodes } => write!(
+                f,
+                "aig: the run budget expired while the model was being built ({nodes} nodes so \
+                 far); more time on the run's budget, or a smaller design"
             ),
             BuildStop::Cancelled { nodes } => {
                 write!(f, "aig: the build was cancelled ({nodes} nodes so far)")
@@ -243,6 +258,9 @@ impl Aig {
     fn push(&mut self, node: AigNode) -> u32 {
         // mununu#1142 — a tripped graph creates nothing more: the build returns the stop, and
         // memory stops growing at the cap (every later request is answered with FALSE).
+        // SOUNDNESS: the FALSE placeholder is never read as a model — `build_with` returns the
+        // stop before any caller sees the graph, and a successful build clears its limits, so a
+        // finished model never trips.
         if self.tripped.is_some() {
             return 0;
         }
@@ -260,10 +278,10 @@ impl Aig {
                 .is_some_and(|c| c.load(Ordering::Relaxed))
             {
                 Some(BuildStop::Cancelled { nodes })
-            } else if self.deadline.is_some_and(|d| Instant::now() >= d)
-                || crate::adapter::run_budget::expired()
-            {
+            } else if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 Some(BuildStop::Deadline { nodes })
+            } else if crate::adapter::run_budget::expired() {
+                Some(BuildStop::RunBudget { nodes })
             } else {
                 None
             }
@@ -1051,6 +1069,11 @@ impl AigModel {
         if let Some(stop) = aig.tripped.take() {
             return Err(stop);
         }
+        // The limits were the BUILD's: a finished model keeps no clock and no flag, so a later
+        // extension of the graph cannot be answered with silent FALSE literals.
+        aig.cap = MAX_NODES;
+        aig.deadline = None;
+        aig.cancel = None;
         Ok(Self {
             aig,
             states,
@@ -1311,12 +1334,46 @@ mod tests {
             AigModel::build_with(&file, &late),
             Err(BuildStop::Deadline { nodes: 1 })
         ));
+        // A finished model keeps no limit: the graph can grow past the build's cap afterwards.
+        let mut done = AigModel::build(&file).expect("builds");
+        let before = done.aig.len();
+        done.aig.leaves(4);
+        assert_eq!(done.aig.len(), before + 4);
+        assert!(done.aig.tripped().is_none());
         let expired = crate::adapter::run_budget::Budget::with_ms(0);
         let _g = crate::adapter::run_budget::enter(&expired);
         assert!(matches!(
             AigModel::build(&file),
-            Err(BuildStop::Deadline { nodes: 1 })
+            Err(BuildStop::RunBudget { nodes: 1 })
         ));
+        // Every stop names its count, and the texts are told apart.
+        for stop in [
+            BuildStop::NodeCap { nodes: 40, cap: 40 },
+            BuildStop::NodeCap {
+                nodes: 7,
+                cap: MAX_NODES,
+            },
+            BuildStop::Deadline { nodes: 7 },
+            BuildStop::RunBudget { nodes: 7 },
+            BuildStop::Cancelled { nodes: 7 },
+        ] {
+            let text = stop.to_string();
+            assert!(text.starts_with("aig: ") && text.contains(" nodes"), "{text}");
+        }
+        assert!(
+            BuildStop::NodeCap { nodes: 40, cap: 40 }
+                .to_string()
+                .contains("MUNUNU_AIG_NODE_CAP")
+        );
+        assert!(
+            !BuildStop::NodeCap {
+                nodes: 7,
+                cap: MAX_NODES
+            }
+            .to_string()
+            .contains("MUNUNU_AIG_NODE_CAP"),
+            "the hard cap offers no variable"
+        );
     }
 
     /// mununu#1142 — the cap variable: unset is the default, a count is clamped to the literal

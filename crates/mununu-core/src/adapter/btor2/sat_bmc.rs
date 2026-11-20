@@ -537,7 +537,12 @@ pub fn sat_bmc_built(
     match built {
         Ok(model) => sat_bmc_model(model, opts),
         Err(BuildStop::Refused(why)) => Err(why.clone()),
-        Err(stop) => Ok(SatBmcOutcome::Stopped {
+        Err(
+            stop @ (BuildStop::NodeCap { .. }
+            | BuildStop::Deadline { .. }
+            | BuildStop::RunBudget { .. }
+            | BuildStop::Cancelled { .. }),
+        ) => Ok(SatBmcOutcome::Stopped {
             depth: 0,
             reason: stop.to_string(),
         }),
