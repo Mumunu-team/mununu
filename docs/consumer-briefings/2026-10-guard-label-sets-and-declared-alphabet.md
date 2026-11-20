@@ -1,6 +1,6 @@
 # Consumer briefing — 2026-10 a modality guard's label set is any-of; a declared-only controllable label is in the alphabet; `ltl F` is documented as the diamond it is
 
-> **Audience:** anyone writing mu-calculus formulas with `labels = { … }` guards of two or more labels, composing CTXDSL automata whose `controllable { }` block declares a label no transition uses, or reading verdicts of `ltl F` / `ltl G(p -> F q)` as "inevitable". Shinro's models are the known case for the first two; the third changes no verdict.
+> **Audience:** anyone writing mu-calculus formulas with `labels = { … }` guards of two or more labels, composing CTXDSL automata whose `controllable { }` block declares a label no transition uses, or reading verdicts of `ltl F` / `ltl G(p -> F q)` as "inevitable". A consumer's hand-written protocol models are the known case for the first two; the third changes no verdict.
 >
 > **Provenance:** [mununu#590](https://github.com/Mumunu-team/mununu/issues/590), [#592](https://github.com/Mumunu-team/mununu/issues/592), [#593](https://github.com/Mumunu-team/mununu/issues/593). Code: `mu_calculus/mod.rs` (`guard_matches_labels_and_vars`), `mu_calculus/evaluator.rs` (the `[mununu#590]` warning), `composition/mod.rs` (the `[mununu#592]` warning), `clts/mod.rs` (`CltsBuilder::declare_in_alphabet`), `context_dsl/realize.rs`. Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 

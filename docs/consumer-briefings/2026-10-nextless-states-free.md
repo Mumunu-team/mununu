@@ -42,7 +42,7 @@ mununu sv verify-auto bb_top.sv --source bb_sva.sv --top bb_top --frontend slang
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings (segment 3: a vendor receiver as a black box whose datasheet is checked under `--assumes check`; `m_data_changes_on_valid` held where nothing constrains the receiver). Reduced to the two-line black box above.
+- Found preparing the tutorial recordings (segment 3: a vendor receiver as a black box whose datasheet is checked under `--assumes check`; `m_data_changes_on_valid` held where nothing constrains the receiver). Reduced to the two-line black box above.
 - Reproducer: `adapter::btor2::cegar::tests::a_state_with_no_next_is_free_in_the_cube_lift` (the cube lift's verdict for "once high, stays high" over a next-less cell: not True; True on the parent). Unit test: `adapter::btor2::parser::tests::a_nextless_state_gets_a_free_next`.
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md), [`docs/policies/reproducers-before-fixes.md`](../policies/reproducers-before-fixes.md).
 

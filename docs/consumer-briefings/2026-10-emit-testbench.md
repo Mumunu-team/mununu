@@ -2,7 +2,7 @@
 
 > Source of truth: [`counterexample_testbench`](../../crates/mununu-core/src/adapter/verilator/replay.rs#L69) — surface: (CLI+API) — `sv verify-auto --emit-testbench DIR [--tb-clock PORT]` / `POST /api/v1/sv/verify-auto` with `emit_testbench: true`
 
-**Audience:** rosf, monono, mununu-ui and anyone who consumes the `sv verify-auto` report or validates its counterexamples under Verilator (the target-executor Phase 3.5 procedure). P0.7 of the EmTech tutorial plan.
+**Audience:** rosf, monono, mununu-ui and anyone who consumes the `sv verify-auto` report or validates its counterexamples under Verilator (the target-executor Phase 3.5 procedure). P0.7 of the tutorial plan.
 
 ## TL;DR
 

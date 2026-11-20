@@ -2,7 +2,7 @@
 
 > Source of truth: [`cdc_lint`](../../crates/mununu-core/src/adapter/cdc_lint.rs#L129) — surface: (CLI+API) — `mununu sv cdc-lint` / `POST /api/v1/sv/cdc-lint`; [`scripts/cdc_formal_sby.sh`](../../scripts/cdc_formal_sby.sh)
 
-**Audience:** rosf, monono, mununu-ui and anyone who lifts multi-clock RTL, or matches the text of the multi-clock refusal. P0.4 of the EmTech tutorial plan.
+**Audience:** rosf, monono, mununu-ui and anyone who lifts multi-clock RTL, or matches the text of the multi-clock refusal. P0.4 of the tutorial plan.
 
 ## TL;DR
 

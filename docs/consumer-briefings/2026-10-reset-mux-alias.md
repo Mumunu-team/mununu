@@ -41,7 +41,7 @@ mununu sv verify-auto sensor_monitor.sv --source sensor_monitor_sva.sv --top sen
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings (segment 3, owned vs. third-party IP). Localised by probing property shapes on the same model: `link_fault |-> ch_trip[0]` (decided through the bit expansion) held while `link_fault |-> ch_trip == 7` failed, and a plain `bad` for `link_fault ∧ ch_trip ≠ 7` on the dumped model (`MUNUNU_SHADOW_BTOR2_DUMP`) was unreachable for every engine.
+- Found preparing the tutorial recordings (segment 3, owned vs. third-party IP). Localised by probing property shapes on the same model: `link_fault |-> ch_trip[0]` (decided through the bit expansion) held while `link_fault |-> ch_trip == 7` failed, and a plain `bad` for `link_fault ∧ ch_trip ≠ 7` on the dumped model (`MUNUNU_SHADOW_BTOR2_DUMP`) was unreachable for every engine.
 - Reproducer: `adapter::btor2::symbolic_bitblast::tests::a_mux_on_internal_logic_is_read_as_the_mux_not_its_register` (the exact engine's verdict on a BTOR2 of the same shape: `Holds`, `Violated` on the parent). Resolver unit test: `adapter::btor2::parser::tests::a_mux_on_a_non_constant_condition_is_not_an_alias`.
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md), [`docs/policies/reproducers-before-fixes.md`](../policies/reproducers-before-fixes.md).
 

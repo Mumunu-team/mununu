@@ -6,7 +6,7 @@
 
 **Audience:** the maintainer deciding the 0.5 break, and the engineers implementing it in mununu, rosf, monono and mununu-ui.
 
-**Why now.** 0.5 is the release EmTech's tutorial videos will be recorded on, and it is a declared clean break (no aliases, consumers migrate the same week). Every surface that is renamed later costs another coordinated migration, and every new surface planned for 0.5 (`--template`, `--emit-witness`, `--emit-testbench`, `sv cdc-lint`, `check-fsm --liveness`, `context eval --sanity`, `fairness weak`, `allow_dead_vectors`, the deployment config) should be born under the conventions decided here.
+**Why now.** 0.5 is the release the tutorial videos will be recorded on, and it is a declared clean break (no aliases, consumers migrate the same week). Every surface that is renamed later costs another coordinated migration, and every new surface planned for 0.5 (`--template`, `--emit-witness`, `--emit-testbench`, `sv cdc-lint`, `check-fsm --liveness`, `context eval --sanity`, `fairness weak`, `allow_dead_vectors`, the deployment config) should be born under the conventions decided here.
 
 **Method.** The CLI tree (`crates/mununu-cli/src/main.rs`), the routes (`crates/mununu-core/src/api/server.rs`), the wire types (`models.rs`) and the schemas (`docs/api-schemas/`) were read; the consumers' call sites were read in rosf (`crates/rosf-core/src/verify/mununu.rs`, `examples/cheatsheet/`), monono (`verify/*.sh`) and mununu-ui (`src/api/endpoints.ts`). Line numbers are as of `8b98949`.
 

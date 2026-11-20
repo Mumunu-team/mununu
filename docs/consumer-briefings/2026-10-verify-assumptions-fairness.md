@@ -1,6 +1,6 @@
 # Consumer briefing — 2026-10 environment assumptions on the `verify` path: `[[assumptions]]`, the fairness templates, and conditional verdicts with a non-vacuity gate
 
-> **Audience:** anyone verifying hand-written CTXDSL compositions through `verify.toml` (`mununu verify`, `POST /api/v1/verify`, the UI's verify flow) — the Shinro-style protocol models first, and the `verify` consumers that parse `PropertyVerdict`.
+> **Audience:** anyone verifying hand-written CTXDSL compositions through `verify.toml` (`mununu verify`, `POST /api/v1/verify`, the UI's verify flow) — the hand-written protocol models first, and the `verify` consumers that parse `PropertyVerdict`.
 >
 > **Related:** closes [mununu#595](https://github.com/Mumunu-team/mununu/issues/595). Builds on the `F` = diamond clarification of [#593](https://github.com/Mumunu-team/mununu/issues/593) (briefing [`2026-10-guard-label-sets-and-declared-alphabet.md`](2026-10-guard-label-sets-and-declared-alphabet.md)). Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 >

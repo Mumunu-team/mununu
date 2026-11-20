@@ -48,7 +48,7 @@ mununu sv verify-auto pump_seq.sv --source pump_seq_sva.sv --top pump_seq --pin 
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings: the `pump_seq` loss-of-flow counterexample was unreadable on both surfaces. Tests at the seams: `trace::tests` (the monitor-cell classification, the alias / clock rules and the fault-firing rule), `adapter::yosys::tests::trace_aliases_map_a_bound_port_to_the_designs_net` (on the flattened-netlist shape measured with `MUNUNU_KEEP_YOSYS_TMP=1`), `api::models::bottom_reason_view_tests::the_trace_shows_the_designs_registers_and_keeps_the_monitor_apart` (the conversion both surfaces use), and `adapter::btor2::mutate::tests::list_targets_names_a_bound_register_by_the_designs_name_and_skips_mirrored_ports`.
+- Found preparing the tutorial recordings: the `pump_seq` loss-of-flow counterexample was unreadable on both surfaces. Tests at the seams: `trace::tests` (the monitor-cell classification, the alias / clock rules and the fault-firing rule), `adapter::yosys::tests::trace_aliases_map_a_bound_port_to_the_designs_net` (on the flattened-netlist shape measured with `MUNUNU_KEEP_YOSYS_TMP=1`), `api::models::bottom_reason_view_tests::the_trace_shows_the_designs_registers_and_keeps_the_monitor_apart` (the conversion both surfaces use), and `adapter::btor2::mutate::tests::list_targets_names_a_bound_register_by_the_designs_name_and_skips_mirrored_ports`.
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here
