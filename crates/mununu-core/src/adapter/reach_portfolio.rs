@@ -4385,7 +4385,7 @@ mod tests {
         fn a_verdict_that_lands_after_the_first_is_credited_and_a_disagreement_is_the_alarm() {
             let agreeing = Runners {
                 native: |_, _, _, _| Ok(Some(true)),
-                ic3: |_, _, stop, _| {
+                ic3: |_, _, stop, _, _| {
                     until_stopped(&stop);
                     Ok(Some(true))
                 },
