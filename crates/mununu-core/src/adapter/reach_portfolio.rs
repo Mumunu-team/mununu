@@ -3142,7 +3142,13 @@ mod tests {
             (r.reachable_by, r.unreachable_by),
             (vec!["native"], vec!["exact"])
         );
-        assert!(r.disconnected && r.reported.len() == 2);
+        // The contradiction returns at once (the safety net fires before the channel is read to
+        // its end), so the third member is simply unreported, not dead.
+        assert_eq!(r.reported, vec!["native", "exact"]);
+        assert!(
+            !r.disconnected,
+            "the collector stopped on the contradiction, not on a disconnect"
+        );
     }
 
     /// mununu#1143 — a member thread that panics is `None` AND a named refusal (the exact

@@ -48,8 +48,9 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the member reached its own bound | `undecided`, with depth or frame, and the wall it left unused | mununu#1022, mununu#1038 |
 | the wall or the run budget stopped it | `abstained`, with progress | mununu#1043 |
 | the member refused the design | `refused` | — |
-| the member panicked | open: unrecorded, or reported as still running | mununu#1143 |
-| a rung of the justice / response ladder panicked | open | mununu#1140 |
+| the member panicked | `refused`, "ended without a result (it panicked)", in both drivers; the owned-only collector tells a disconnect from the deadline | mununu#1143 |
+| a rung of the justice / response ladder panicked | named in the row's notes | mununu#1140 |
+| an IC3 counterexample on a design the simulator cannot carry | shipped `violated`, listed in `trace_replay_failed` with or without a witness | mununu#1143 |
 
 **Enumerating test:** none recorded.
 
