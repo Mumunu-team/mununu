@@ -2184,6 +2184,54 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
     }
 }
 
+/// How a formula quantifies over paths, read off its modalities under polarity (a `[]` under an
+/// odd number of negations reads as `<>`, and vice versa). The transfer of a verdict across an
+/// over-approximating model depends on this, not on the fixpoint kind (mununu#1126).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathQuantification {
+    /// No modality: a state predicate.
+    None,
+    /// Only `[]` in positive polarity.
+    Universal,
+    /// Only `<>` in positive polarity.
+    Existential,
+    /// Both.
+    Branching,
+}
+
+fn path_quantification(formula: &crate::mu_calculus::Formula) -> PathQuantification {
+    use crate::mu_calculus::{ModalKind, Node};
+    let mut boxes = false;
+    let mut diamonds = false;
+    let mut stack: Vec<(crate::mu_calculus::NodeId, bool)> = vec![(formula.root(), true)];
+    while let Some((id, positive)) = stack.pop() {
+        match formula.node(id) {
+            Node::True | Node::False | Node::Predicate(_) | Node::Variable(_) => {}
+            Node::Not(inner) => stack.push((*inner, !positive)),
+            Node::And(a, b) | Node::Or(a, b) => {
+                stack.push((*a, positive));
+                stack.push((*b, positive));
+            }
+            Node::Modal { kind, target, .. } => {
+                let universal = matches!(kind, ModalKind::Box) == positive;
+                if universal {
+                    boxes = true;
+                } else {
+                    diamonds = true;
+                }
+                stack.push((*target, positive));
+            }
+            Node::Mu { body, .. } | Node::Nu { body, .. } => stack.push((*body, positive)),
+        }
+    }
+    match (boxes, diamonds) {
+        (false, false) => PathQuantification::None,
+        (true, false) => PathQuantification::Universal,
+        (false, true) => PathQuantification::Existential,
+        (true, true) => PathQuantification::Branching,
+    }
+}
+
 /// mununu#750 — withhold a `Violated` whose cone reads an undriven net.
 ///
 /// An undriven net — an unconnected wire, or the output of a module missing from the source set,
@@ -2201,12 +2249,27 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
 ///
 /// mununu#1030 — the same pass withholds a `Violated` whose cone reads a CLOCK net as data
 /// (`violation-over-clock-as-data`): the lift keeps such a read as a free named input.
+///
+/// mununu#1126 — and, in the other direction, an existential `Holds` (a cover, an `EF`) whose
+/// cone reads such a net: on a model with MORE runs than the hardware, "the target is
+/// reachable" may rest on a run the hardware never takes (`existential-holds-over-free-leaves`,
+/// `existential-holds-over-clock-as-data`). Which verdicts transfer across a freer model:
+///
+/// Which verdicts transfer is decided by how the formula quantifies over paths — its
+/// modalities under polarity, not its fixpoint kind (`s_eventually b` is `mu Y. (b || [] Y)`,
+/// `mu`-rooted and universal):
+///
+/// | row | only `[]` (universal) | only `<>` (existential) | both (branching) |
+/// |---|---|---|---|
+/// | HOLDS | transfers | withheld | withheld |
+/// | VIOLATED | withheld | transfers (the refutation is stronger) | withheld |
 fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2: &str) {
-    if !report
-        .properties
-        .iter()
-        .any(|p| matches!(p.outcome, VerifyOutcome::Violated { .. }))
-    {
+    if !report.properties.iter().any(|p| {
+        matches!(
+            p.outcome,
+            VerifyOutcome::Violated { .. } | VerifyOutcome::Holds
+        )
+    }) {
         return;
     }
     let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
@@ -2214,14 +2277,28 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
     };
     let clock_nets = report.diagnostics.trace_names.clocks.clone();
     for p in report.properties.iter_mut() {
-        if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
+        let violated = matches!(p.outcome, VerifyOutcome::Violated { .. });
+        let holds = matches!(p.outcome, VerifyOutcome::Holds);
+        if !violated && !holds {
             continue;
         }
         let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
             continue;
         };
-        // SOUNDNESS: an existential refutation (target unreachable) is STRONGER on a freer model.
-        if formula.property_class() == crate::mu_calculus::PropertyClass::Reachability {
+        let quantification = path_quantification(&formula);
+        // SOUNDNESS: on a model with MORE runs than the hardware, a verdict transfers when the
+        // formula's path quantifier is monotone the right way: a universal (`[]`-only) HOLDS and
+        // an existential (`<>`-only) refutation are STRONGER on the freer model; a universal
+        // VIOLATED and an existential HOLDS (mununu#1126) may rest on a run the hardware never
+        // takes; a branching formula (both modalities) transfers neither way. A formula with no
+        // modality is a state predicate at the initial state, the same on both models.
+        let transfers = match quantification {
+            PathQuantification::Universal => holds,
+            PathQuantification::Existential => violated,
+            PathQuantification::Branching => false,
+            PathQuantification::None => true,
+        };
+        if transfers {
             continue;
         }
         let mut leaves: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -2233,10 +2310,14 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
             }
         }
         if !leaves.is_empty() {
-            // SOUNDNESS: the refutation rests on values the real driver may never produce.
+            // SOUNDNESS: the refutation (or the existential witness) rests on values the real
+            // driver may never produce.
+            let leaves: Vec<String> = leaves.into_iter().collect();
             p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
-            p.bottom_reason = Some(BottomReason::ViolationOverFreeLeaves {
-                leaves: leaves.into_iter().collect(),
+            p.bottom_reason = Some(if violated {
+                BottomReason::ViolationOverFreeLeaves { leaves }
+            } else {
+                BottomReason::ExistentialHoldsOverFreeLeaves { leaves }
             });
             continue;
         }
@@ -2253,12 +2334,17 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
         if !clocks.is_empty() {
             // SOUNDNESS: over-approximation, argued from the lifted model on the #1030 design (the
             // hardware's schedule, the clock low before each edge, is one of the model's input
-            // sequences), not proved for the class. A HOLDS transfers and an `EF` refutation is
-            // kept (both read the model as a superset, as above); a VIOLATED may rest on a clock
-            // value between edges the hardware never shows, so it is withheld as a may-trace.
+            // sequences), not proved for the class. A universal HOLDS and an `EF` refutation
+            // transfer (both read the model as a superset, as above); a universal VIOLATED may
+            // rest on a clock value between edges the hardware never shows, and so may an
+            // existential HOLDS — a cover reached only with the clock held (mununu#1126) — so
+            // both are withheld, the violation with its may-trace.
+            let clocks: Vec<String> = clocks.into_iter().collect();
             p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
-            p.bottom_reason = Some(BottomReason::ViolationOverClockAsData {
-                clocks: clocks.into_iter().collect(),
+            p.bottom_reason = Some(if violated {
+                BottomReason::ViolationOverClockAsData { clocks }
+            } else {
+                BottomReason::ExistentialHoldsOverClockAsData { clocks }
             });
         }
     }
@@ -8476,6 +8562,8 @@ pub(crate) fn escalate_bottom_with_slice(
             Some(
                 BottomReason::ViolationOverFreeLeaves { .. }
                     | BottomReason::ViolationOverClockAsData { .. }
+                    | BottomReason::ExistentialHoldsOverFreeLeaves { .. }
+                    | BottomReason::ExistentialHoldsOverClockAsData { .. }
             )
         ) {
             continue;
@@ -9131,6 +9219,21 @@ pub enum BottomReason {
         /// The clock nets the property's cone reads as data.
         clocks: Vec<String>,
     },
+    /// mununu#1126 — the other direction of [`Self::ViolationOverFreeLeaves`]: an existential
+    /// `Holds` (a cover, an `EF`) whose cone reads an undriven net. The model has runs the
+    /// hardware does not, so "reachable" may rest on one of them; withheld, no trace (a cover
+    /// carries none). Reproducible.
+    ExistentialHoldsOverFreeLeaves {
+        /// The undriven nets the cone reads.
+        leaves: Vec<String>,
+    },
+    /// mununu#1126 — the other direction of [`Self::ViolationOverClockAsData`]: an existential
+    /// `Holds` whose cone reads a clock net as data; the target may be reachable only with a
+    /// clock value between edges the hardware never shows. Reproducible.
+    ExistentialHoldsOverClockAsData {
+        /// The clock nets the cone reads as data.
+        clocks: Vec<String>,
+    },
     /// mununu#1073 — a response property (`AG(a → AF b)`) was refuted by a member that does not
     /// carry the run's `GF` fairness assumption(s), and the fair-cycle route could not decide it
     /// under them (an atom its monitor cannot bind, or no verdict in its slice). The refutation
@@ -9279,6 +9382,8 @@ impl BottomReason {
             | Self::UnestablishedInitialState { .. }
             | Self::ViolationOverFreeLeaves { .. }
             | Self::ViolationOverClockAsData { .. }
+            | Self::ExistentialHoldsOverFreeLeaves { .. }
+            | Self::ExistentialHoldsOverClockAsData { .. }
             | Self::ViolationWithoutFairness { .. }
             | Self::UnestablishedInitialCubes { .. }
             | Self::ReportSelfContradiction { .. }
@@ -9300,6 +9405,8 @@ impl BottomReason {
             Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
             Self::ViolationOverFreeLeaves { .. } => "violation-over-free-leaves",
             Self::ViolationOverClockAsData { .. } => "violation-over-clock-as-data",
+            Self::ExistentialHoldsOverFreeLeaves { .. } => "existential-holds-over-free-leaves",
+            Self::ExistentialHoldsOverClockAsData { .. } => "existential-holds-over-clock-as-data",
             Self::ViolationWithoutFairness { .. } => "violation-without-fairness",
             Self::UnestablishedInitialCubes { .. } => "unestablished-initial-cubes",
             Self::ViolationAtUnestablishedInitialCubes { .. } => {
@@ -9379,6 +9486,29 @@ impl BottomReason {
                  need a clock value between edges the hardware never shows. The trace is kept as \
                  a MAY-trace and the violation is withheld rather than reported. A HOLDS over the \
                  same model would have transferred (mununu#1030).",
+                clocks.len(),
+                clocks.join(", ")
+            ),
+            Self::ExistentialHoldsOverFreeLeaves { leaves } => format!(
+                "the target was reached on a model FREER than the RTL: the property's cone reads \
+                 {} undriven net(s) ({}) — an unconnected wire or the output of a module missing \
+                 from the source set, free at every cycle — so the run that reaches it may be one \
+                 the real driver never produces, and the existential or branching HOLDS (a cover, \
+                 an EF, an AG EF) is withheld rather than reported. Vendor the missing module or \
+                 provide the driver to decide this property; a universal HOLDS or an existential \
+                 refutation over the same model would have transferred.",
+                leaves.len(),
+                leaves.join(", ")
+            ),
+            Self::ExistentialHoldsOverClockAsData { clocks } => format!(
+                "the target was reached on a model that reads {} clock net(s) ({}) as DATA — a \
+                 latch enabled by a clock level, or other logic on the clock: the model treats \
+                 that read as a free input, so the run that reaches the target may need a clock \
+                 value between edges the hardware never shows, and the existential or branching \
+                 HOLDS (a cover, an EF, an AG EF) is withheld rather than reported. Write the \
+                 target over registers the clock-level logic does not feed, or model the latch \
+                 as a clock enable; a universal HOLDS or an existential refutation over the same \
+                 model would have transferred.",
                 clocks.len(),
                 clocks.join(", ")
             ),
@@ -13631,6 +13761,213 @@ mod tests {
         assert!(
             matches!(by("hold").outcome, VerifyOutcome::Holds),
             "a HOLDS is sound under a freer start set and must not be touched"
+        );
+    }
+
+    /// mununu#1126 — the other direction: an existential HOLDS (a cover, an `EF`) whose cone
+    /// reads the clock net as data is withheld as ⊥ (`existential-holds-over-clock-as-data`,
+    /// the clock named), because "reachable" may rest on a clock value between edges. Controls
+    /// in the same model: an `EF` over the data-enabled latch keeps its HOLDS, a universal
+    /// HOLDS over the clock-read cone keeps its verdict (a superset model only strengthens it),
+    /// and an `EF` REFUTATION over the clock-read cone keeps its VIOLATED.
+    #[test]
+    fn x1126_an_existential_holds_over_a_clock_read_as_data_is_withheld() {
+        const DESIGN: &str = "\
+1 sort bitvec 1
+2 input 1 clk
+3 input 1 d
+4 input 1 en
+5 state 1
+6 ite 1 2 5 3
+7 next 1 5 6
+8 state 1 r
+9 zero 1
+10 init 1 8 9
+11 next 1 8 6
+12 state 1
+13 ite 1 4 3 12
+14 next 1 12 13
+15 state 1 q
+16 init 1 15 9
+17 next 1 15 13
+18 input 1
+19 state 1 s
+20 next 1 19 18
+";
+        let mk =
+            |name: &str, kind: SvaKind, formula: &str, outcome: VerifyOutcome| PropertyVerdict {
+                name: name.into(),
+                label: None,
+                kind,
+                formula: formula.into(),
+                outcome,
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: Some("exact-symbolic".into()),
+                vacuity: None,
+                portfolio: None,
+            };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                mk(
+                    "cover_over_clock",
+                    SvaKind::Cover,
+                    "mu X. ((r == 1) || <> X)",
+                    VerifyOutcome::Holds,
+                ),
+                mk(
+                    "cover_over_data_enable",
+                    SvaKind::Cover,
+                    "mu X. ((q == 1) || <> X)",
+                    VerifyOutcome::Holds,
+                ),
+                mk(
+                    "ag_over_clock",
+                    SvaKind::Assert,
+                    "nu X. ((r == 0) && [] X)",
+                    VerifyOutcome::Holds,
+                ),
+                mk(
+                    "ef_refuted_over_clock",
+                    SvaKind::Cover,
+                    "mu X. ((r == 1) || <> X)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                // `s_eventually (r == 1)`: `mu`-rooted but universal — the review's row.
+                mk(
+                    "af_violated_over_clock",
+                    SvaKind::Assert,
+                    "mu Y. ((r == 1) || [] Y)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                mk(
+                    "af_holds_over_clock",
+                    SvaKind::Assert,
+                    "mu Y. ((r == 1) || [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                // `AG EF (r == 1)`: branching — neither verdict transfers.
+                mk(
+                    "ag_ef_over_clock",
+                    SvaKind::Cover,
+                    "nu Y. ((mu X. ((r == 1) || <> X)) && [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                // A cover over the undriven net `s` reads (18 is an anonymous input).
+                mk(
+                    "cover_over_undriven",
+                    SvaKind::Cover,
+                    "mu X. ((s == 1) || <> X)",
+                    VerifyOutcome::Holds,
+                ),
+            ],
+            ..Default::default()
+        };
+        report.diagnostics.trace_names.clocks = vec!["clk".to_string()];
+        withhold_violated_over_free_leaves(&mut report, DESIGN);
+        let by = |n: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.name == n)
+                .unwrap()
+                .clone()
+        };
+        let withheld = by("cover_over_clock");
+        assert!(
+            matches!(withheld.outcome, VerifyOutcome::Unknown { .. }),
+            "a cover reached only through the free clock must not ship HOLDS: {:?}",
+            withheld.outcome
+        );
+        assert_eq!(
+            withheld.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("existential-holds-over-clock-as-data"),
+            "{:?}",
+            withheld.bottom_reason
+        );
+        let line = withheld
+            .bottom_reason
+            .as_ref()
+            .map(BottomReason::one_line)
+            .unwrap_or_default();
+        assert!(line.contains("clk") && line.contains("withheld"), "{line}");
+        assert!(
+            matches!(by("cover_over_data_enable").outcome, VerifyOutcome::Holds),
+            "a named input that is not a clock is the environment: {:?}",
+            by("cover_over_data_enable").outcome
+        );
+        assert!(
+            matches!(by("ag_over_clock").outcome, VerifyOutcome::Holds),
+            "a universal HOLDS transfers from a superset model: {:?}",
+            by("ag_over_clock").outcome
+        );
+        assert!(
+            matches!(
+                by("ef_refuted_over_clock").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "an existential refutation is stronger on a freer model: {:?}",
+            by("ef_refuted_over_clock").outcome
+        );
+        let af_v = by("af_violated_over_clock");
+        assert!(
+            matches!(af_v.outcome, VerifyOutcome::Unknown { .. }),
+            "a universal (`[]`-only) VIOLATED is withheld whatever its fixpoint: {:?}",
+            af_v.outcome
+        );
+        assert_eq!(
+            af_v.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("violation-over-clock-as-data")
+        );
+        assert!(
+            matches!(by("af_holds_over_clock").outcome, VerifyOutcome::Holds),
+            "a universal HOLDS transfers whatever its fixpoint: {:?}",
+            by("af_holds_over_clock").outcome
+        );
+        let ag_ef = by("ag_ef_over_clock");
+        assert!(
+            matches!(ag_ef.outcome, VerifyOutcome::Unknown { .. }),
+            "a branching HOLDS (AG EF) transfers neither way: {:?}",
+            ag_ef.outcome
+        );
+        assert_eq!(
+            ag_ef.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("existential-holds-over-clock-as-data")
+        );
+        let undriven = by("cover_over_undriven");
+        assert_eq!(
+            undriven.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("existential-holds-over-free-leaves"),
+            "{:?} {:?}",
+            undriven.outcome,
+            undriven.bottom_reason
+        );
+    }
+
+    /// mununu#1126 — the quantification walk: modalities under polarity, not fixpoints.
+    #[test]
+    fn x1126_path_quantification_reads_the_modalities_under_polarity() {
+        let q =
+            |f: &str| path_quantification(&crate::mu_calculus::parser::parse(f).expect("parse"));
+        assert_eq!(q("nu X. ((r == 0) && [] X)"), PathQuantification::Universal);
+        assert_eq!(q("mu Y. ((r == 1) || [] Y)"), PathQuantification::Universal);
+        assert_eq!(
+            q("mu X. ((r == 1) || <> X)"),
+            PathQuantification::Existential
+        );
+        assert_eq!(
+            q("nu X. ((r == 1) && <> X)"),
+            PathQuantification::Existential
+        );
+        assert_eq!(
+            q("nu Y. ((mu X. ((r == 1) || <> X)) && [] Y)"),
+            PathQuantification::Branching
+        );
+        assert_eq!(q("(r == 1) && (q == 0)"), PathQuantification::None);
+        assert_eq!(
+            q("!(mu X. ((r == 1) || <> X))"),
+            PathQuantification::Universal
         );
     }
 
