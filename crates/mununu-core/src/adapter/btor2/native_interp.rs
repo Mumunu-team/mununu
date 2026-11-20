@@ -285,7 +285,7 @@ pub fn one_step_interpolant(file: &Btor2File) -> OneStepInterp {
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return OneStepInterp::Unavailable(format!("encode failed: {e:?}")),
+            Err(e) => return OneStepInterp::Unavailable(format!("encode failed: {e}")),
         };
         let iface = Interface::build(&view);
 
@@ -344,7 +344,7 @@ pub const UNAVAILABLE_PREFIX: &str = "interpolation unavailable: ";
 pub fn interp_available() -> Result<(), String> {
     crate::adapter::cvc5::locate_cvc5()
         .map(|_| ())
-        .map_err(|e| format!("{UNAVAILABLE_PREFIX}cvc5 unavailable: {e:?}"))
+        .map_err(|e| format!("{UNAVAILABLE_PREFIX}cvc5 unavailable: {e}"))
 }
 
 /// Verdict of the interpolation-based safety engine.
@@ -528,7 +528,7 @@ pub(crate) fn verify_safety_interp_cancellable(
             Ok(v) => v,
             Err(e) => {
                 return InterpSafetyVerdict::Undecided {
-                    reason: format!("encode failed: {e:?}"),
+                    reason: format!("encode failed: {e}"),
                 };
             }
         };
@@ -771,11 +771,16 @@ fn interpolate_bool_cancellable(
     }
     let raw = match extract_interpolant_body(&stdout) {
         Some(r) => r,
-        None => return InterpStep::Unavailable(format!("unparseable cvc5 reply: {stdout:?}")),
+        None => {
+            return InterpStep::Unavailable(format!(
+                "unparseable cvc5 reply: `{}`",
+                stdout.lines().next().unwrap_or("").trim()
+            ));
+        }
     };
     match reparse_over_shared(&raw, shared) {
         Some(bv) => InterpStep::Interpolant(bv),
-        None => InterpStep::Unavailable(format!("interpolant did not re-parse: {raw:?}")),
+        None => InterpStep::Unavailable(format!("interpolant did not re-parse: `{raw}`")),
     }
 }
 
@@ -797,8 +802,7 @@ pub(crate) fn run_cvc5_raw_cancellable(
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-    let bin =
-        crate::adapter::cvc5::locate_cvc5().map_err(|e| format!("cvc5 unavailable: {e:?}"))?;
+    let bin = crate::adapter::cvc5::locate_cvc5().map_err(|e| format!("cvc5 unavailable: {e}"))?;
     let (mut child, group) = Command::new(&bin.path)
         // `--tlimit` is cvc5's own per-run budget; the wall-clock kill below is the
         // hard backstop if it overruns. A timed-out query returns `Err` →

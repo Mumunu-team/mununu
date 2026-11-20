@@ -1755,7 +1755,7 @@ fn eval_err_to_adapter_err(e: EvaluationError) -> AdapterError {
     AdapterError {
         kind: AdapterErrorKind::IrConsistencyError,
         location: None,
-        message: format!("adapter/btor2/cegar: evaluator error: {e:?}"),
+        message: format!("adapter/btor2/cegar: evaluator error: {e}"),
     }
 }
 

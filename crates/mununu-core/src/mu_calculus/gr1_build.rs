@@ -148,7 +148,7 @@ impl Gr1Spec {
             {
                 self.push_response(trigger, response, is_guarantee)
             }
-            other => Err(format!("unsupported GR(1) clause: {other:?}")),
+            other => Err(format!("unsupported GR(1) clause: {other}")),
         }
     }
 
@@ -171,14 +171,14 @@ impl Gr1Spec {
                 Eventually(resp) if is_propositional(resp) => {
                     self.push_response(pre, resp, is_guarantee)
                 }
-                other => Err(format!("unsupported G(pre -> {other:?})")),
+                other => Err(format!("unsupported G(pre -> {other})")),
             },
             // G(prop) → invariant
             p if is_propositional(p) => {
                 self.safety.push(SafetyClause::Invariant(p.clone()));
                 Ok(())
             }
-            other => Err(format!("unsupported G({other:?})")),
+            other => Err(format!("unsupported G({other})")),
         }
     }
 
@@ -190,14 +190,14 @@ impl Gr1Spec {
             predicates_of(prop, &mut ps);
             if ps.iter().any(|p| self.outputs.contains(p)) {
                 return Err(format!(
-                    "GF guarantee over outputs not yet supported: {prop:?} \
+                    "GF guarantee over outputs not yet supported: {prop} \
                      (needs a last-output monitor)"
                 ));
             }
             // GF over inputs as a *guarantee* is degenerate but harmless — treat
             // like an env recurrence the controller cannot influence. Reject to
             // stay honest.
-            return Err(format!("GF guarantee over non-output signals: {prop:?}"));
+            return Err(format!("GF guarantee over non-output signals: {prop}"));
         }
         self.env_fair.push(prop.clone());
         Ok(())
@@ -965,5 +965,23 @@ mod tests {
         }];
         let r = Gr1Spec::classify(&[], &g, &["a".into()], &["b".into()]);
         assert!(r.is_err(), "Until must be rejected as out-of-fragment");
+    }
+
+    /// mununu#1121 — a clause outside the GR(1) fragment is refused quoting the clause in
+    /// LTL syntax, never as the Rust `Debug` tree (`Until { left: Predicate("p"), … }`).
+    #[test]
+    fn x1121_an_unsupported_gr1_clause_is_quoted_in_ltl_syntax() {
+        let err = Gr1Spec::classify(
+            &[],
+            &[LtlFormula::Until {
+                left: Box::new(pred("p")),
+                right: Box::new(pred("q")),
+            }],
+            &["p".to_string()],
+            &["q".to_string()],
+        )
+        .err()
+        .expect("an until clause is outside the fragment");
+        assert_eq!(err, "unsupported GR(1) clause: p U q");
     }
 }

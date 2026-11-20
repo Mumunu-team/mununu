@@ -92,6 +92,19 @@ pub enum RescueVerdict {
     Contradiction,
 }
 
+impl RescueVerdict {
+    /// The verdict in a note's words (`holds`, `violated`, `inconclusive`, "the members
+    /// contradicted").
+    pub fn describe(self) -> &'static str {
+        match self {
+            RescueVerdict::Holds => "holds",
+            RescueVerdict::Violated => "violated",
+            RescueVerdict::Inconclusive => "inconclusive",
+            RescueVerdict::Contradiction => "the members contradicted",
+        }
+    }
+}
+
 /// The rescue verdict a portfolio outcome maps to — one place, so the arms and the tests agree.
 pub fn rescue_verdict_of(v: ReachVerdict) -> RescueVerdict {
     match v {
@@ -723,7 +736,7 @@ pub fn safety_bad_model(
     )
     .map_err(|e| WitnessMiss {
         stage: "monitor",
-        reason: format!("{e:?}"),
+        reason: e.to_string(),
         contradicted_by: Vec::new(),
     })
 }
@@ -748,7 +761,7 @@ pub fn safety_witness_by(
     let (monitored, depth) = safety_bad_model(design_btor2, formula, reset_pinned)?;
     let file = parser::parse(&monitored).map_err(|e| WitnessMiss {
         stage: "parse",
-        reason: format!("{e:?}"),
+        reason: e.to_string(),
         contradicted_by: Vec::new(),
     })?;
     let depth = u32::try_from(depth).map_err(|_| WitnessMiss {
@@ -1788,5 +1801,18 @@ mod tests {
         // Which prover finishes first (the owned `ic3`, or rIC3 / btormc where the image has
         // them) is a race; at least one is named.
         assert!(miss.proved_unreachable(), "{miss}");
+    }
+
+    /// mununu#1121 — a rescue verdict describes itself in a note's words, never as the Rust
+    /// variant.
+    #[test]
+    fn x1121_the_rescue_verdict_describes_itself_in_words() {
+        assert_eq!(RescueVerdict::Inconclusive.describe(), "inconclusive");
+        assert_eq!(
+            RescueVerdict::Contradiction.describe(),
+            "the members contradicted"
+        );
+        assert_eq!(RescueVerdict::Holds.describe(), "holds");
+        assert_eq!(RescueVerdict::Violated.describe(), "violated");
     }
 }

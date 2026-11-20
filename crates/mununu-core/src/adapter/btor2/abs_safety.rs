@@ -109,7 +109,7 @@ fn one_pass(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return PassResult::Unknown(format!("encode: {e:?}")),
+            Err(e) => return PassResult::Unknown(format!("encode: {e}")),
         };
         // Named-state interface (cur / nx) + transition, mirroring `refine`.
         let name_to_nid: HashMap<String, Nid> = view
@@ -574,7 +574,7 @@ fn ic3_pass(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return Ic3Pass::Unknown(format!("encode: {e:?}")),
+            Err(e) => return Ic3Pass::Unknown(format!("encode: {e}")),
         };
         let scope = match build_abs_scope(&view, preds, &props) {
             Some(s) => s,

@@ -6536,7 +6536,8 @@ fn check_antecedent_vacuity(
                     level: NoteLevel::Info,
                     summary: format!(
                         "`{name}`: the antecedent-vacuity check did not decide whether `$rose({atom})` \
-                         is reachable ({other:?})."
+                         is reachable ({}).",
+                        other.describe(),
                     ),
                     detail: "The reach portfolio neither proved the flag never rises nor found a path \
                              raising it within the rescue slice; the row's HOLDS is neither shown \
@@ -6552,7 +6553,7 @@ fn check_antecedent_vacuity(
                     level: NoteLevel::Info,
                     summary: format!(
                         "`{name}`: the antecedent-vacuity check could not run on `$rose({atom})` \
-                         ({decline:?})."
+                         ({decline})."
                     ),
                     detail:
                         "The reach rescue declined the reachability question (a leaf it cannot \
@@ -7301,7 +7302,7 @@ pub(crate) fn verify_auto_impl(
                     kind: t.kind,
                     formula: formula_str.clone(),
                     outcome: VerifyOutcome::Skipped {
-                        reason: format!("formula failed to parse: {e:?}"),
+                        reason: format!("formula failed to parse: {e}"),
                     },
                     seeded_predicates: Vec::new(),
                     counterexample: None,

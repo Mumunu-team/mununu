@@ -52,6 +52,20 @@ pub enum PropertyClass {
     Propositional,
 }
 
+impl PropertyClass {
+    /// The class in the planner's words (`safety`, `reachability`, `liveness`, `mixed`,
+    /// `propositional`), for notes and routing rationales.
+    pub fn name(self) -> &'static str {
+        match self {
+            PropertyClass::Safety => "safety",
+            PropertyClass::Reachability => "reachability",
+            PropertyClass::Liveness => "liveness",
+            PropertyClass::Mixed => "mixed",
+            PropertyClass::Propositional => "propositional",
+        }
+    }
+}
+
 /// Convenience methods for inspecting and traversing [`Node`] values.
 pub trait NodeOps {
     /// Returns `true` if this node is a fixpoint (`mu` or `nu`).
@@ -379,7 +393,7 @@ pub fn cube_modality_soundness_warnings(
         };
         if guard.control != Control::All {
             out.push(format!(
-                "{op} modality with ctrl={:?} over a predicate cube: the per-player \
+                "{op} modality with ctrl={} over a predicate cube: the per-player \
                  (controller × environment) 3-valued game semantics is SOUND as of \
                  PO-3 / R.6.8 (de Alfaro–Godefroid–Jagadeesan LICS 2004; evaluate_tri \
                  routes the controllability arms through the per-player rule). BUT over a \
@@ -388,7 +402,7 @@ pub fn cube_modality_soundness_warnings(
                  controllability verdict is only MEANINGFUL over a controllability-aware \
                  (R.6.6) cube with declared controllable inputs. Use a bare {op} for plain \
                  verification.",
-                guard.control
+                guard.control.as_str()
             ));
         }
         if let Some(k) = guard.max_steps {
@@ -453,6 +467,32 @@ impl NodeOps for Node {
     }
 }
 
+impl Node {
+    /// The node's operator in the formula's own syntax, for a message that names a shape it
+    /// cannot read (mununu#1121): `` `&&` ``, "a `nu` fixpoint", "a `[]` modality", …
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Node::True => "`true`",
+            Node::False => "`false`",
+            Node::Predicate(_) => "an atom",
+            Node::Variable(_) => "a fixpoint variable",
+            Node::Not(_) => "`!`",
+            Node::And(..) => "`&&`",
+            Node::Or(..) => "`||`",
+            Node::Modal {
+                kind: ModalKind::Box,
+                ..
+            } => "a `[]` modality",
+            Node::Modal {
+                kind: ModalKind::Diamond,
+                ..
+            } => "a `<>` modality",
+            Node::Mu { .. } => "a `mu` fixpoint",
+            Node::Nu { .. } => "a `nu` fixpoint",
+        }
+    }
+}
+
 /// Distinguishes box vs. diamond modalities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
@@ -471,6 +511,18 @@ pub enum Control {
     All,
     Controllable,
     Environment,
+}
+
+impl Control {
+    /// The controllability as the formula parser reads it in a guard
+    /// (`ctrl = all | controllable | environment`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Control::All => "all",
+            Control::Controllable => "controllable",
+            Control::Environment => "environment",
+        }
+    }
 }
 
 /// Variable guard describing required/forbidden symbols.
@@ -830,5 +882,74 @@ mod constant_value_tests {
         assert_eq!(v("nu X. ((mu Y. (true || [] Y)) && [] X)"), Some(true));
         assert_eq!(v("nu X. ((a == 1) && [] X)"), None);
         assert_eq!(v("nu X. (a && [] X)"), None);
+    }
+
+    /// mununu#1121 — a property class names itself in lowercase words, one per class.
+    #[test]
+    fn x1121_the_property_class_name_is_a_lowercase_word() {
+        use crate::mu_calculus::PropertyClass;
+        let names: Vec<&str> = [
+            PropertyClass::Safety,
+            PropertyClass::Reachability,
+            PropertyClass::Liveness,
+            PropertyClass::Mixed,
+            PropertyClass::Propositional,
+        ]
+        .iter()
+        .map(|c| c.name())
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "safety",
+                "reachability",
+                "liveness",
+                "mixed",
+                "propositional"
+            ]
+        );
+    }
+
+    /// mununu#1121 — a controllability's name is the keyword the guard parser accepts.
+    #[test]
+    fn x1121_the_control_name_is_the_guard_keyword_the_parser_reads() {
+        use crate::mu_calculus::Control;
+        for c in [Control::All, Control::Controllable, Control::Environment] {
+            let f = crate::mu_calculus::parser::parse(&format!("[(ctrl={})] p", c.as_str()))
+                .expect("the guard keyword parses");
+            let guards: Vec<Control> = f
+                .nodes()
+                .iter()
+                .filter_map(|n| match n {
+                    crate::mu_calculus::Node::Modal { guard, .. } => Some(guard.control),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(guards, [c]);
+        }
+    }
+
+    /// mununu#1121 — a node names its operator in the formula's syntax, never the Rust
+    /// variant.
+    #[test]
+    fn x1121_a_formula_node_names_its_operator_in_the_formula_syntax() {
+        let f = crate::mu_calculus::parser::parse("nu X. ((mu Y. (p || <> Y)) && [] X)")
+            .expect("parses");
+        let mut names: Vec<&str> = f.nodes().iter().map(|n| n.kind_name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names,
+            [
+                "`&&`",
+                "`||`",
+                "a `<>` modality",
+                "a `[]` modality",
+                "a `mu` fixpoint",
+                "a `nu` fixpoint",
+                "a fixpoint variable",
+                "an atom",
+            ]
+        );
     }
 }

@@ -799,7 +799,7 @@ pub fn parse_response_atom(s: &str) -> Result<Atom, String> {
             "`{s}` is not a single register-comparison atom (`REG op VALUE`); relational or \
              compound atoms are out of the response fragment"
         )),
-        Err(e) => Err(format!("cannot parse response atom `{s}`: {e:?}")),
+        Err(e) => Err(format!("cannot parse response atom `{s}`: {e}")),
     }
 }
 

@@ -700,14 +700,16 @@ impl BvTermBackend for AigBackend<'_> {
             }
             Op::Read | Op::Write => {
                 return Err(format!(
-                    "aig: node {nid} is an array operation ({op:?}); the bit-level SAT engines \
-                     take no arrays yet"
+                    "aig: node {nid} is an array operation ({}); the bit-level SAT engines \
+                     take no arrays yet",
+                    op.keyword()
                 ));
             }
         };
         if out.len() != w {
             return Err(format!(
-                "aig: node {nid} ({op:?}) produced {} bits for a {w}-bit sort",
+                "aig: node {nid} ({}) produced {} bits for a {w}-bit sort",
+                op.keyword(),
                 out.len()
             ));
         }

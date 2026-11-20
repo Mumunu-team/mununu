@@ -135,7 +135,7 @@ pub fn widen_sidecar(
             "R-Y2: per-signal init-policy overrides: {}",
             init_policy_overrides
                 .iter()
-                .map(|(n, p)| format!("{n}={p:?}"))
+                .map(|(n, p)| format!("{n}={}", p.as_str()))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));

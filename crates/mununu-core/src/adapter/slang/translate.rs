@@ -598,7 +598,7 @@ pub fn translate_ast_json_with_source(
                 report.unsupported.push(UnsupportedAssertion {
                     name,
                     kind: None,
-                    reason: format!("unknown assertionKind: {other:?}"),
+                    reason: format!("unknown assertionKind: {}", other.unwrap_or("<missing>")),
                 });
                 continue;
             }
@@ -2126,7 +2126,7 @@ fn translate_one(
     };
     // Safety net: only ship formulas the evaluator's parser accepts.
     crate::mu_calculus::parser::parse(&formula)
-        .map_err(|e| format!("emitted formula failed to parse ({e:?}): {formula}"))?;
+        .map_err(|e| format!("emitted formula failed to parse ({e}): {formula}"))?;
     Ok(formula)
 }
 
@@ -2141,7 +2141,7 @@ fn translate_one(
 fn recoverability_companion_formula(ef_formula: &str) -> Result<String, String> {
     let companion = format!("nu Y. (({ef_formula}) && [] Y)");
     crate::mu_calculus::parser::parse(&companion)
-        .map_err(|e| format!("recoverability companion failed to parse ({e:?}): {companion}"))?;
+        .map_err(|e| format!("recoverability companion failed to parse ({e}): {companion}"))?;
     Ok(companion)
 }
 
@@ -2484,7 +2484,8 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
         }
         other => Err(format!(
             "unsupported implication consequent (expected a boolean, a `##k`/`##[m:n]` \
-             delayed boolean, a `b[*n]` repetition, or a `##` chain of booleans, got {other:?})"
+             delayed boolean, a `b[*n]` repetition, or a `##` chain of booleans, got {})",
+            other.unwrap_or("<missing>")
         )),
     }
 }
@@ -2560,7 +2561,8 @@ fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
         }
         other => Err(format!(
             "unsupported operand of `throughout` (expected a bounded sequence of booleans, got \
-             {other:?})"
+             {})",
+            other.unwrap_or("<missing>")
         )),
     }
 }
@@ -2681,8 +2683,10 @@ fn unary_temporal(spec: &Value) -> Result<String, String> {
 fn seq_leaf(seq: &Value) -> Result<String, String> {
     if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
         return Err(format!(
-            "nested sequence element (expected a boolean leaf, got {:?}) — Tier-3b",
-            seq.get("kind").and_then(Value::as_str)
+            "nested sequence element (expected a boolean leaf, got {}) — Tier-3b",
+            seq.get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>")
         ));
     }
     let b = bool_expr(child(seq, "expr")?)?;
@@ -2903,9 +2907,11 @@ fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
     let leaf = |seq: &Value, gap: (u32, u32)| -> Result<AntecedentLink, String> {
         if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
             return Err(format!(
-                "a nested sub-sequence in an antecedent (got {:?}) needs length composition — \
+                "a nested sub-sequence in an antecedent (got {}) needs length composition — \
                  Tier-3b",
-                seq.get("kind").and_then(Value::as_str)
+                seq.get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing>")
             ));
         }
         let rep = match seq.get("repetition") {
@@ -2947,7 +2953,8 @@ fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
         other => {
             return Err(format!(
                 "unsupported implication antecedent (expected a boolean, a repeated boolean or \
-                 a bounded `##` chain of them, got {other:?})"
+                 a bounded `##` chain of them, got {})",
+                other.unwrap_or("<missing>")
             ));
         }
     };
@@ -3406,8 +3413,8 @@ fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
                 } else {
                     let v = atom(m).ok_or_else(|| {
                         format!(
-                            "inside: set member is not a signal/literal atom (kind={:?})",
-                            m.get("kind").and_then(Value::as_str)
+                            "inside: set member is not a signal/literal atom (kind={})",
+                            m.get("kind").and_then(Value::as_str).unwrap_or("<missing>")
                         )
                     })?;
                     terms.push(format!("({lhs} == {v})"));
@@ -4492,8 +4499,14 @@ pub(crate) fn parse_sv_literal(raw: &str) -> Option<i64> {
 }
 
 fn child<'a>(node: &'a Value, key: &str) -> Result<&'a Value, String> {
-    node.get(key)
-        .ok_or_else(|| format!("missing field `{key}` on {:?}", node.get("kind")))
+    node.get(key).ok_or_else(|| {
+        format!(
+            "missing field `{key}` on {}",
+            node.get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>")
+        )
+    })
 }
 
 #[cfg(test)]

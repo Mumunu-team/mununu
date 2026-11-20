@@ -383,7 +383,8 @@ pub fn assemble_sv_design(
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
             notes.push(format!(
-                "{base}: module(s) {mods:?} already staged → skipped (.sv/.v twin / duplicate)"
+                "{base}: module(s) {} already staged → skipped (.sv/.v twin / duplicate)",
+                mods.join(", ")
             ));
             return false;
         }
@@ -433,9 +434,13 @@ pub fn assemble_sv_design(
                     .map(|(m, _)| m.clone())
             });
             notes.push(format!(
-                "{} top candidates {:?} → {}",
+                "{} top candidates {} → {}",
                 top_candidates.len(),
-                top_candidates.iter().map(|(m, _)| m).collect::<Vec<_>>(),
+                top_candidates
+                    .iter()
+                    .map(|(m, _)| m.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 pick.as_deref().unwrap_or("(ambiguous — Yosys auto-detect)")
             ));
             pick

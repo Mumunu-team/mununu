@@ -1307,6 +1307,17 @@ impl InitPolicy {
             InitPolicy::Anyseq => Some(("anyseq", 1)),
         }
     }
+
+    /// The sidecar spelling of the policy (`inherit`, `zero`, `anyconst`, `anyseq`), as the
+    /// `init_policy` key reads it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InitPolicy::Inherit => "inherit",
+            InitPolicy::Zero => "zero",
+            InitPolicy::Anyconst => "anyconst",
+            InitPolicy::Anyseq => "anyseq",
+        }
+    }
 }
 
 /// A property to verify.
@@ -3175,6 +3186,22 @@ mod tests {
                 SV_PROPERTY_KEYS.contains(&k.as_str()),
                 "PropertyAnnotation field `{k}` missing from SV_PROPERTY_KEYS allowlist"
             );
+        }
+    }
+
+    /// mununu#1121 — the policy's name is the sidecar spelling: it reads back through the
+    /// `init_policy` key.
+    #[test]
+    fn x1121_the_init_policy_name_is_the_sidecar_spelling() {
+        for p in [
+            InitPolicy::Inherit,
+            InitPolicy::Zero,
+            InitPolicy::Anyconst,
+            InitPolicy::Anyseq,
+        ] {
+            let back: InitPolicy = serde_json::from_str(&format!("\"{}\"", p.as_str()))
+                .expect("the sidecar key accepts the name");
+            assert_eq!(back, p);
         }
     }
 }
