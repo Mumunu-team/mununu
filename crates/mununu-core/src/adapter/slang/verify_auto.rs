@@ -2184,6 +2184,54 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
     }
 }
 
+/// How a formula quantifies over paths, read off its modalities under polarity (a `[]` under an
+/// odd number of negations reads as `<>`, and vice versa). The transfer of a verdict across an
+/// over-approximating model depends on this, not on the fixpoint kind (mununu#1126).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathQuantification {
+    /// No modality: a state predicate.
+    None,
+    /// Only `[]` in positive polarity.
+    Universal,
+    /// Only `<>` in positive polarity.
+    Existential,
+    /// Both.
+    Branching,
+}
+
+fn path_quantification(formula: &crate::mu_calculus::Formula) -> PathQuantification {
+    use crate::mu_calculus::{ModalKind, Node};
+    let mut boxes = false;
+    let mut diamonds = false;
+    let mut stack: Vec<(crate::mu_calculus::NodeId, bool)> = vec![(formula.root(), true)];
+    while let Some((id, positive)) = stack.pop() {
+        match formula.node(id) {
+            Node::True | Node::False | Node::Predicate(_) | Node::Variable(_) => {}
+            Node::Not(inner) => stack.push((*inner, !positive)),
+            Node::And(a, b) | Node::Or(a, b) => {
+                stack.push((*a, positive));
+                stack.push((*b, positive));
+            }
+            Node::Modal { kind, target, .. } => {
+                let universal = matches!(kind, ModalKind::Box) == positive;
+                if universal {
+                    boxes = true;
+                } else {
+                    diamonds = true;
+                }
+                stack.push((*target, positive));
+            }
+            Node::Mu { body, .. } | Node::Nu { body, .. } => stack.push((*body, positive)),
+        }
+    }
+    match (boxes, diamonds) {
+        (false, false) => PathQuantification::None,
+        (true, false) => PathQuantification::Universal,
+        (false, true) => PathQuantification::Existential,
+        (true, true) => PathQuantification::Branching,
+    }
+}
+
 /// mununu#750 — withhold a `Violated` whose cone reads an undriven net.
 ///
 /// An undriven net — an unconnected wire, or the output of a module missing from the source set,
@@ -2207,10 +2255,14 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
 /// reachable" may rest on a run the hardware never takes (`existential-holds-over-free-leaves`,
 /// `existential-holds-over-clock-as-data`). Which verdicts transfer across a freer model:
 ///
-/// | row | universal (`AG`, `nu`) | existential (`EF`, `mu`, a cover) |
-/// |---|---|---|
-/// | HOLDS | transfers | withheld |
-/// | VIOLATED | withheld | transfers (the refutation is stronger) |
+/// Which verdicts transfer is decided by how the formula quantifies over paths — its
+/// modalities under polarity, not its fixpoint kind (`s_eventually b` is `mu Y. (b || [] Y)`,
+/// `mu`-rooted and universal):
+///
+/// | row | only `[]` (universal) | only `<>` (existential) | both (branching) |
+/// |---|---|---|---|
+/// | HOLDS | transfers | withheld | withheld |
+/// | VIOLATED | withheld | transfers (the refutation is stronger) | withheld |
 fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2: &str) {
     if !report.properties.iter().any(|p| {
         matches!(
@@ -2233,12 +2285,20 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
         let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
             continue;
         };
-        let existential =
-            formula.property_class() == crate::mu_calculus::PropertyClass::Reachability;
-        // SOUNDNESS: an existential refutation (target unreachable) and a universal HOLDS are
-        // STRONGER on a freer model and transfer; a universal VIOLATED and an existential HOLDS
-        // (mununu#1126) may rest on a run the hardware never takes and are withheld below.
-        if (violated && existential) || (holds && !existential) {
+        let quantification = path_quantification(&formula);
+        // SOUNDNESS: on a model with MORE runs than the hardware, a verdict transfers when the
+        // formula's path quantifier is monotone the right way: a universal (`[]`-only) HOLDS and
+        // an existential (`<>`-only) refutation are STRONGER on the freer model; a universal
+        // VIOLATED and an existential HOLDS (mununu#1126) may rest on a run the hardware never
+        // takes; a branching formula (both modalities) transfers neither way. A formula with no
+        // modality is a state predicate at the initial state, the same on both models.
+        let transfers = match quantification {
+            PathQuantification::Universal => holds,
+            PathQuantification::Existential => violated,
+            PathQuantification::Branching => false,
+            PathQuantification::None => true,
+        };
+        if transfers {
             continue;
         }
         let mut leaves: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -9410,10 +9470,10 @@ impl BottomReason {
                 "the target was reached on a model FREER than the RTL: the property's cone reads \
                  {} undriven net(s) ({}) — an unconnected wire or the output of a module missing \
                  from the source set, free at every cycle — so the run that reaches it may be one \
-                 the real driver never produces, and the existential HOLDS (a cover, an EF) is \
-                 withheld rather than reported. Vendor the missing module or provide the driver \
-                 to decide this property; a refutation (unreachable) over the same model would \
-                 have transferred (mununu#1126).",
+                 the real driver never produces, and the existential or branching HOLDS (a cover, \
+                 an EF, an AG EF) is withheld rather than reported. Vendor the missing module or \
+                 provide the driver to decide this property; a universal HOLDS or an existential \
+                 refutation over the same model would have transferred.",
                 leaves.len(),
                 leaves.join(", ")
             ),
@@ -9421,11 +9481,11 @@ impl BottomReason {
                 "the target was reached on a model that reads {} clock net(s) ({}) as DATA — a \
                  latch enabled by a clock level, or other logic on the clock: the model treats \
                  that read as a free input, so the run that reaches the target may need a clock \
-                 value between edges the hardware never shows, and the existential HOLDS (a \
-                 cover, an EF) is withheld rather than reported. Write the target over registers \
-                 the clock-level logic does not feed, or model the latch as a clock enable; a \
-                 refutation (unreachable) over the same model would have transferred \
-                 (mununu#1126).",
+                 value between edges the hardware never shows, and the existential or branching \
+                 HOLDS (a cover, an EF, an AG EF) is withheld rather than reported. Write the \
+                 target over registers the clock-level logic does not feed, or model the latch \
+                 as a clock enable; a universal HOLDS or an existential refutation over the same \
+                 model would have transferred.",
                 clocks.len(),
                 clocks.join(", ")
             ),
@@ -13705,6 +13765,9 @@ mod tests {
 15 state 1 q
 16 init 1 15 9
 17 next 1 15 13
+18 input 1
+19 state 1 s
+20 next 1 19 18
 ";
         let mk =
             |name: &str, kind: SvaKind, formula: &str, outcome: VerifyOutcome| PropertyVerdict {
@@ -13745,6 +13808,33 @@ mod tests {
                     SvaKind::Cover,
                     "mu X. ((r == 1) || <> X)",
                     VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                // `s_eventually (r == 1)`: `mu`-rooted but universal — the review's row.
+                mk(
+                    "af_violated_over_clock",
+                    SvaKind::Assert,
+                    "mu Y. ((r == 1) || [] Y)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                mk(
+                    "af_holds_over_clock",
+                    SvaKind::Assert,
+                    "mu Y. ((r == 1) || [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                // `AG EF (r == 1)`: branching — neither verdict transfers.
+                mk(
+                    "ag_ef_over_clock",
+                    SvaKind::Cover,
+                    "nu Y. ((mu X. ((r == 1) || <> X)) && [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                // A cover over the undriven net `s` reads (18 is an anonymous input).
+                mk(
+                    "cover_over_undriven",
+                    SvaKind::Cover,
+                    "mu X. ((s == 1) || <> X)",
+                    VerifyOutcome::Holds,
                 ),
             ],
             ..Default::default()
@@ -13794,6 +13884,65 @@ mod tests {
             ),
             "an existential refutation is stronger on a freer model: {:?}",
             by("ef_refuted_over_clock").outcome
+        );
+        let af_v = by("af_violated_over_clock");
+        assert!(
+            matches!(af_v.outcome, VerifyOutcome::Unknown { .. }),
+            "a universal (`[]`-only) VIOLATED is withheld whatever its fixpoint: {:?}",
+            af_v.outcome
+        );
+        assert_eq!(
+            af_v.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("violation-over-clock-as-data")
+        );
+        assert!(
+            matches!(by("af_holds_over_clock").outcome, VerifyOutcome::Holds),
+            "a universal HOLDS transfers whatever its fixpoint: {:?}",
+            by("af_holds_over_clock").outcome
+        );
+        let ag_ef = by("ag_ef_over_clock");
+        assert!(
+            matches!(ag_ef.outcome, VerifyOutcome::Unknown { .. }),
+            "a branching HOLDS (AG EF) transfers neither way: {:?}",
+            ag_ef.outcome
+        );
+        assert_eq!(
+            ag_ef.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("existential-holds-over-clock-as-data")
+        );
+        let undriven = by("cover_over_undriven");
+        assert_eq!(
+            undriven.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("existential-holds-over-free-leaves"),
+            "{:?} {:?}",
+            undriven.outcome,
+            undriven.bottom_reason
+        );
+    }
+
+    /// mununu#1126 — the quantification walk: modalities under polarity, not fixpoints.
+    #[test]
+    fn x1126_path_quantification_reads_the_modalities_under_polarity() {
+        let q =
+            |f: &str| path_quantification(&crate::mu_calculus::parser::parse(f).expect("parse"));
+        assert_eq!(q("nu X. ((r == 0) && [] X)"), PathQuantification::Universal);
+        assert_eq!(q("mu Y. ((r == 1) || [] Y)"), PathQuantification::Universal);
+        assert_eq!(
+            q("mu X. ((r == 1) || <> X)"),
+            PathQuantification::Existential
+        );
+        assert_eq!(
+            q("nu X. ((r == 1) && <> X)"),
+            PathQuantification::Existential
+        );
+        assert_eq!(
+            q("nu Y. ((mu X. ((r == 1) || <> X)) && [] Y)"),
+            PathQuantification::Branching
+        );
+        assert_eq!(q("(r == 1) && (q == 0)"), PathQuantification::None);
+        assert_eq!(
+            q("!(mu X. ((r == 1) || <> X))"),
+            PathQuantification::Universal
         );
     }
 

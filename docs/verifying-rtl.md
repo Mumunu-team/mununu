@@ -1648,23 +1648,27 @@ model on one design, not proved for the class (mununu#1030).
 
 > Source of truth: [`BottomReason::ExistentialHoldsOverClockAsData`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`withhold_violated_over_free_leaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
 
-The same two over-approximations, read in the other direction. On a model with more runs than
-the hardware a universal `HOLDS` and an existential refutation transfer; a universal `VIOLATED`
-(above) and an **existential `HOLDS`** do not: a cover or an `EF` row reported reachable may be
-reachable only through a run the hardware never takes — a clock held across a step, an undriven
-net at a value its real driver never produces. On the mununu#1030 latch, `cover property (r != dq)`
+The same two over-approximations, read in the other direction. Which verdict transfers from a
+model with more runs than the hardware is decided by how the formula quantifies over paths — its
+modalities under negation, not its fixpoint kind (`s_eventually b` is `mu Y. (b || [] Y)`, a
+`mu` that is universal). A universal (`[]`-only) `HOLDS` and an existential (`<>`-only)
+refutation transfer; a universal `VIOLATED` (above) and an **existential `HOLDS`** do not: a
+cover or an `EF` row reported reachable may be reachable only through a run the hardware never
+takes — a clock held across a step, an undriven net at a value its real driver never produces. A
+branching formula (both modalities, `AG EF p`) transfers neither verdict. On the mununu#1030 latch, `cover property (r != dq)`
 with `dq <= d` is unreachable on the hardware (the latch is transparent through the low phase, so
 `r == dq` at every edge) and shipped `HOLDS` with no note. Such a row is now `unknown` with
 `bottom_reason.kind = "existential-holds-over-clock-as-data"` (or `…-over-free-leaves`), the nets
 named in `detail`; no trace is kept, because a cover carries none. The table:
 
-| row | universal (`assert`, `AG`, `nu`) | existential (`cover`, `EF`, `mu`) |
-|---|---|---|
-| `HOLDS` | transfers | withheld |
-| `VIOLATED` | withheld (may-trace kept) | transfers |
+| row | only `[]` — universal (`assert`, `AG`, `s_eventually`) | only `<>` — existential (`cover`, `EF`) | both — branching (`AG EF`) |
+|---|---|---|---|
+| `HOLDS` | transfers | withheld | withheld |
+| `VIOLATED` | withheld (may-trace kept) | transfers | withheld (may-trace kept) |
 
-An `AG EF` row (a recoverability companion, class Mixed) is in neither column and is not
-withheld by this pass. The withholding is by cone, not by truth: a cover the hardware does reach
+A `HOLDS` on a universal row still carries its non-vacuity result, which is itself existential
+(the antecedent was reached); over these cones that witness has the same doubt and is not
+qualified by this pass. The withholding is by cone, not by truth: a cover the hardware does reach
 is withheld as well when its cone reads such a net (on the design above, `cover (r == 1)`), because
 the pass cannot tell the two apart without modelling clock levels — a precision loss on the sound
 side, and a mununu limitation for that cover today.
