@@ -45,8 +45,9 @@ pub const LIFT_CACHE_DIR_ENV: &str = "MUNUNU_LIFT_CACHE_DIR";
 /// manifest, so a change to any of those misses on its own. 2 (N1, 2026-11-04): one attempt per
 /// lift, the slang-only product front end. 3 (mununu#956/#957, 2026-11-10): include contents
 /// keyed as raw bytes, absolutely-`include`d files keyed, tool binaries keyed by size and mtime,
-/// and only lifts that wrote both JSON snapshots are stored.
-pub(super) const LIFT_CACHE_FORMAT: u32 = 3;
+/// and only lifts that wrote both JSON snapshots are stored. 4 (mununu#1138, 2026-11-20): yosys
+/// runs inside the staging directory and the script names the staged files relative to it.
+pub(super) const LIFT_CACHE_FORMAT: u32 = 4;
 
 /// Caps on the include-directory walk: above either, the manifest is not built and the lift
 /// bypasses the cache (a walk that large would cost more than the lift it saves).
