@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::adapter::btor2::aig::{AigModel, AigNode, Lit};
+use crate::adapter::btor2::aig::{AigModel, AigNode, BuildLimits, BuildStop, Lit};
 use crate::adapter::btor2::ast::Btor2File;
 use crate::adapter::btor2::native_bmc::BmcTrace;
 use crate::adapter::btor2::sat_bmc::{btor2_witness_with_free, cell_name};
@@ -1396,13 +1396,38 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
 /// IC3 on `file`. `Err` = the design cannot be modelled (arrays, an operator the AIG backend
 /// refuses), with the reason; every other way of not answering is a `Stopped` with its reason.
 pub fn ic3(file: &Btor2File, opts: &Ic3Options) -> Result<Ic3Outcome, String> {
-    let model = AigModel::build(file)?;
+    // mununu#1142 — the build honours the member's deadline and cancel flag too.
+    let built = AigModel::build_with(
+        file,
+        &BuildLimits::member(opts.deadline, opts.cancel.clone()),
+    );
+    ic3_built(file, &built, opts)
+}
+
+/// mununu#1142 — [`ic3`] over the result of a build the caller owns (the portfolio builds one
+/// model for both bit-level members): a refusal is `Err`, a stopped build is a `Stopped` at
+/// frame 0 with the build's reason, and a model is searched.
+pub fn ic3_built(
+    file: &Btor2File,
+    built: &Result<AigModel, BuildStop>,
+    opts: &Ic3Options,
+) -> Result<Ic3Outcome, String> {
+    let model = match built {
+        Ok(model) => model,
+        Err(BuildStop::Refused(why)) => return Err(why.clone()),
+        Err(stop) => {
+            return Ok(Ic3Outcome::Stopped {
+                frames: 0,
+                reason: stop.to_string(),
+            });
+        }
+    };
     if model.bads.is_empty() {
         // A design with no `bad` has nothing for a reachability engine to decide; every other
         // member refuses it, and so does this one — `Safe` would read as a proof of nothing.
         return Err(NO_BAD.to_string());
     }
-    Ok(ic3_model(file, &model, opts))
+    Ok(ic3_model(file, model, opts))
 }
 
 const NO_BAD: &str = "the design has no bad property; nothing to decide";
@@ -1494,7 +1519,7 @@ pub(crate) fn certify_literal_clauses(
     file: &Btor2File,
     inv: &[Vec<(usize, usize, bool)>],
 ) -> Result<(), String> {
-    let model = AigModel::build(file)?;
+    let model = AigModel::build(file).map_err(|e| e.to_string())?;
     let mut me = Ic3::new(
         &model,
         Stop {

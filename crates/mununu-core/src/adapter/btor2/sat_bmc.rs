@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::adapter::btor2::aig::{AigModel, AigNode, Lit};
+use crate::adapter::btor2::aig::{AigModel, AigNode, BuildLimits, BuildStop, Lit};
 use crate::adapter::btor2::ast::Btor2File;
 
 /// How far and how long the search may go.
@@ -507,8 +507,29 @@ pub fn btor2_witness_with_free(
 /// Bit-level BMC on `file` up to `opts.max_depth`. `Err` = the design cannot be modelled (arrays,
 /// an operator the AIG backend refuses), with the reason.
 pub fn sat_bmc(file: &Btor2File, opts: &SatBmcOptions) -> Result<SatBmcOutcome, String> {
-    let model = AigModel::build(file)?;
-    sat_bmc_model(&model, opts)
+    // mununu#1142 — the build honours the member's deadline and cancel flag too.
+    let built = AigModel::build_with(
+        file,
+        &BuildLimits::member(opts.deadline, opts.cancel.clone()),
+    );
+    sat_bmc_built(&built, opts)
+}
+
+/// mununu#1142 — [`sat_bmc`] over the result of a build the caller owns (the portfolio builds
+/// one model for both bit-level members): a refusal is `Err`, a stopped build is a `Stopped` at
+/// depth 0 with the build's reason, and a model is searched.
+pub fn sat_bmc_built(
+    built: &Result<AigModel, BuildStop>,
+    opts: &SatBmcOptions,
+) -> Result<SatBmcOutcome, String> {
+    match built {
+        Ok(model) => sat_bmc_model(model, opts),
+        Err(BuildStop::Refused(why)) => Err(why.clone()),
+        Err(stop) => Ok(SatBmcOutcome::Stopped {
+            depth: 0,
+            reason: stop.to_string(),
+        }),
+    }
 }
 
 /// [`sat_bmc`] over an already-built model.
