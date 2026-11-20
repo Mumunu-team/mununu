@@ -533,10 +533,8 @@ impl std::fmt::Display for RescueDecline {
         match self {
             RescueDecline::ShapeNotReducible => write!(
                 f,
-                "the formula matched none of `AG(atom)`, `AG(boolean-of-atoms)`, `A |=> C`, or a \
-                 bounded box chain with at most one box-bearing side per `||` and at most one \
-                 `e throughout b[->1]` block, at the bottom (depth ≤ {})",
-                MAX_CHAIN_DEPTH
+                "the formula matched none of the forms the lane decides: {}. {SHAPE_REMEDY}",
+                accepted_safety_shapes()
             ),
             RescueDecline::MonitorEmissionFailed(m) => {
                 write!(f, "the bad-monitor emitter refused the reduced body: {m}")
@@ -547,6 +545,27 @@ impl std::fmt::Display for RescueDecline {
         }
     }
 }
+
+/// The forms the safety-rescue lane decides, in the property's own vocabulary — the one list
+/// every message about `safety-shape-not-reducible` quotes (mununu#1121, U2.6: four messages
+/// used to carry three different lists, one of them naming `A |=> C` as rejected after the
+/// reducer for it had shipped).
+pub fn accepted_safety_shapes() -> String {
+    format!(
+        "`AG(atom)` and `AG(boolean of atoms)` where every atom compares one register, port or \
+         input with a constant; `A |=> C` with a boolean antecedent and consequent; and a bounded \
+         box chain (`a |-> ##[0:k] b`, `a |=> ##n c`, `throughout` conjunctions) with at most one \
+         box-bearing side per `||`, at most one `e throughout b[->1]` block at the bottom, and \
+         depth ≤ {MAX_CHAIN_DEPTH}"
+    )
+}
+
+/// What the user can do about a `safety-shape-not-reducible`, and who owns the rest. A new
+/// reducer is not something a property can supply.
+pub const SHAPE_REMEDY: &str = "Write the assertion in one of those forms — the fix is the \
+     property's shape, not a bigger budget. An assertion already in one of them that still \
+     declines is a mununu limitation, not something the property can change — please report the \
+     assertion (mununu#1121).";
 
 /// The compound-shape emission chain: `AG(boolean)` first, then `AG(A → AX C)`.
 ///

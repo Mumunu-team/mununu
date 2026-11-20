@@ -8540,13 +8540,13 @@ pub(crate) fn escalate_bottom_with_slice(
                                      compiling it to a `bad`-monitor and running the concrete \
                                      portfolio. When it declines, the ⊥ stands. The reason above \
                                      distinguishes the two cases a consumer must act on \
-                                     differently: a SHAPE the reducers do not match (reshape the \
-                                     property, or a new reducer is needed) versus a LEAF the \
+                                     differently: a SHAPE outside the forms the lane decides \
+                                     (the reason lists them, and what to do) versus a LEAF the \
                                      monitor emitter cannot resolve to a state cell, output port \
                                      or primary input (an internal combinational wire, typically \
-                                     — the property is fine, the monitor simply has nothing to \
-                                     observe). Neither is a resource abstain, so a bigger budget \
-                                     will not help either one."
+                                     — write the atom over a register or a port). Neither is a \
+                                     resource abstain, so a bigger budget will not help either \
+                                     one."
                                 .into(),
                             items: Vec::new(),
                             property: Some(prop.name.clone()),
@@ -9291,8 +9291,12 @@ impl BottomReason {
     /// One-line rendering for the CLI, carrying the budget name where there is one.
     pub fn one_line(&self) -> String {
         match self {
-            Self::SafetyShapeNotReducible => "safety-shape-not-reducible — the property SHAPE is                  outside the rescue lane; needs a reshape or a new reducer, NOT a bigger budget"
-                .to_string(),
+            Self::SafetyShapeNotReducible => format!(
+                "safety-shape-not-reducible — the property's shape is outside the forms the \
+                 rescue lane decides ({}). {}",
+                crate::adapter::reach_rescue::accepted_safety_shapes(),
+                crate::adapter::reach_rescue::SHAPE_REMEDY
+            ),
             Self::NoStateModelNonSafety => "no-state-model-non-safety — the design has zero state                  registers; a modelling issue, not an engine cap"
                 .to_string(),
             Self::UnclassifiedBottom => "unclassified — cause not established; do NOT read as                  distinct-from-abstain"
@@ -9467,18 +9471,17 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
         BottomReason::SafetyShapeNotReducible => (
             format!(
                 "`{name}`: residual ⊥ classified as `safety-shape-not-reducible` — the \
-                 rescue lane could not reduce this AG-safety shape (compound-of-relational, \
-                 non-standard AG outer shape, or a leaf the compiler rejects). NOT the same \
-                 as an engine resource abstain — this is a modelling / property-shape gap."
+                 rescue lane decides only the forms its detail lists, and this AG-safety \
+                 property is in none of them (a register compared with another register, a \
+                 leaf the monitor compiler rejects, or an outer shape that is not an `AG`). \
+                 NOT the same as an engine resource abstain — a property-shape gap."
             ),
-            "The safety-rescue lane (mununu#492) accepts `AG(single_atom)` and \
-             `AG(compound_boolean_of_single_atoms)` where each leaf is a `REG op VALUE` \
-             comparison. Shapes outside that — a compound-of-relational (`AG(reg_a == reg_b \
-             && …)`), a `CmpRegAddend` leaf, an `AG(a → AX b)` implication-with-next, or a \
-             non-standard AG outer shape — are rejected here. A downstream gate should NOT \
-             treat this ⊥ as interchangeable with an engine's resource abstain: this needs \
-             a property reshape or a new rescue reducer, not a bigger budget."
-                .into(),
+            format!(
+                "The safety-rescue lane (mununu#492) decides {}. {} A downstream gate should \
+                 NOT treat this ⊥ as interchangeable with an engine's resource abstain.",
+                crate::adapter::reach_rescue::accepted_safety_shapes(),
+                crate::adapter::reach_rescue::SHAPE_REMEDY
+            ),
         ),
         BottomReason::NoStateModelNonSafety => (
             format!(
@@ -9545,7 +9548,8 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
                  a consumer cannot filter out by not knowing about it. Branch a gate on the TAG: \
                  `budget-expired` is the one case where retrying with more budget is right; \
                  `engine-contradiction` is a SOUNDNESS ALARM where retrying is actively wrong; \
-                 `safety-shape-not-reducible` needs a property reshape, not a bigger budget.",
+                 `safety-shape-not-reducible` needs the property in one of the forms its note \
+                 lists, not a bigger budget.",
                 other.tag()
             ),
         ),
@@ -14442,6 +14446,41 @@ mod tests {
         assert!(
             matches!(report.properties[0].outcome, VerifyOutcome::Violated { .. }),
             "with no reset pinned there is nothing mununu removed, so the verdict stands"
+        );
+    }
+
+    /// mununu#1121 (U2.6) — a `safety-shape-not-reducible` tells the user which forms the
+    /// rescue lane decides and who owns the rest; "reshape the property, or a new reducer is
+    /// needed" named a fix only mununu can make. The same list feeds the one-liner, the
+    /// provenance note and the lane's own decline, so they cannot drift apart again (the note
+    /// used to call `A |=> C` rejected after its reducer had shipped).
+    #[test]
+    fn x1121_the_shape_abstention_lists_the_forms_the_lane_decides_and_owns_the_rest() {
+        let line = BottomReason::SafetyShapeNotReducible.one_line();
+        for form in ["`AG(atom)`", "`A |=> C`", "bounded box chain"] {
+            assert!(line.contains(form), "the one-liner lists {form}: {line}");
+        }
+        assert!(
+            line.contains("please report the assertion") && line.contains("mununu limitation"),
+            "the remainder is owned: {line}"
+        );
+        assert!(
+            !line.contains("reducer"),
+            "no fix only mununu can make: {line}"
+        );
+
+        let note = bottom_reason_note("p", BottomReason::SafetyShapeNotReducible);
+        assert!(note.detail.contains("`A |=> C`"), "{}", note.detail);
+        assert!(
+            !note.detail.contains("new rescue reducer") && !note.summary.contains("reducer"),
+            "{} / {}",
+            note.summary,
+            note.detail
+        );
+        let decline = crate::adapter::reach_rescue::RescueDecline::ShapeNotReducible.to_string();
+        assert!(
+            decline.contains("`A |=> C`") && decline.contains("please report"),
+            "{decline}"
         );
     }
 

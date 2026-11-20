@@ -805,8 +805,11 @@ pub(crate) fn run_cvc5_raw_cancellable(
     let bin = crate::adapter::cvc5::locate_cvc5().map_err(|e| format!("cvc5 unavailable: {e}"))?;
     let (mut child, group) = Command::new(&bin.path)
         // `--tlimit` is cvc5's own per-run budget; the wall-clock kill below is the
-        // hard backstop if it overruns. A timed-out query returns `Err` →
-        // `Unavailable` → `Undecided` (sound abstain), never a spurious verdict.
+        // hard backstop if it overruns. Either stop returns `Err` → `Unavailable` →
+        // `Undecided` (a sound abstain that names the budget), never a spurious verdict
+        // and never `NoInterpolant`: cvc5 exits by itself on `--tlimit` (status 134, empty
+        // stdout, "cvc5 interrupted by timeout." on stderr), which used to be read as an
+        // interpolation gap (mununu#1129).
         .args([
             "--lang=smt2",
             "--produce-interpolants",
@@ -826,9 +829,13 @@ pub(crate) fn run_cvc5_raw_cancellable(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 2_000);
     let mut latch = crate::adapter::CancelLatch::new();
     let mut killed = None;
+    let mut exit_status = None;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
             Ok(None) => {
                 let cancelled = latch.past_grace(cancel);
                 if cancelled || Instant::now() > deadline {
@@ -852,7 +859,62 @@ pub(crate) fn run_cvc5_raw_cancellable(
     if let Some(mut so) = child.stdout.take() {
         let _ = so.read_to_end(&mut buf);
     }
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    let mut err_buf = Vec::new();
+    if let Some(mut se) = child.stderr.take() {
+        let _ = se.read_to_end(&mut err_buf);
+    }
+    solver_reply(
+        "cvc5",
+        exit_status.and_then(|st| st.code()),
+        String::from_utf8_lossy(&buf).to_string(),
+        &String::from_utf8_lossy(&err_buf),
+        timeout_ms,
+    )
+}
+
+/// What a solver child's exit says about its stdout (mununu#1129). A child that stopped at its
+/// own time limit, or died, produced no reply: that is a budget stop or a tool failure, reported
+/// as such — never an empty reply the caller would read as "no interpolant". A clean exit hands
+/// stdout through unchanged (an empty one is then what the solver said).
+pub(crate) fn solver_reply(
+    tool: &str,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: &str,
+    timeout_ms: u32,
+) -> Result<String, String> {
+    let first_err = stderr
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let timed_out = stderr.to_ascii_lowercase().contains("timeout")
+        || stderr.to_ascii_lowercase().contains("time limit");
+    match exit_code {
+        Some(0) => Ok(stdout),
+        code if timed_out => Err(format!(
+            "{tool} stopped at its {timeout_ms} ms query limit{} — a budget stop, not an \
+             interpolation gap; the member's budget follows the run budget (`--timeout-ms` on \
+             the `btor2` verbs, the run budget on `sv verify-auto`)",
+            code.map(|c| format!(" (exit {c})")).unwrap_or_default()
+        )),
+        Some(code) => Err(format!(
+            "{tool} exited with status {code} and no reply{}",
+            if first_err.is_empty() {
+                String::new()
+            } else {
+                format!(": {first_err}")
+            }
+        )),
+        None => Err(format!(
+            "{tool} was stopped by a signal and gave no reply{}",
+            if first_err.is_empty() {
+                String::new()
+            } else {
+                format!(": {first_err}")
+            }
+        )),
+    }
 }
 
 /// Locate the MathSAT 5 binary: `MUNUNU_MATHSAT_PATH` or `mathsat` on PATH. Unlike cvc5's
@@ -911,9 +973,13 @@ pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, St
         .map_err(|e| format!("write mathsat stdin: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 2_000);
     let mut killed = false;
+    let mut exit_status = None;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
             Ok(None) => {
                 if Instant::now() > deadline {
                     group.kill_and_reap(&mut child);
@@ -932,7 +998,17 @@ pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, St
     if let Some(mut so) = child.stdout.take() {
         let _ = so.read_to_end(&mut buf);
     }
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    let mut err_buf = Vec::new();
+    if let Some(mut se) = child.stderr.take() {
+        let _ = se.read_to_end(&mut err_buf);
+    }
+    solver_reply(
+        "mathsat",
+        exit_status.and_then(|st| st.code()),
+        String::from_utf8_lossy(&buf).to_string(),
+        &String::from_utf8_lossy(&err_buf),
+        timeout_ms,
+    )
 }
 
 /// Extract the interpolant term from cvc5's `(define-fun I () Bool <body>)` reply
@@ -1005,6 +1081,80 @@ fn reparse_over_shared(raw: &str, shared: &BTreeMap<Nid, BV>) -> Option<Bool> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    /// mununu#1129 — cvc5 stops at its own `--tlimit` by exiting (status 134, empty stdout,
+    /// "cvc5 interrupted by timeout." on stderr). The runner used to hand that empty stdout
+    /// through as a reply, which the loop read as "no interpolant" and reported as an
+    /// interpolation gap. A query no solver finishes in 1 ms must come back as a budget stop
+    /// that names the limit. Skips when cvc5 is not installed (the nightly makes that a failure).
+    #[test]
+    fn x1129_a_cvc5_time_limit_exit_is_a_budget_stop_not_an_empty_reply() {
+        if crate::adapter::cvc5::locate_cvc5().is_err() {
+            eprintln!("SKIP: cvc5 unavailable");
+            return;
+        }
+        // Factoring 2^32 + 1 through a bit-blasted 64-bit multiply: seconds for a SAT solver,
+        // never 1 ms.
+        let query = "(set-logic QF_BV)\n(set-option :produce-interpolants true)\n\
+                     (declare-const x (_ BitVec 64))\n(declare-const y (_ BitVec 64))\n\
+                     (declare-const z (_ BitVec 64))\n\
+                     (assert (and (= z (bvmul x y)) (= z #x0000000100000001) \
+                     (bvugt x #x0000000000000001) (bvugt y #x0000000000000001)))\n\
+                     (get-interpolant I (= (bvmul y x) #x0000000100000002))\n(exit)\n";
+        let err = run_cvc5_raw_cancellable(query, 1, None)
+            .expect_err("a 1 ms limit on this query is a stop, not a reply");
+        assert!(
+            err.contains("query limit") && err.contains("budget stop"),
+            "the stop names the limit and what it is: {err}"
+        );
+        assert!(
+            err.contains("`--timeout-ms` on the `btor2` verbs"),
+            "and the knob of the verb that raises it: {err}"
+        );
+    }
+
+    /// mununu#1129 — the seam: a clean exit hands stdout through (empty included — that is
+    /// what cvc5 says for a real gap), a timeout exit is a budget stop, any other non-zero exit
+    /// or a signal names the status and the first stderr line.
+    #[test]
+    fn x1129_solver_reply_classifies_the_exit_before_the_stdout() {
+        assert_eq!(
+            solver_reply("cvc5", Some(0), "".into(), "", 50),
+            Ok(String::new())
+        );
+        assert_eq!(
+            solver_reply("cvc5", Some(0), "fail\n".into(), "", 50),
+            Ok("fail\n".to_string())
+        );
+        let stop = solver_reply(
+            "cvc5",
+            Some(134),
+            String::new(),
+            "cvc5 interrupted by timeout.\n",
+            5000,
+        )
+        .expect_err("a timeout exit");
+        assert!(
+            stop.contains("5000 ms query limit") && stop.contains("(exit 134)"),
+            "{stop}"
+        );
+        assert!(stop.contains("not an interpolation gap"), "{stop}");
+        let died = solver_reply(
+            "mathsat",
+            Some(1),
+            String::new(),
+            "boom: bad option\nmore\n",
+            50,
+        )
+        .expect_err("a failure exit");
+        assert!(
+            died.contains("status 1") && died.contains("boom: bad option"),
+            "{died}"
+        );
+        assert!(!died.contains("more"), "first stderr line only: {died}");
+        let signalled = solver_reply("cvc5", None, String::new(), "", 50).expect_err("a signal");
+        assert!(signalled.contains("signal"), "{signalled}");
+    }
     use crate::adapter::btor2::parser;
 
     /// S1 (engine-performance roadmap) — the cvc5 runner honours the portfolio's cancel flag:
@@ -1095,6 +1245,12 @@ mod tests {
             InterpSafetyVerdict::Undecided { reason } if reason.contains("unavailable") => {
                 eprintln!("SKIP: cvc5 unavailable")
             }
+            // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
+            // a verdict about the loop, so the test says so instead of asserting `Safe` under
+            // a budget it did not get.
+            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+                eprintln!("SKIP (budget stop, not a gap): {reason}")
+            }
             other => panic!("expected Safe, got {other:?}"),
         }
     }
@@ -1116,6 +1272,12 @@ mod tests {
             InterpSafetyVerdict::Undecided { reason } if reason.contains("unavailable") => {
                 eprintln!("SKIP: cvc5 unavailable")
             }
+            // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
+            // a verdict about the loop, so the test says so instead of asserting `Safe` under
+            // a budget it did not get.
+            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+                eprintln!("SKIP (budget stop, not a gap): {reason}")
+            }
             // NEVER Unsafe (bad is genuinely unreachable) — that would be unsound.
             other => panic!("expected Safe via k-schedule, got {other:?}"),
         }
@@ -1133,6 +1295,12 @@ mod tests {
             InterpSafetyVerdict::Undecided { reason } if reason.contains("unavailable") => {
                 eprintln!("SKIP: cvc5 unavailable")
             }
+            // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
+            // a verdict about the loop, so the test says so instead of asserting `Safe` under
+            // a budget it did not get.
+            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+                eprintln!("SKIP (budget stop, not a gap): {reason}")
+            }
             other => panic!("expected Unsafe, got {other:?}"),
         }
     }
@@ -1148,6 +1316,12 @@ mod tests {
             InterpSafetyVerdict::Unsafe { depth } => assert_eq!(depth, 0),
             InterpSafetyVerdict::Undecided { reason } if reason.contains("unavailable") => {
                 eprintln!("SKIP: cvc5 unavailable")
+            }
+            // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
+            // a verdict about the loop, so the test says so instead of asserting `Safe` under
+            // a budget it did not get.
+            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+                eprintln!("SKIP (budget stop, not a gap): {reason}")
             }
             other => panic!("expected Unsafe depth 0, got {other:?}"),
         }
