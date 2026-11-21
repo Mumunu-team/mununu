@@ -2349,8 +2349,8 @@ fn input_atom_remedy(input_state_opted_out: bool, controllable_input: bool) -> S
     } else if controllable_input {
         "A controllable input is not sampled on the game verbs (folded into the state it would \
          be fixed before the controller moves, which changes who wins): write the atom over the \
-         register the input drives, or decide the property with the predicate-cube engine where \
-         the verb takes `--engine explicit`."
+         register the input drives, or decide the property with the predicate-cube engine \
+         (`--engine explicit` on `sv verify-auto`; the game verbs have no such switch)."
             .to_string()
     } else {
         "Inputs-in-the-state is on and the input is not controllable, so this refusal should \
@@ -6609,7 +6609,8 @@ impl ExactSession {
                     prepare_notes.push(format!(
                         "inputs in the state: {} primary input(s) the atoms read were sampled \
                          into state cells ({:?}) — the cone is wider by twice their width; \
-                         `--no-input-state` refuses the atom instead",
+                         `--no-input-state` on `sv verify-auto` (API `input_state: false`) \
+                         refuses the atom instead",
                         lift.lifted.len(),
                         lift.lifted
                     ));

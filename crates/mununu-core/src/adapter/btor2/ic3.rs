@@ -7,7 +7,10 @@
 //! the SAT model lifted by an assumption core, relative-inductiveness queries, MIC (drop literals
 //! while relatively inductive, each candidate checked against `init`), forward propagation,
 //! convergence `F_i == F_{i+1}`. Role: a member of the reach portfolio; `Safe` and `Violated` are
-//! both checked independently before they ship (below), so a search bug abstains, never lies.
+//! both checked independently before they ship (below), so a search bug abstains, never lies —
+//! except a counterexample on a design the concrete simulator cannot carry (a cell wider than
+//! 128 bits), which ships with [`Replay::Unavailable`] and is listed as unreplayed by the
+//! portfolio (mununu#1143).
 //!
 //! # What is decided
 //!
@@ -1370,9 +1373,13 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
         .any(|w| w > 128);
     let replay = match parse_btor2_witness(&witness).and_then(|w| trace_from_witness(file, &w)) {
         Ok(trace) => Replay::Confirmed(trace),
-        Err(why) if too_wide => Replay::Unavailable(format!(
-            "the concrete simulator carries 128-bit cells; this design has a wider one ({why})"
-        )),
+        // mununu#1143 — only the simulator's own width refusal is "unavailable"; any other
+        // replay error on a wide design is the refusal it is (the witness did not replay).
+        Err(why) if too_wide && crate::adapter::btor2::witness::is_width_refusal(&why) => {
+            Replay::Unavailable(format!(
+                "the concrete simulator carries 128-bit cells; this design has a wider one ({why})"
+            ))
+        }
         Err(why) => {
             tracing::warn!(why, "ic3: the concretised counterexample did not replay");
             return Ic3Outcome::Stopped {

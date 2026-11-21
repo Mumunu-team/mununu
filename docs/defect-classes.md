@@ -63,10 +63,12 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the wall or the run budget stopped it | `abstained`, with progress | mununu#1043 |
 | the member refused the design | `refused` | — |
 | the owned SAT members' model build stopped (the node cap, the wall, a peer's verdict, the run budget) | `abstained` with the node count, or a cancellation; both members share the one build | mununu#1142 |
-| the member panicked | open: unrecorded, or reported as still running | mununu#1143 |
-| a rung of the justice / response ladder panicked | open | mununu#1140 |
+| the member panicked | `refused`, "ended without a result (it panicked)", in both drivers; the owned-only collector tells a disconnect from the deadline | mununu#1143 |
+| a rung of the justice / response ladder panicked | named in the row's notes | mununu#1140 |
+| an IC3 counterexample on a design the simulator cannot carry | shipped `violated`, listed in `trace_replay_failed` with or without a witness; printed by `btor2 verify` (CLI, API) — open on `sv verify-auto` and the liveness / recoverability / fsm / cdc verbs, which drop the list (mununu#1175) | mununu#1143 |
+| an owned-only member that panics while another is still alive | its death notice on the channel (`spawn_owned`), named in `refused`; a disconnect with no notice is the backstop | mununu#1143 |
 
-**Enumerating test:** none in one table; `x1142_the_sat_members_share_one_aig_model_and_its_stop`, `x1142_a_cap_stop_abstains_both_members_in_both_drivers` and the exhaustive `BuildStop` matches in `sat_bmc_built` / `ic3_built` pin the build-stop row.
+**Enumerating test:** none in one table; `x1142_the_sat_members_share_one_aig_model_and_its_stop`, `x1142_a_cap_stop_abstains_both_members_in_both_drivers` and the exhaustive `BuildStop` matches in `sat_bmc_built` / `ic3_built` pin the build-stop row; `x1143_the_owned_collector_tells_a_dead_member_from_one_still_running`, `x1143_a_panicked_member_is_a_named_refusal_in_both_drivers`, `x1143_the_portfolio_lists_an_unreplayed_ic3_violation_without_a_witness` and `x1143_an_unreplayed_ic3_violation_is_listed_without_a_witness` pin the panicked and unreplayed rows.
 
 ### `server-side-file-read`
 
@@ -94,6 +96,21 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | a process state read right after an asynchronous kill | poll up to a grace that still separates a leak from a slow death | mununu#998 |
 
 **Enumerating test:** for the portfolio rows, `adapter::reach_portfolio::tests::scripted` (the full driver) and `scripted::owned` (the owned-only driver): every member's runner is a parameter of the drivers (`Runners`), each test fixes which members have reported when the first verdict lands, and the whole outcome is compared. The detectors that race the real engines stay (`portfolio_decides_reachable_without_subprocess`, `owned_only_excludes_external_engines_on_small_counter`), and the OS matrix on `main` remains the detector for the class. The portfolio rows were checked against the four red OS-matrix runs of 2026-11-14 to 11-17 (five tests, each an assertion on which members had finished).
+
+### `policy-scan-blind-spot`
+
+**What varies:** the shapes of product code a repository gate must scan, and the spellings of the thing it looks for. A gate that passes on an input it was written to refuse is worse than no gate: it reports PASS.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| product code after a mid-file `#[cfg(test)] mod` | the module is blanked by brace depth, line numbers kept (`tests/policy/source_scan.rs`) | mununu#1144 |
+| the `use std::env;` spelling of a read or a write | matched (`env::var(`, `env::var_os(`, `env::set_var(`, `env::remove_var(`) | mununu#1144 |
+| a quote inside a comment | not a string literal | mununu#1144 |
+| "Yosys N.NN or later / or newer", any case | a version mention | mununu#1144 |
+| an ignored test's runner | one predicate, `is_orphan`, tested on its rows | mununu#1144 |
+| an `e2e_` test that skips when its tool is absent | `manual:`, naming the image that has the tool | mununu#1144 |
+
+**Enumerating test:** `x1144_a_mid_file_test_module_is_skipped_and_the_code_after_it_kept` and each gate's extended control.
 
 ### `prose-anchored-test`
 

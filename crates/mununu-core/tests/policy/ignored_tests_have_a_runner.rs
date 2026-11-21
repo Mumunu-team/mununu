@@ -133,6 +133,52 @@ fn ignored_tests() -> Vec<Ignored> {
     out
 }
 
+/// mununu#1144 — the gate's one predicate: an ignored test is an orphan when no sweep selects
+/// it (its binary is swept and its name carries `e2e_`) and it does not say `manual:`.
+fn is_orphan(binary: &str, name: &str, reason: Option<&str>, swept: &BTreeSet<String>) -> bool {
+    let selected = swept.contains(binary) && name.contains("e2e_");
+    let manual = reason.is_some_and(|r| r.starts_with("manual:"));
+    !selected && !manual
+}
+
+/// The predicate on three rows: a swept e2e, a manual probe, and the orphan shape that sat
+/// unrun for weeks (a reproducer in its own binary, no prefix, no `manual:`).
+#[test]
+fn x1144_the_orphan_predicate_refuses_what_it_should() {
+    let swept: BTreeSet<String> = ["lib".to_string(), "adapters".to_string()].into();
+    assert!(!is_orphan(
+        "lib",
+        "e2e_lifts_a_design",
+        Some("requires yosys"),
+        &swept
+    ));
+    assert!(!is_orphan(
+        "exact_witness_wide_cell_849",
+        "a_probe",
+        Some("manual: a measurement"),
+        &swept
+    ));
+    assert!(is_orphan(
+        "exact_witness_wide_cell_849",
+        "reproducer_849",
+        None,
+        &swept
+    ));
+    assert!(
+        is_orphan(
+            "lib",
+            "non_vacuity_control",
+            Some("needs the image"),
+            &swept
+        ),
+        "a swept binary without the prefix and without `manual:`"
+    );
+    assert!(
+        is_orphan("not_swept", "e2e_in_an_unlisted_binary", None, &swept),
+        "the prefix alone is not a runner"
+    );
+}
+
 #[test]
 fn every_ignored_test_is_swept_or_declared_manual() {
     let swept = swept_binaries();
@@ -144,14 +190,7 @@ fn every_ignored_test_is_swept_or_declared_manual() {
     );
     let orphans: Vec<String> = found
         .iter()
-        .filter(|t| {
-            let selected = swept.contains(&t.binary) && t.name.contains("e2e_");
-            let manual = t
-                .reason
-                .as_deref()
-                .is_some_and(|r| r.starts_with("manual:"));
-            !selected && !manual
-        })
+        .filter(|t| is_orphan(&t.binary, &t.name, t.reason.as_deref(), &swept))
         .map(|t| {
             format!(
                 "{}:{} `{}` (binary `{}`, reason {:?})",
