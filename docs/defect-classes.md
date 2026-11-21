@@ -55,7 +55,9 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | a net only on stub port lists; an undriven net that also feeds a stub input | open: attributed to the last stub inserted | mununu#1180 |
 | an `inout` port of a black box | open: reads as undriven | mununu#1180 |
 | a bit with two drivers | open: the last cell inserted wins | mununu#1180 |
-| which verbs carry the note | `sv verify-auto` under the opt-in; every other verb refuses and has no switch (said in the refusal) | mununu#1148 |
+| `--cutpoint` on a clock net under the opt-in | lifts as a cut root with the note beside the `control-slice` caveat, whose "a definite HOLDS transfers" does not hold for a clock: open | mununu#1180 |
+| a parametrised missing module (a `$paramod…` cell type) | open: the candidate path skips `$`-typed cells, so the net reads undriven and the remedy says connect the clock — refused, wrong advice; not measured | mununu#1180 |
+| which verbs carry the note | `--merge-clock-domains` is on eight `sv` verbs and every API `sv` route; a free-source clock lifts under it only on `sv verify-auto`, the verb that reports the roots (`report_clock_roots`, set in `lift_sv`) — on the others the opt-in is refused naming that verb; a derived or multi-domain lift under the opt-in on those verbs ships no `clock-domains-merged` caveat: open | mununu#1148; mununu#1181 (open) |
 
 **Enumerating test:** `every_clock_root_kind_is_classified_and_described` (exhaustive match over `ClockRoot`, one net per kind, the `inout` port included) and `the_two_black_box_shapes_are_free_roots_not_derived_domains` (the captured shapes: refused by default, accepted under the opt-in); the note's seam: `x1148_a_free_source_clock_is_a_soundness_caveat_with_its_cell`; the real lift on both shapes: `e2e_a_black_box_clock_is_refused_unless_merged_and_its_root_is_classified` (image).
 

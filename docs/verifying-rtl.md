@@ -1054,8 +1054,11 @@ of a declared or empty black-box module such as a PLL or a clock gate with no bo
 type** (a `(* mununu_missing_module *)` stub deleted after the hierarchy snapshot), or a net with
 **no driver** — is refused the same way, naming the net, the root and the remedy: ticking it on
 every step is right for an independent clock and neither an over- nor an under-approximation of a
-clock that is gated, divided or never runs. `--merge-clock-domains` on `sv verify-auto` accepts
-the lockstep model; the domain list then prints the root (`rooted at black box \`<cell>\``,
+clock that is gated, divided or never runs. `--merge-clock-domains` accepts
+the lockstep model on `sv verify-auto` alone — the verb that reports the roots; on the other `sv`
+verbs, which take the flag but drop the domains, it does not lift such a clock (a derived or
+multi-clock design does lift there under it, with nothing in the report: mununu#1181). The domain
+list then prints the root (`rooted at black box \`<cell>\``,
 `rooted at a cut net (…)`, `undriven`) and the report carries a `clock-rooted-at-black-box` or
 `clock-undriven` soundness caveat per such clock (`items` = the net, the cell or "cut net", the
 storage cells it clocks) beside `clock-domains-merged`. Before 2026-11-21 the cut shape was refused

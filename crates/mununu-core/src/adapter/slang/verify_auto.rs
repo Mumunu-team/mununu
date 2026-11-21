@@ -2698,34 +2698,30 @@ pub(crate) fn clock_root_notes(
     domains
         .iter()
         .filter_map(|d| {
-            let (kind, source, cell) = match &d.root {
+            // One exhaustive match: a new root kind is a compile error here, not a note with
+            // another kind's remedy.
+            let (kind, source, cell, remedy) = match &d.root {
                 ClockRoot::Input | ClockRoot::Derived(_) => return None,
                 ClockRoot::BlackBox(t) => (
                     "clock-rooted-at-black-box",
                     format!("the output of black box `{t}`"),
                     t.clone(),
+                    "Provide the source of the cell that drives the clock, or model its gating \
+                     as a clock enable on the root clock.",
                 ),
                 ClockRoot::Cut => (
                     "clock-rooted-at-black-box",
                     "a cut net (the output of a declared or empty black box, or a cut point)"
                         .to_string(),
                     "cut net".to_string(),
+                    "Provide the black box's source, or remove the cut point from the clock net.",
                 ),
                 ClockRoot::Undriven => (
                     "clock-undriven",
                     "nothing: the net has no driver".to_string(),
                     String::new(),
+                    "Connect the clock in the RTL.",
                 ),
-            };
-            let remedy = match &d.root {
-                ClockRoot::BlackBox(_) => {
-                    "Provide the source of the cell that drives the clock, or model its gating \
-                     as a clock enable on the root clock."
-                }
-                ClockRoot::Cut => {
-                    "Provide the black box's source, or remove the cut point from the clock net."
-                }
-                _ => "Connect the clock in the RTL.",
             };
             Some(VerificationNote {
                 kind: kind.into(),
@@ -2779,10 +2775,16 @@ fn build_notes(
                      tick together.",
                     d.merged_clock_domains.len()
                 )
-            } else {
+            } else if d.merged_clock_domains[0].contains(", derived") {
                 // Roadmap B2 — one domain, on a derived clock.
                 "lift: a derived clock merged onto the model's clock — every verdict assumes it \
                  ticks on every step."
+                    .to_string()
+            } else {
+                // mununu#1148 — one domain, on a clock the design holds no driver for; the
+                // `clock-rooted-at-black-box` / `clock-undriven` note beside this one names it.
+                "lift: a clock with no driver in the lifted design merged onto the model's \
+                 clock — every verdict assumes it ticks on every step."
                     .to_string()
             },
             detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
@@ -5655,6 +5657,16 @@ fn slice_seeds(formula: &str) -> Vec<String> {
     out
 }
 
+/// mununu#1148 — the lift options of a verb that reports the clock roots: `sv verify-auto` is
+/// the one caller, and the only place [`YosysOptions::report_clock_roots`] is set. Every other
+/// field is the caller's.
+pub(crate) fn lift_options_reporting_roots(yosys_opts: &YosysOptions) -> YosysOptions {
+    YosysOptions {
+        report_clock_roots: true,
+        ..yosys_opts.clone()
+    }
+}
+
 pub(crate) fn lift_sv(
     sources: &[(String, String)],
     yosys_opts: &YosysOptions,
@@ -5668,6 +5680,10 @@ pub(crate) fn lift_sv(
         message: "adapter/slang/verify_auto: no SV sources provided".to_string(),
         location: None,
     })?;
+    // mununu#1148 — this verb reads the lifted clock domains and reports every free-source root
+    // (`clock_root_notes`), so the lift may accept such a clock under `--merge-clock-domains`.
+    let reporting = lift_options_reporting_roots(yosys_opts);
+    let yosys_opts = &reporting;
     let overridden;
     let (primary_content, yosys_opts) = if opts.lift_overrides.is_empty() {
         (primary_content, yosys_opts)
@@ -24961,6 +24977,44 @@ mod clock_root_note_tests {
             posedge: true,
             cells: 3,
             root,
+        }
+    }
+
+    /// The verb that reports the roots is the one that may lift a free-source clock under the
+    /// opt-in: `lift_sv` sets `report_clock_roots` and nothing else; the lift refuses the
+    /// opt-in without it and accepts it with it (the verbs dimension of `clock-net-driver`).
+    #[test]
+    fn x1148_only_the_reporting_verb_lifts_a_free_source_clock_under_the_opt_in() {
+        use crate::adapter::yosys::{YosysOptions, refuse_merged_clock_domains};
+        let caller = YosysOptions {
+            top: Some("top".into()),
+            merge_clock_domains: true,
+            ..Default::default()
+        };
+        let reporting = lift_options_reporting_roots(&caller);
+        assert!(reporting.report_clock_roots);
+        assert_eq!(reporting.top, caller.top);
+        assert!(reporting.merge_clock_domains);
+        assert!(
+            !YosysOptions::default().report_clock_roots,
+            "every other verb builds its options without the flag"
+        );
+        // The lift's decision at its seam, for each free-source root: the plain opt-in (any
+        // other verb) is refused naming where it works; the reporting verb's options lift it.
+        for root in [
+            ClockRoot::BlackBox("prim_clock_gating".into()),
+            ClockRoot::Cut,
+            ClockRoot::Undriven,
+        ] {
+            let domains = [domain("gclk", root)];
+            let err = refuse_merged_clock_domains(&domains, &caller)
+                .expect_err("the opt-in on a verb that drops the roots is refused");
+            assert!(
+                err.message.contains("only on `sv verify-auto`"),
+                "{}",
+                err.message
+            );
+            refuse_merged_clock_domains(&domains, &reporting).expect("the reporting verb lifts it");
         }
     }
 

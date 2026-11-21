@@ -277,6 +277,15 @@ pub struct YosysOptions {
     /// design is refused at lift time ([`clock_domains`]). verify-auto reports the merged domains
     /// as a soundness caveat.
     pub merge_clock_domains: bool,
+    /// mununu#1148 — set by the verb that reads [`SvLiftResult::clock_domains`] and reports
+    /// every free-source root (a black box, a cut net, no driver) to the reader: `sv verify-auto`
+    /// (`lift_sv`), whose report carries the `clock-rooted-at-black-box` / `clock-undriven`
+    /// notes. Under [`Self::merge_clock_domains`] such a clock lifts only when this is set; a
+    /// verb that drops the domains is refused instead, so no verb ships a lockstep verdict on a
+    /// driverless clock with nothing in its report ([`refuse_merged_clock_domains`]). A derived
+    /// clock and a multi-domain design are not gated by it (they lift under the opt-in on every
+    /// verb, reported by verify-auto alone — a mununu limitation, mununu#1181).
+    pub report_clock_roots: bool,
 }
 
 /// SV-via-Yosys adapter — wraps the BTOR2 path with a Yosys subprocess.
@@ -996,11 +1005,32 @@ fn lift_snapshot_error(path: &Path, what: &str, why: &str) -> AdapterError {
 /// The multi-clock refusal: more than one domain is an error unless
 /// [`YosysOptions::merge_clock_domains`] accepts the under-approximation. Applied to a fresh
 /// lift and to a cache hit alike (N0.2), since the cache stores the netlist, not the decision.
-fn refuse_merged_clock_domains(
+pub(crate) fn refuse_merged_clock_domains(
     domains: &[ClockDomain],
     yopts: &YosysOptions,
 ) -> Result<(), AdapterError> {
     if yopts.merge_clock_domains {
+        // mununu#1148 — the opt-in lifts a clock the design holds no driver for only where the
+        // caller reports the root ([`YosysOptions::report_clock_roots`]: `sv verify-auto`). The
+        // flag is on every `sv` verb and API route; the others drop the clock domains, and a
+        // lockstep verdict on such a clock with nothing in the report would be silent.
+        if !yopts.report_clock_roots {
+            if let Some(d) = domains.iter().find(|d| d.is_free_source()) {
+                return Err(AdapterError {
+                    kind: AdapterErrorKind::UnsupportedConstruct,
+                    message: format!(
+                        "adapter/yosys: the clock net `{}` has no driver in the lifted design; \
+                         `--merge-clock-domains` lifts such a clock only on `sv verify-auto`, \
+                         whose report names the root in a note — this verb drops the clock \
+                         domains, so the lockstep model would ship with nothing said about it \
+                         (a mununu limitation). Clock domains: {}.",
+                        d.net,
+                        describe_clock_domains(domains)
+                    ),
+                    location: None,
+                });
+            }
+        }
         return Ok(());
     }
     // Roadmap B2 — one domain on a DERIVED clock: the census of 2026-11-11 found gated, divided
@@ -1016,8 +1046,9 @@ fn refuse_merged_clock_domains(
                  every step, so lifting it would ignore the logic that gates or divides the \
                  clock and every verdict could be wrong. Clock domains: {}. Model the gating as \
                  a clock enable (`if (en) q <= d;` on the root clock); `--merge-clock-domains` \
-                 on `sv verify-auto` accepts the lockstep model explicitly, and the other verbs \
-                 have no such switch (a mununu limitation).",
+                 on the `sv` verbs accepts the lockstep model explicitly — `sv verify-auto` then \
+                 reports it (`clock-domains-merged`), the other verbs report nothing (a mununu \
+                 limitation).",
                 d.net,
                 d.derived_from().unwrap_or("logic"),
                 describe_clock_domains(domains)
@@ -1040,11 +1071,13 @@ fn refuse_merged_clock_domains(
             ),
             ClockRoot::Cut => (
                 "a cut net (the output of a declared or empty black box, or a cut point: \
-                 `--cutpoint` on `sv verify-auto`)"
+                 `--cutpoint` on the `sv` verbs)"
                     .to_string(),
                 "provide the black box's source, or remove the cut point from the clock net",
             ),
-            _ => (
+            // `is_free_source` excludes an input and a derived clock; the arms are spelled
+            // out so a new root kind is a compile error here, not an "undriven" by default.
+            ClockRoot::Undriven | ClockRoot::Input | ClockRoot::Derived(_) => (
                 "undriven: no cell or input drives it, so its flops never tick".to_string(),
                 "connect the clock in the RTL",
             ),
@@ -1057,8 +1090,9 @@ fn refuse_merged_clock_domains(
                  an over- nor an under-approximation of a clock that is gated, divided or never \
                  runs, so no verdict on the {} storage cell(s) it clocks would transfer on its \
                  own. Clock domains: {}. {remedy}; `--merge-clock-domains` on `sv verify-auto` \
-                 accepts the lockstep model explicitly and names the root in a note, and the \
-                 other verbs have no such switch (a mununu limitation).",
+                 accepts the lockstep model explicitly and names the root in a note — on the \
+                 other `sv` verbs the flag does not lift such a clock, since they drop the roots \
+                 (a mununu limitation).",
                 d.net,
                 d.cells,
                 describe_clock_domains(domains)
@@ -1073,9 +1107,9 @@ fn refuse_merged_clock_domains(
                 "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
                  clock, so lifting it would step every domain together and hide every crossing \
                  defect. Run `mununu sv cdc-lint` to classify the crossings, or verify each \
-                 domain on its own; `--merge-clock-domains` on `sv verify-auto` accepts that \
-                 under-approximation explicitly, and the other verbs have no such switch (a \
-                 mununu limitation).",
+                 domain on its own; `--merge-clock-domains` on the `sv` verbs accepts that \
+                 under-approximation explicitly — `sv verify-auto` then reports it \
+                 (`clock-domains-merged`), the other verbs report nothing (a mununu limitation).",
                 domains.len(),
                 describe_clock_domains(domains)
             ),
@@ -1341,10 +1375,6 @@ pub struct ClockDomain {
     pub posedge: bool,
     /// How many storage cells (flops and memory ports) fire on it.
     pub cells: usize,
-    /// Roadmap B2 — `Some(cell type)` when the net is DERIVED from logic: a gated (`$and`),
-    /// muxed (`$mux`) or divided (a flop's `Q`) clock, traced back through inverters and buffers.
-    /// `None` when it is rooted in a top-level input or a black-box output (a PLL), or undriven.
-    /// The model's one implicit clock ticks such a net on every step, ignoring the logic that
     /// mununu#1148 — what drives the net, from one walk ([`ClockRoot`]). A derived clock and a
     /// free-source root (a black box, a cut net, no driver) are both refused like a second
     /// domain unless `--merge-clock-domains` ([`refuse_merged_clock_domains`]); the description
@@ -4009,10 +4039,6 @@ mod tests {
         );
     }
 
-    /// A design whose flops sit on two clock nets is refused at lift time; it used to lift as if
-    /// both domains ticked together, and only clock-shaped input NAMES were refused, so
-    /// `clk_src` / `clk_dst` passed silently. `merge_clock_domains` lifts it and reports the
-    /// domains; a one-clock design is untouched. Needs yosys ⇒ mununu-sva image.
     /// mununu#1148 — the two black-box shapes through the real lift: a declared (empty) clock
     /// gate becomes a cut net, a `(* mununu_missing_module *)` stub stays a cell of its own type;
     /// both are refused by default naming the root and lift under `--merge-clock-domains` with
@@ -4051,14 +4077,29 @@ endmodule
                 "{name}: {}",
                 err.message
             );
-            let merged = sv_to_btor2_with_blackboxes(
+            let opt_in_only = sv_to_btor2_with_blackboxes(
                 src,
                 &YosysOptions {
                     merge_clock_domains: true,
                     ..Default::default()
                 },
             )
-            .unwrap_or_else(|e| panic!("{name}: the opt-in lifts it: {}", e.message));
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the opt-in alone (a verb that drops the roots) is refused"));
+            assert!(
+                opt_in_only.message.contains("only on `sv verify-auto`"),
+                "{name}: {}",
+                opt_in_only.message
+            );
+            let merged = sv_to_btor2_with_blackboxes(
+                src,
+                &YosysOptions {
+                    merge_clock_domains: true,
+                    report_clock_roots: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{name}: the opt-in where the root is reported lifts it: {}", e.message));
             let gclk = merged
                 .clock_domains
                 .iter()
@@ -4068,6 +4109,10 @@ endmodule
         }
     }
 
+    /// A design whose flops sit on two clock nets is refused at lift time; it used to lift as if
+    /// both domains ticked together, and only clock-shaped input NAMES were refused, so
+    /// `clk_src` / `clk_dst` passed silently. `merge_clock_domains` lifts it and reports the
+    /// domains; a one-clock design is untouched. Needs yosys ⇒ mununu-sva image.
     #[test]
     #[ignore = "requires yosys (mununu-sva image)"]
     fn e2e_two_clock_design_is_refused_at_lift() {
@@ -4228,12 +4273,26 @@ endmodule
                 "{}",
                 err.message
             );
+            // The opt-in alone is a verb that drops the roots: refused, naming where it works.
             let merged = YosysOptions {
                 merge_clock_domains: true,
                 ..Default::default()
             };
-            refuse_merged_clock_domains(&only_gated, &merged)
-                .expect("the explicit opt-in accepts the lockstep model");
+            let err = refuse_merged_clock_domains(&only_gated, &merged)
+                .expect_err("the opt-in on a verb that drops the roots is refused");
+            assert!(
+                err.message.contains("`gclk`")
+                    && err.message.contains("only on `sv verify-auto`")
+                    && err.message.contains("drops the clock domains"),
+                "{}",
+                err.message
+            );
+            let reported = YosysOptions {
+                report_clock_roots: true,
+                ..merged
+            };
+            refuse_merged_clock_domains(&only_gated, &reported)
+                .expect("the opt-in where the root is reported accepts the lockstep model");
         }
     }
 
