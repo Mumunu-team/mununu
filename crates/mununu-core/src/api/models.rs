@@ -1172,11 +1172,13 @@ pub struct Btor2VerifyResponse {
     /// searched, the time budget ran out, the design could not be encoded, …). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_unavailable_reason: Option<String>,
-    /// N5.4 — with `witness`: the members that found `bad` reachable but whose OWN witness did
-    /// not replay on the design (evidence against that member's verdict — an encode or emit
-    /// defect, a tool's witness for a different model — or a design the simulator cannot carry;
-    /// the reason says which). The verdict is unchanged; `sole_decider` marks the member whose
-    /// verdict is the whole `violated`. Absent when none failed.
+    /// N5.4 — the members that found `bad` reachable but whose OWN witness did not replay on
+    /// the design (evidence against that member's verdict — an encode or emit defect, a tool's
+    /// witness for a different model — or a design the simulator cannot carry; the reason says
+    /// which). The verdict is unchanged; `sole_decider` marks the member whose verdict is the
+    /// whole `violated`. Absent when none failed. The subprocess members replay only with
+    /// `witness`; the owned `ic3` replays inside the engine and is listed either way
+    /// (mununu#1143).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace_replay_failed: Vec<TraceReplayFailureView>,
 }

@@ -153,6 +153,13 @@ pub fn expired() -> bool {
     CURRENT.with(|c| c.borrow().expired())
 }
 
+/// mununu#1147 — the flag alone, whatever the deadline: this thread's budget was cancelled
+/// (the HTTP request that started the work is gone). A subprocess helper reads it to kill its
+/// child; an expired deadline is the member's own stop, not this.
+pub fn cancelled() -> bool {
+    CURRENT.with(|c| c.borrow().cancel.load(Ordering::Relaxed))
+}
+
 /// What [`run_or_abandon`] came back with.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Bounded<T> {

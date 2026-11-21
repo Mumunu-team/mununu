@@ -1226,20 +1226,43 @@ pub(crate) fn run_with_timeout_cancellable(
     });
     let start = std::time::Instant::now();
     let mut latch = CancelLatch::new();
-    let status = loop {
+    enum End {
+        Done(std::process::ExitStatus),
+        Killed,
+        Cancelled,
+    }
+    let end = loop {
         if let Some(st) = child.try_wait()? {
-            break Some(st);
+            break End::Done(st);
+        }
+        // mununu#1147 — the run that started this child is gone (an HTTP request past its
+        // timeout cancels its budget): kill it now, and say so rather than "timed out".
+        if crate::adapter::run_budget::cancelled() {
+            group.kill_and_reap(&mut child);
+            break End::Cancelled;
         }
         if latch.past_grace(cancel) || start.elapsed() >= timeout {
             group.kill_and_reap(&mut child); // the group's pipes close, so the readers return
-            break None;
+            break End::Killed;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     let stdout = so_h.join().unwrap_or_default();
     let stderr = se_h.join().unwrap_or_default();
-    Ok(status.map(|st| (st, stdout, stderr)))
+    match end {
+        End::Done(st) => Ok(Some((st, stdout, stderr))),
+        End::Killed => Ok(None),
+        End::Cancelled => Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            RUN_CANCELLED,
+        )),
+    }
 }
+
+/// mununu#1147 — the error a subprocess helper returns when the thread's run budget was
+/// cancelled under it: the tool was killed because the caller is gone, not because it was slow.
+pub(crate) const RUN_CANCELLED: &str =
+    "the run was cancelled before the tool finished (the request that started it is gone)";
 
 /// Detect the source format from a file extension.
 pub fn detect_format_by_extension(path: &std::path::Path) -> Option<&'static str> {
@@ -1689,5 +1712,41 @@ mod subprocess_failure_reason_tests {
                 .count()
                 <= 401
         );
+    }
+}
+
+#[cfg(test)]
+mod run_cancel_tests {
+    //! mununu#1147 — a cancelled run budget kills the child it is waiting on.
+
+    /// REPRODUCER — the subprocess helper under a budget that is cancelled while the child
+    /// runs returns at once with the cancellation, not after the timeout (fails on the parent:
+    /// the child runs to the 3 s timeout and the result is the timeout's `None`).
+    #[test]
+    fn x1147_a_cancelled_run_budget_kills_the_child_it_waits_on() {
+        use crate::adapter::run_budget::{Budget, enter};
+        let budget = Budget::unbounded();
+        let _g = enter(&budget);
+        let flag = budget.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            flag.cancel();
+        });
+        let t0 = std::time::Instant::now();
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let r = super::run_with_timeout(&mut cmd, None, std::time::Duration::from_secs(3));
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(1500),
+            "killed on the cancel, not at the timeout: {:?}",
+            t0.elapsed()
+        );
+        match r {
+            Err(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::Interrupted);
+                assert!(e.to_string().contains("cancelled"), "{e}");
+            }
+            Ok(other) => panic!("a cancelled run is an error, not {other:?}"),
+        }
     }
 }

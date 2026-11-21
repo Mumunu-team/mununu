@@ -3408,7 +3408,8 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
             "the top module name",
             top,
             "a plain identifier (letters, digits, `_`, `$`, not starting with a digit)",
-            "pass the module's declared name (`--top` / `top`)",
+            "pass the module's declared name (`--top` on `sv` verbs and `top` in a `mununu \
+             verify` config)",
         ));
     }
     for (name, value) in &yopts.params {
@@ -3417,7 +3418,8 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
                 "the parameter name",
                 name,
                 "an identifier, optionally scoped as `MODULE.NAME`",
-                "name the parameter as the RTL declares it (`--param NAME=VALUE` / `params`)",
+                "name the parameter as the RTL declares it (`--param NAME=VALUE` on the `sv` \
+                 verbs that take it, `params` in a `mununu verify` config)",
             ));
         }
         if !is_valid_param_value(value) {

@@ -979,6 +979,341 @@ fn kliveness_never_proves_a_justice_set_exact_violates() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Track V (mununu#1145) — the response k-liveness fallback (`emit_response_kliveness_monitor`,
+// the HOLDS-only rung behind `sv verify-liveness` / `btor2 verify-liveness`) against the exact
+// fair-cycle rung, on random response draws. The oracle is an independent reduction of
+// `¬(GF fair → AG(ante → AF cons))` to one justice set: a free `commit` input that may latch
+// `alive` on a step where `ante` holds, `alive` cleared — and a `failed` sink entered for good —
+// on the first `cons` after it, so `GF alive` is exactly "some commitment is never discharged":
+// a fair path with `ante` at some step and `¬cons` from then on. The decider is the shipped
+// monitor plus native k-induction, width by width, as the justice tier runs its rung.
+
+// The decider is the shipped monitor plus the owned IC3, width by width — not native
+// k-induction as in the justice tier: the response monitor has a free `commit` input, so it is
+// not k-inductive (an arbitrary start with the counter one short of overflow and a late commit
+// is a spurious bad at every k; the first gate run proved the toggling responder at no width
+// that way). The shipped ladder runs it on the proof-directed members for the same reason.
+use mununu_core::adapter::btor2::kliveness_monitor::emit_response_kliveness_monitor;
+use mununu_core::adapter::btor2::predicate_expr::CmpOp;
+
+/// An atom as the response monitor takes it: the register's name, the comparison, the value.
+type NamedAtom = (String, CmpOp, u128);
+
+/// One response case: a property-free design, `ante` / `cons` as `(register, value)` equalities,
+/// an optional fairness equality, and the oracle's justice design over the same body.
+#[derive(Debug, Clone)]
+struct ResponseCase {
+    design: String,
+    oracle: String,
+    ante: (usize, u64),
+    cons: (usize, u64),
+    fair: Option<(usize, u64)>,
+}
+
+impl ResponseCase {
+    /// The atoms by the registers' names, the shape the monitor takes.
+    fn atoms(&self) -> (NamedAtom, NamedAtom, Vec<NamedAtom>) {
+        let atom = |(i, v): (usize, u64)| (format!("r{i}"), CmpOp::Eq, u128::from(v));
+        (
+            atom(self.ante),
+            atom(self.cons),
+            self.fair.map(atom).into_iter().collect(),
+        )
+    }
+
+    /// Build the case over an emitted body: the design is the body as it stands; the oracle
+    /// appends the commit / alive / failed machinery and the justice set.
+    fn over(
+        mut em: Emitter,
+        ante: (usize, u64),
+        cons: (usize, u64),
+        fair: Option<(usize, u64)>,
+    ) -> Self {
+        let design = em.lines.join("\n") + "\n";
+        let a = em.literal(&Literal::RegEq(ante.0, ante.1));
+        let c = em.literal(&Literal::RegEq(cons.0, cons.1));
+        let f = fair.map(|(i, v)| em.literal(&Literal::RegEq(i, v)));
+        let s1 = em.sort_1;
+        let commit = em.push(format!("input {s1} commit"));
+        let alive = em.push(format!("state {s1} alive"));
+        let failed = em.push(format!("state {s1} failed"));
+        let zero = em.push(format!("zero {s1}"));
+        em.push(format!("init {s1} {alive} {zero}"));
+        em.push(format!("init {s1} {failed} {zero}"));
+        let committed = em.push(format!("and {s1} {commit} {a}"));
+        let alive_or_committed = em.push(format!("or {s1} {alive} {committed}"));
+        let not_c = em.push(format!("not {s1} {c}"));
+        let candidate = em.push(format!("and {s1} {alive_or_committed} {not_c}"));
+        let discharged = em.push(format!("and {s1} {alive} {c}"));
+        let failed_next = em.push(format!("or {s1} {failed} {discharged}"));
+        let not_failed_next = em.push(format!("not {s1} {failed_next}"));
+        let alive_next = em.push(format!("and {s1} {candidate} {not_failed_next}"));
+        em.push(format!("next {s1} {alive} {alive_next}"));
+        em.push(format!("next {s1} {failed} {failed_next}"));
+        match f {
+            None => em.push(format!("justice 1 {alive}")),
+            Some(f) => em.push(format!("justice 2 {alive} {f}")),
+        };
+        ResponseCase {
+            design,
+            oracle: em.lines.join("\n") + "\n",
+            ante,
+            cons,
+            fair,
+        }
+    }
+}
+
+/// A random response case: the justice tier's body shapes, two register equalities for the
+/// property and a fairness equality on a third of the draws.
+fn response_case_strategy() -> BoxedStrategy<ResponseCase> {
+    (1u32..=3, 1usize..=3, 0usize..=2)
+        .prop_flat_map(|(width, regs, inputs)| {
+            let nexts = proptest::collection::vec(expr_strategy(regs, inputs, width, 3), regs);
+            let inits = proptest::collection::vec(0..(1u64 << width), regs);
+            let eq = move || (0..regs, 0..(1u64 << width));
+            let fair = proptest::option::weighted(0.3, eq());
+            (
+                Just(width),
+                Just(regs),
+                Just(inputs),
+                nexts,
+                inits,
+                eq(),
+                eq(),
+                fair,
+            )
+        })
+        .prop_map(|(width, regs, inputs, nexts, inits, ante, cons, fair)| {
+            ResponseCase::over(
+                Emitter::body(width, regs, inputs, &inits, &nexts),
+                ante,
+                cons,
+                fair,
+            )
+        })
+        .boxed()
+}
+
+/// The exact rung's verdict on the oracle's one justice set: `Violated` = a fair undischarged
+/// commitment exists = the response property is violated; `Holds` = it holds.
+fn exact_response(case: &ResponseCase) -> PropertyVerdict {
+    exact_justice(&case.oracle)
+}
+
+/// What a response decider says: `Some(w)` = the monitor proved the property at counter width
+/// `w`, `None` = no proof.
+type ResponseDecider = dyn Fn(&ResponseCase) -> Option<u32>;
+
+/// The shipped monitor over `case.design`, proved by the owned IC3, width by width (a
+/// `Violated` monitor at a width is the counter overflowing: the next width is tried; a stop
+/// is no proof).
+fn response_kliveness_ic3(case: &ResponseCase) -> Option<u32> {
+    let (ante, cons, fairs) = case.atoms();
+    let fairs: Vec<(&str, CmpOp, u128)> =
+        fairs.iter().map(|(n, o, v)| (n.as_str(), *o, *v)).collect();
+    for &w in KL_WIDTHS {
+        let monitor = emit_response_kliveness_monitor(
+            &case.design,
+            (&ante.0, ante.1, ante.2),
+            (&cons.0, cons.1, cons.2),
+            &fairs,
+            false,
+            w,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "the response monitor refused a generated design: {e}\n{}",
+                case.design
+            )
+        });
+        let file = parser::parse(&monitor)
+            .unwrap_or_else(|e| panic!("the response monitor does not parse: {e}\n{monitor}"));
+        let opts = Ic3Options {
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            cancel: None,
+            max_frames: None,
+        };
+        match ic3(&file, &opts) {
+            Ok(Ic3Outcome::Safe { .. }) => return Some(w),
+            Ok(Ic3Outcome::Violated { .. }) => continue,
+            Ok(Ic3Outcome::Stopped { .. }) => return None,
+            Err(e) => panic!("the owned IC3 refused a response monitor: {e}\n{monitor}"),
+        }
+    }
+    None
+}
+
+/// The floor on the fixed draw, as the justice tier's: the fallback must prove a share of the
+/// properties exact says hold, and the draw must contain violated ones. First measurement on
+/// the gate draw (2026-11-20, 48 cases, the owned IC3 as decider): 30 proved / 0 unproved holds
+/// / 18 violated; the floor is raised from the second draw.
+const MIN_RESPONSE_PROVED_PERCENT_OF_HOLDS: usize = 30;
+
+fn check_response_floor(t: JusticeTally) -> Result<(), String> {
+    let holds = t.proved + t.unproved_holds;
+    if t.violated == 0 {
+        return Err(format!("the draw has no violated response property: {t:?}"));
+    }
+    if holds == 0 || t.proved * 100 < holds * MIN_RESPONSE_PROVED_PERCENT_OF_HOLDS {
+        return Err(format!(
+            "the response fallback proved {}/{holds} of the properties exact says hold, under \
+             the {MIN_RESPONSE_PROVED_PERCENT_OF_HOLDS}% floor: {t:?}",
+            t.proved
+        ));
+    }
+    if t.exact_unknown > 0 {
+        return Err(format!(
+            "the exact oracle left {} properties undecided: {t:?}",
+            t.exact_unknown
+        ));
+    }
+    Ok(())
+}
+
+/// Draw `cases` response cases from the tier's seed and fail on the first property the decider
+/// proves while exact finds a fair undischarged commitment.
+fn run_response_tier(
+    cases: u32,
+    max_shrink_iters: u32,
+    decider: &ResponseDecider,
+) -> Result<JusticeTally, String> {
+    use std::cell::Cell;
+    let config = ProptestConfig {
+        cases,
+        rng_seed: tier_seed(),
+        max_shrink_iters,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = Cell::new(JusticeTally::default());
+    runner
+        .run(&response_case_strategy(), |c| {
+            let exact = exact_response(&c);
+            let proved = decider(&c);
+            let mut t = tally.get();
+            match (exact, proved) {
+                (PropertyVerdict::Violated, Some(w)) => {
+                    prop_assert!(
+                        false,
+                        "the response fallback proved AG(r{}=={} → AF r{}=={}){} at width {w}, \
+                         exact finds a fair undischarged commitment\n{}",
+                        c.ante.0,
+                        c.ante.1,
+                        c.cons.0,
+                        c.cons.1,
+                        c.fair
+                            .map(|(i, v)| format!(" under GF r{i}=={v}"))
+                            .unwrap_or_default(),
+                        c.design
+                    );
+                }
+                (PropertyVerdict::Violated, None) => t.violated += 1,
+                (PropertyVerdict::Holds, Some(_)) => t.proved += 1,
+                (PropertyVerdict::Holds, None) => t.unproved_holds += 1,
+                _ => t.exact_unknown += 1,
+            }
+            tally.set(t);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(tally.get())
+}
+
+/// The response fallback never proves a property the exact fair-cycle rung violates, and it
+/// proves enough of the draw for that to mean something.
+#[test]
+fn response_kliveness_never_proves_a_response_exact_violates() {
+    let tally = run_response_tier(cases_from_env(), 1024, &response_kliveness_ic3)
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("btor2_differential (response): {tally:?}");
+    let explorer = std::env::var_os("MUNUNU_DIFF_TIER_EXPLORE").is_some()
+        || std::env::var_os("PROPTEST_RNG_SEED").is_some()
+        || std::env::var_os("PROPTEST_CASES").is_some();
+    match check_response_floor(tally) {
+        Ok(()) => {}
+        Err(e) if explorer => eprintln!("btor2_differential (response): floor not met: {e}"),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// Negative control: a monitor that discharges on the antecedent itself (`cons := ante`, the
+/// property `AG(a → AF a)`) proves everything, so the gate must fail on the draw's violated
+/// cases — the gate can see a wrong monitor.
+#[test]
+fn the_response_gate_fails_on_a_monitor_that_discharges_on_its_antecedent() {
+    let wrong = |case: &ResponseCase| {
+        let discharging = ResponseCase {
+            cons: case.ante,
+            ..case.clone()
+        };
+        response_kliveness_ic3(&discharging)
+    };
+    let err = run_response_tier(cases_from_env(), 0, &wrong)
+        .expect_err("the discharging monitor proves a violated property");
+    assert!(
+        err.contains("exact finds a fair undischarged commitment"),
+        "{err}"
+    );
+}
+
+/// The oracle on the three hand shapes the monitor's own tests use: a responder (holds), a
+/// staller (violated), and a fairness-gated design (violated without the fairness, holds with
+/// it) — so a wrong reduction would show here before the draw.
+#[test]
+fn the_response_oracle_decides_the_three_hand_shapes() {
+    // r0 toggles: every r0==1 is followed by r0==0.
+    let responder = ResponseCase::over(
+        Emitter::body(1, 1, 0, &[0], &[Expr::Not(Box::new(Expr::Reg(0)))]),
+        (0, 1),
+        (0, 0),
+        None,
+    );
+    assert_eq!(
+        exact_response(&responder),
+        PropertyVerdict::Holds,
+        "{}",
+        responder.oracle
+    );
+    // r0 latches on i0 and never clears: r0==1 is never followed by r0==0 on that path.
+    let staller = ResponseCase::over(
+        Emitter::body(
+            1,
+            1,
+            1,
+            &[0],
+            &[Expr::Or(Box::new(Expr::Reg(0)), Box::new(Expr::In(0)))],
+        ),
+        (0, 1),
+        (0, 0),
+        None,
+    );
+    assert_eq!(
+        exact_response(&staller),
+        PropertyVerdict::Violated,
+        "{}",
+        staller.oracle
+    );
+    // r0 copies i0; r1 copies i0 too. Without fairness i0 can stay 1 (violated); under
+    // GF r1==0 the input is 0 infinitely often, so r0==0 recurs (holds).
+    let gated = |fair| {
+        ResponseCase::over(
+            Emitter::body(1, 2, 1, &[0, 0], &[Expr::In(0), Expr::In(0)]),
+            (0, 1),
+            (0, 0),
+            fair,
+        )
+    };
+    assert_eq!(exact_response(&gated(None)), PropertyVerdict::Violated);
+    assert_eq!(exact_response(&gated(Some((1, 0)))), PropertyVerdict::Holds);
+    // And the shipped monitor agrees on all three (proves the two that hold, never the staller).
+    assert!(response_kliveness_ic3(&responder).is_some());
+    assert!(response_kliveness_ic3(&staller).is_none());
+    assert!(response_kliveness_ic3(&gated(Some((1, 0)))).is_some());
+}
+
 /// The design with its justice SET collapsed to one literal, the conjunction of the set's
 /// literals at the same step. Its k-liveness monitor is the wrong construction #984 pinned:
 /// it counts steps where every literal holds at once, not rounds in which each held at some

@@ -167,6 +167,15 @@ pub enum ReplayEnd {
     FirstFiring,
 }
 
+/// The simulator's own width refusal (a cell wider than its 128-bit word), the one replay error
+/// that is "unavailable" rather than a failed replay (mununu#1143).
+const WIDTH_REFUSAL: &str = "the concrete simulator carries 128";
+
+/// mununu#1143 — whether a replay error is the simulator's width refusal ([`WIDTH_REFUSAL`]).
+pub(crate) fn is_width_refusal(why: &str) -> bool {
+    why.contains(WIDTH_REFUSAL)
+}
+
 /// Replay a parsed witness on `file`: the initial frame from `#0`, every later state frame
 /// recomputed through the concrete simulator ([`simulate_one_step_probe`]) from the previous frame
 /// and that frame's inputs. Every frame is checked rather than taken on the tool's word: the `#0`
@@ -213,7 +222,7 @@ pub fn replay_witness(
         })?;
         if width > 128 {
             return Err(format!(
-                "node {} is {width} bits wide; the concrete simulator carries 128",
+                "node {} is {width} bits wide; {WIDTH_REFUSAL}",
                 l.nid
             ));
         }
@@ -873,6 +882,19 @@ fn ric3_witness(file: &Btor2File) -> Option<BmcTrace> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    /// mununu#1143 — the simulator's width refusal is told from every other replay error by
+    /// its own text, so IC3 ships it as "unavailable" and nothing else.
+    #[test]
+    fn x1143_only_the_width_refusal_reads_as_unavailable() {
+        assert!(is_width_refusal(&format!(
+            "node 3 is 130 bits wide; {WIDTH_REFUSAL}"
+        )));
+        assert!(!is_width_refusal("state index 9 out of range"));
+        assert!(!is_width_refusal(
+            "node 3 is not a bit-vector — an array state has no replay"
+        ));
+    }
 
     /// rIC3 `-e bmc --witness` on `DESIGN`, verbatim (2026-10-26, mununu-sva).
     const RIC3_SAMPLE: &str = "[INFO ] bmc depth: 0\n[INFO ] bmc depth: 1\nSAT\n[INFO ] bmc found counter-example in depth 1\nsat\nb0\n#0\n0 0\n1 0000\n@0\n0 1\n@1\n0 1\n.\n";

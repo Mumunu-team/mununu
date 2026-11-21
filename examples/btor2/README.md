@@ -70,7 +70,7 @@ mununu context eval examples/btor2/safety_demo.btor \
 mununu context summarize examples/btor2/safety_demo.sv --adapter sv-yosys
 ```
 
-Before the slang-only lift both forms yielded the same model and verdict. The `sv-yosys` form requires a stock Yosys ≥ 0.40 on `$PATH` (or `MUNUNU_YOSYS_PATH` set); see [`adapter::yosys::translate_sv`](../../crates/mununu-core/src/adapter/yosys/mod.rs) for the driver.
+Before the slang-only lift both forms yielded the same model and verdict. The `sv-yosys` form requires a stock Yosys ≥ 0.67 on `$PATH` (or `MUNUNU_YOSYS_PATH` set); see [`adapter::yosys::translate_sv`](../../crates/mununu-core/src/adapter/yosys/mod.rs) for the driver.
 
 ## Regenerating `.btor` files from source
 
