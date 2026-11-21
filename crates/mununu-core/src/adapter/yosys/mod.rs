@@ -653,12 +653,54 @@ fn yosys_path_arg(path: &Path) -> String {
     }
 }
 
-/// mununu#1138 — a caller include directory as the script writes it: canonical (absolute), since
-/// yosys runs inside the staging directory; a directory that cannot be canonicalised (it does
-/// not exist yet, or a placeholder) is written as given. [`validate_lift_inputs`] checks this
-/// same form.
-fn script_include_dir(dir: &Path) -> PathBuf {
-    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+/// mununu#1138 — the caller's include directories as the staging directory will hold them:
+/// `(dir/inc<i>, the directory made absolute without resolving links)`. Empty where symbolic
+/// links are not available (then the absolute path is written, see [`script_include_dirs`]).
+fn plan_include_links(dir: &Path, include_dirs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    if !cfg!(unix) {
+        return Vec::new();
+    }
+    include_dirs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (dir.join(format!("inc{i}")), absolute_if_relative_path(d)))
+        .collect()
+}
+
+/// What the script writes for the caller's include directories: the links' names relative to
+/// the staging directory yosys runs in (`inc0`, `inc1`, …), or, without links, the directories
+/// made absolute without resolving them.
+fn script_include_dirs(dir: &Path, include_links: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
+    include_links
+        .iter()
+        .map(|(link, _)| {
+            link.strip_prefix(dir)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| link.clone())
+        })
+        .collect()
+}
+
+/// mununu#1138 — create the planned include links inside the staging directory.
+#[cfg(unix)]
+fn stage_include_links(include_links: &[(PathBuf, PathBuf)]) -> Result<(), AdapterError> {
+    for (link, target) in include_links {
+        std::os::unix::fs::symlink(target, link).map_err(|e| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/yosys: could not stage the include directory `{}` as `{}`: {e}",
+                target.display(),
+                link.display()
+            ),
+            location: None,
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stage_include_links(_include_links: &[(PathBuf, PathBuf)]) -> Result<(), AdapterError> {
+    Ok(())
 }
 
 struct LiftPlan {
@@ -674,6 +716,11 @@ struct LiftPlan {
     /// since mununu#806, when it reads sv2v's output by its bare name — the names it mints
     /// depend on it). Always `Some`; the field stays an `Option` for the manifest's rule.
     yosys_cwd: Option<PathBuf>,
+    /// mununu#1138 — `(link under the staging directory, the caller's include directory, made
+    /// absolute without resolving links)`: the script names the link (`-Iinc0`), so no caller
+    /// path reaches `read_slang`, which takes a path as one unquoted token. On a platform
+    /// without symbolic links the absolute path is written instead (`include_links` is empty).
+    include_links: Vec<(PathBuf, PathBuf)>,
     /// The `-m` argument loading a slang plugin, when `MUNUNU_YOSYS_SLANG_PLUGIN` names one.
     plugin: Option<String>,
     script: String,
@@ -750,13 +797,19 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
 
     let btor_path = dir.join(STAGED_BTOR);
     let hier_json_path = dir.join(STAGED_HIER_JSON);
-    // With yosys's cwd in the staging directory, a RELATIVE caller include dir would not
-    // resolve: hand the script absolute ones (mununu#806).
-    let script_include_dirs: Vec<PathBuf> = yopts
-        .extra_include_dirs
-        .iter()
-        .map(|d| script_include_dir(d))
-        .collect();
+    // mununu#1138 — a caller include directory is staged as a link inside the staging
+    // directory and the script names the link, so the caller's path (whatever it carries)
+    // never reaches `read_slang`; `plan_include_links` says what the script writes.
+    let include_links = plan_include_links(dir, &yopts.extra_include_dirs);
+    let script_include_dirs: Vec<PathBuf> = if include_links.is_empty() {
+        yopts
+            .extra_include_dirs
+            .iter()
+            .map(|d| absolute_if_relative_path(d))
+            .collect()
+    } else {
+        script_include_dirs(dir, &include_links)
+    };
     let slang_read = || {
         (
             vec![read_slang_cmd(
@@ -796,6 +849,7 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
         #[cfg(feature = "test_support")]
         sv2v,
         yosys_cwd,
+        include_links,
         plugin: slang_plugin,
         script,
         frontend_used,
@@ -873,6 +927,7 @@ fn run_sv_flatten_btor2_concrete(
         }
         write_file(path, text)?;
     }
+    stage_include_links(&plan.include_links)?;
     #[cfg(feature = "test_support")]
     if let Some(s) = &plan.sv2v {
         run_sv2v(&s.bin, &s.sources, &s.include_dirs, &s.out)?;
@@ -2907,7 +2962,7 @@ pub const YOSYS_MIN_VERSION: &str = "0.67";
 
 fn locate_yosys() -> Result<PathBuf, AdapterError> {
     if let Some(path) = crate::adapter::env_var::read("MUNUNU_YOSYS_PATH") {
-        return Ok(PathBuf::from(path));
+        return Ok(absolute_if_relative_path(Path::new(&path)));
     }
     let candidates = ["yosys"];
     for c in candidates {
@@ -2959,7 +3014,26 @@ fn locate_sv2v() -> Result<PathBuf, AdapterError> {
 /// `bad` nodes are needed here). Named registers and ports get `instance.signal` BTOR2 names,
 /// so cutpoints / `--pin` over named signals resolve by name.
 fn slang_plugin_arg() -> Option<String> {
-    crate::adapter::env_var::read("MUNUNU_YOSYS_SLANG_PLUGIN").filter(|p| !p.trim().is_empty())
+    crate::adapter::env_var::read("MUNUNU_YOSYS_SLANG_PLUGIN")
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| {
+            absolute_if_relative_path(Path::new(&p))
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+/// mununu#1138 — a tool path from the environment as yosys's process must see it: yosys runs
+/// inside the staging directory, so a relative path WITH a separator (`./oss-cad-suite/bin/yosys`,
+/// `tools/slang.so`) is joined onto mununu's working directory first; a bare name (`yosys`,
+/// `slang.so`) is left to `$PATH` / yosys's plugin search as before. Links are not resolved.
+fn absolute_if_relative_path(p: &Path) -> PathBuf {
+    if p.is_absolute() || p.components().count() < 2 {
+        return p.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(p))
+        .unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// The actionable tail of a yosys failure, read off its stderr and log: `read_slang` is not a
@@ -3384,22 +3458,33 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
     // path with whitespace, a quote or a `;` would split or end the command, and is refused
     // with the path quoted back rather than failing inside yosys with no reason. The staged
     // paths never carry one: yosys runs inside the staging directory.
-    // Validated in the form the script writes: the canonical path (yosys runs inside the
-    // staging directory, so a relative include directory is made absolute first — a relative
-    // `-I rtl/inc` under a working directory with a space is therefore refused here, where it
-    // used to pass and split in the script).
+    // mununu#1138 — an include directory reaches the script as a link's name (`inc0`), so its
+    // own path may carry anything (a missing one is slang's own warning, as before; the planner
+    // touches no file). Without symbolic links (not unix) the absolute path is written as one
+    // `-I` token, which slang takes verbatim, so there whitespace, quotes and `;` are refused as
+    // before (#1133).
     for dir in &yopts.extra_include_dirs {
-        let text = script_include_dir(dir).display().to_string();
-        if text.is_empty()
-            || text
+        let abs = absolute_if_relative_path(dir);
+        let text = abs.display().to_string();
+        if text.is_empty() {
+            return Err(refuse_lift_input(
+                "the include directory",
+                &text,
+                "a directory path",
+                "check the path given to `--include-dir` on the `sv` verbs",
+            ));
+        }
+        if !cfg!(unix)
+            && text
                 .chars()
                 .any(|c| c.is_whitespace() || matches!(c, ';' | '"' | '\'' | '`'))
         {
             return Err(refuse_lift_input(
                 "the include directory",
                 &text,
-                "a path without whitespace, quotes or `;` (slang takes it as one unquoted token)",
-                "move or rename the directory (`-I` / `include_dirs`)",
+                "a path without whitespace, quotes or `;` on this platform (slang takes it as \
+                 one unquoted token and the lift stages no link here)",
+                "move or rename the directory given to `--include-dir`",
             ));
         }
     }
@@ -4741,8 +4826,8 @@ endmodule
                 "init-policy override's signal name",
             ),
             (
-                "include directory with a space",
-                &|o| o.extra_include_dirs = vec![PathBuf::from("inc dir")],
+                "an empty include directory",
+                &|o| o.extra_include_dirs = vec![PathBuf::new()],
                 "include directory",
             ),
         ];
@@ -4752,6 +4837,16 @@ endmodule
                 err.contains(field) && err.contains("is not accepted"),
                 "{what}: the refusal names the field: {err}"
             );
+        }
+        // mununu#1138 — an include directory with a space is staged as a link the script names,
+        // so it is no longer hostile where links exist; where they do not, the #1133 refusal
+        // stays.
+        let spaced = plan(|o| o.extra_include_dirs = vec![PathBuf::from("inc dir")]);
+        if cfg!(unix) {
+            spaced.expect("an include directory with a space is staged as a link");
+        } else {
+            let err = spaced.expect_err("no links: the include directory is refused");
+            assert!(err.contains("include directory"), "{err}");
         }
         // The plain forms pass this gate (the plan may still fail later for other reasons; the
         // message would then not be the input refusal).
@@ -5222,25 +5317,103 @@ endmodule
         assert!(err.message.contains("--output-dir"), "{}", err.message);
     }
 
-    /// mununu#1138 — an include directory is validated in the form the script writes: a
-    /// relative directory under a working directory with a space is refused (it would be
-    /// written canonical and split), and the refusal quotes that form.
+    /// mununu#1138 — a caller include directory with a space in its path is staged as a link
+    /// and the script names the link, so nothing of the caller's path reaches `read_slang`; an
+    /// empty path is refused naming `--include-dir` (a missing one is slang's own warning).
     #[test]
-    fn an_include_directory_is_validated_as_the_script_writes_it() {
+    fn an_include_directory_is_staged_as_a_link_the_script_names() {
         let root = std::env::temp_dir().join(format!("mununu inc {}", std::process::id()));
         std::fs::create_dir_all(root.join("inc")).expect("mkdir");
         let yopts = YosysOptions {
-            extra_include_dirs: vec![root.join("inc")],
+            top: Some("m".into()),
+            extra_include_dirs: vec![root.join("inc"), PathBuf::from("rel/inc2")],
             ..Default::default()
         };
-        let err = validate_lift_inputs(&yopts).expect_err("a space in the canonical path");
-        assert!(err.message.contains("include directory"), "{}", err.message);
+        let dir = Path::new("/tmp/staging dir/mununu-yosys-9");
+        let plan = plan_lift(
+            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n",
+            &yopts,
+            dir,
+        )
+        .expect("a plan needs no tool");
+        if cfg!(unix) {
+            assert!(
+                plan.script.contains(" -I. -Iinc0 -Iinc1 work.sv"),
+                "{}",
+                plan.script
+            );
+            assert!(!plan.script.contains("mununu inc"), "{}", plan.script);
+            assert_eq!(plan.include_links[0], (dir.join("inc0"), root.join("inc")));
+            assert_eq!(
+                plan.include_links[1].1,
+                std::env::current_dir().expect("cwd").join("rel/inc2"),
+                "a relative directory is made absolute, links unresolved"
+            );
+        } else {
+            assert!(plan.include_links.is_empty());
+        }
         let _ = std::fs::remove_dir_all(&root);
-        let fine = YosysOptions {
-            extra_include_dirs: vec![PathBuf::from("/no/such/dir")],
+        let empty = YosysOptions {
+            extra_include_dirs: vec![PathBuf::new()],
             ..Default::default()
         };
-        validate_lift_inputs(&fine).expect("a path that cannot be canonicalised is taken as given");
+        let err = validate_lift_inputs(&empty).expect_err("an empty path");
+        assert!(err.message.contains("--include-dir"), "{}", err.message);
+    }
+
+    /// mununu#1138 — a tool path from the environment with a separator is made absolute before
+    /// yosys moves into the staging directory; a bare name stays a `$PATH` lookup.
+    #[test]
+    fn a_relative_tool_path_with_a_separator_is_made_absolute() {
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            absolute_if_relative_path(Path::new("./oss-cad-suite/bin/yosys")),
+            cwd.join("./oss-cad-suite/bin/yosys")
+        );
+        assert_eq!(
+            absolute_if_relative_path(Path::new("tools/slang.so")),
+            cwd.join("tools/slang.so")
+        );
+        assert_eq!(
+            absolute_if_relative_path(Path::new("yosys")),
+            PathBuf::from("yosys")
+        );
+        assert_eq!(
+            absolute_if_relative_path(Path::new("/usr/bin/yosys")),
+            PathBuf::from("/usr/bin/yosys")
+        );
+        let _p = crate::adapter::env_var::override_for_test("MUNUNU_YOSYS_PATH", "tools/yosys");
+        assert_eq!(
+            locate_yosys().expect("the variable wins"),
+            cwd.join("tools/yosys")
+        );
+        let _m =
+            crate::adapter::env_var::override_for_test("MUNUNU_YOSYS_SLANG_PLUGIN", "./slang.so");
+        assert_eq!(
+            slang_plugin_arg().as_deref(),
+            Some(cwd.join("./slang.so").to_string_lossy().as_ref())
+        );
+    }
+
+    /// mununu#1138 — a relative staging root is made absolute before the per-call directory is
+    /// created, so the absolute `-l` log and output paths hold wherever yosys runs.
+    #[test]
+    fn a_relative_staging_root_is_made_absolute() {
+        let _r = crate::adapter::env_var::override_for_test(
+            "MUNUNU_LIFT_STAGING_ROOT",
+            "target/mununu-staging-test",
+        );
+        let tmp = TempDir::new("mununu-root-test").expect("tempdir");
+        assert!(tmp.path().is_absolute(), "{}", tmp.path().display());
+        assert!(
+            tmp.path().starts_with(
+                std::env::current_dir()
+                    .expect("cwd")
+                    .join("target/mununu-staging-test")
+            ),
+            "{}",
+            tmp.path().display()
+        );
     }
 
     /// mununu#1138 — a yosys-native command (`write_btor`, `write_json`, `read_verilog`) takes

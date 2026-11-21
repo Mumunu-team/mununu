@@ -518,7 +518,7 @@ mod tests {
             btor2: "1 sort bitvec 1\n2 state 1 q\n".into(),
             hier_json: "{}".into(),
             flat_netlist_json: "{}".into(),
-            staged_primary: "/tmp/mununu-yosys-1-2-3-4/work.sv".into(),
+            staged_primary: "work.sv".into(),
             frontend_used: "verilog".into(),
             backend_retry: None,
         }
