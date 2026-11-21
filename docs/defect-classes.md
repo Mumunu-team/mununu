@@ -62,10 +62,12 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the member reached its own bound | `undecided`, with depth or frame, and the wall it left unused | mununu#1022, mununu#1038 |
 | the wall or the run budget stopped it | `abstained`, with progress | mununu#1043 |
 | the member refused the design | `refused` | — |
-| the member panicked | open: unrecorded, or reported as still running | mununu#1143 |
-| a rung of the justice / response ladder panicked | open | mununu#1140 |
+| the member panicked | `refused`, "ended without a result (it panicked)", in both drivers; the owned-only collector tells a disconnect from the deadline | mununu#1143 |
+| a rung of the justice / response ladder panicked | named in the row's notes | mununu#1140 |
+| an IC3 counterexample on a design the simulator cannot carry | shipped `violated`, listed in `trace_replay_failed` with or without a witness; printed by `btor2 verify` (CLI, API) — open on `sv verify-auto` and the liveness / recoverability / fsm / cdc verbs, which drop the list (mununu#1175) | mununu#1143 |
+| an owned-only member that panics while another is still alive | its death notice on the channel (`spawn_owned`), named in `refused`; a disconnect with no notice is the backstop | mununu#1143 |
 
-**Enumerating test:** none recorded.
+**Enumerating test:** none in one table; `x1143_the_owned_collector_tells_a_dead_member_from_one_still_running`, `x1143_a_panicked_member_is_a_named_refusal_in_both_drivers`, `x1143_the_portfolio_lists_an_unreplayed_ic3_violation_without_a_witness` and `x1143_an_unreplayed_ic3_violation_is_listed_without_a_witness` pin the panicked and unreplayed rows.
 
 ### `server-side-file-read`
 

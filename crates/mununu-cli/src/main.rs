@@ -4605,11 +4605,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     let trace_shortest = witness.as_ref().and_then(|w| w.shortest);
     let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
     let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
-    let trace_replay_failed = if args.witness {
-        mununu_core::api::models::TraceReplayFailureView::list(&outcome)
-    } else {
-        Vec::new()
-    };
+    // mununu#1143 — listed with or without `--witness`: the owned IC3 replays inside the engine.
+    let trace_replay_failed = mununu_core::api::models::TraceReplayFailureView::list(&outcome);
 
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),

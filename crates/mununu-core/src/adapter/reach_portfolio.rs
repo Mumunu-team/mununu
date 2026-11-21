@@ -128,7 +128,9 @@ pub struct ReachOutcome {
     /// defect, or a tool's witness for a different model), or a design the simulator cannot
     /// carry (a cell wider than 128 bits — the reason says which). The verdict is unchanged; a
     /// consumer reads the member's verdict as unconfirmed, and as the whole verdict when that
-    /// member is the only one in `reachable_by`.
+    /// member is the only one in `reachable_by`. The owned IC3 member replays inside the engine,
+    /// so its failure is listed whether or not a witness was asked for (mununu#1143); the
+    /// subprocess members replay only when carrying one.
     pub trace_replay_failed: Vec<(&'static str, String)>,
 }
 
@@ -320,6 +322,30 @@ fn settle_subprocess(
 /// mununu#1043 — the cause a member stopped by the portfolio's wall or run budget carries.
 fn clock_stopped(progress: &str) -> String {
     format!("{progress}; stopped by the portfolio's wall or run budget before a verdict")
+}
+
+/// mununu#1143 — the line a member whose thread ended without a result gets in `refused`: a
+/// crash is a mununu defect, named as one, never a silent `None`.
+fn panicked_reason(member: &str) -> String {
+    crate::adapter::owner::mununu_defect(&format!(
+        "{member}: the member's thread ended without a result (it panicked)"
+    ))
+}
+
+/// mununu#1143 — settle a member's join: its result, or `None` with the panic recorded in
+/// `refused` (the exact member's straggler path did this; the scoped joins dropped it).
+fn settle_join<T>(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    member: &'static str,
+    joined: std::thread::Result<Option<T>>,
+) -> Option<T> {
+    match joined {
+        Ok(v) => v,
+        Err(_) => {
+            note_refusal(refused, member, panicked_reason(member));
+            None
+        }
+    }
 }
 
 /// Record one member's refusal. A poisoned lock (a member panicked while recording) loses the
@@ -550,7 +576,8 @@ fn run_ic3(
     file: &Btor2File,
     deadline: std::time::Instant,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    carried: Option<&Carried>,
+    store: &Carried,
+    witness: bool,
 ) -> Result<Option<bool>, MemberStop> {
     use crate::adapter::btor2::ic3::{self, Ic3Options, Ic3Outcome, Replay};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -563,21 +590,23 @@ fn run_ic3(
         Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
         Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
             // N5.4 — the engine replayed the trace already; with a witness asked for it is
-            // carried out as it is, and a design the simulator cannot carry says so.
-            match (replay, carried) {
-                (Replay::Confirmed(trace), Some(carried)) => {
-                    carried.carry("ic3", Ok(trace), None);
-                }
-                (Replay::Confirmed(_), None) => {}
-                (Replay::Unavailable(why), carried) => {
+            // carried out as it is. A design the simulator cannot carry ships unreplayed and the
+            // report says so whether or not a witness was asked for: before mununu#1143 the
+            // reason went to the log alone and the verdict read like a replayed one.
+            // SOUNDNESS: the verdict is the engine's concretised counterexample, unconfirmed by
+            // the simulator; it is listed in `trace_replay_failed` (`sole_decider` when it is
+            // the whole verdict), which `btor2 verify` prints on CLI and API — the other verbs
+            // drop the list on their way to the report (mununu#1175).
+            match replay {
+                Replay::Confirmed(trace) if witness => store.carry("ic3", Ok(trace), None),
+                Replay::Confirmed(_) => {}
+                Replay::Unavailable(why) => {
                     tracing::info!(
                         depth,
                         why,
                         "ic3: the counterexample ships without a simulator replay"
                     );
-                    if let Some(carried) = carried {
-                        carried.carry("ic3", Err(format!("not replayed: {why}")), None);
-                    }
+                    store.carry("ic3", Err(format!("not replayed: {why}")), None);
                 }
             }
             Ok(Some(true))
@@ -1209,6 +1238,16 @@ type OwnedRunner = fn(
 
 /// The native member's runner ([`run_native`]): the design, the shared stop flag, the per-check
 /// allowance in nominal milliseconds, and the portfolio's wall (for the progress it reports).
+/// mununu#1143 — the owned IC3's runner: it replays inside the engine, so it takes the carried
+/// store whether or not a witness was asked for (the flag says whether to carry the trace).
+type Ic3Runner = fn(
+    &Btor2File,
+    std::time::Instant,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    &Carried,
+    bool,
+) -> Result<Option<bool>, MemberStop>;
+
 type NativeRunner = fn(
     &Btor2File,
     Option<&std::sync::atomic::AtomicBool>,
@@ -1258,7 +1297,7 @@ struct Runners {
     exact: fn(&str) -> Result<Option<bool>, String>,
     native: NativeRunner,
     sat_bmc: OwnedRunner,
-    ic3: OwnedRunner,
+    ic3: Ic3Runner,
     interp_available: fn() -> Result<(), String>,
     interp_search:
         fn(&Btor2File, &std::sync::atomic::AtomicBool, MemberTimeouts) -> InterpSafetyVerdict,
@@ -1396,6 +1435,10 @@ fn decide_with_members_using(
     // on its default path.
     let carried_store = Carried::default();
     let carried: Option<&Carried> = members.witness.then_some(&carried_store);
+    // mununu#1143 — the owned IC3 replays inside the engine; it records a replay failure in the
+    // store whether or not a witness was asked for.
+    let ic3_store: &Carried = &carried_store;
+    let witness = members.witness;
     // mununu#996 — the exact member runs on a DETACHED thread and reports over a channel, so the
     // join can leave it behind. It has no cancellation point inside one OxiDD apply (#816 polls
     // the budget only between stages), and when it ran on the calling thread it held the
@@ -1593,7 +1636,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "ic3",
-                    (runners.ic3)(file, deadline, cancel, carried),
+                    (runners.ic3)(file, deadline, cancel, ic3_store, witness),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -1656,24 +1699,20 @@ fn decide_with_members_using(
                 None
             }
             Some(StragglerWait::Abandoned(Abandon::Lost)) => {
-                note_refusal(
-                    refused,
-                    "exact",
-                    "exact: the member's thread ended without a result (it panicked)".to_string(),
-                );
+                note_refusal(refused, "exact", panicked_reason("exact"));
                 None
             }
         };
-        // A panicked member thread abstains (None) rather than poisoning the merge; a member not
-        // started is None too.
-        let native = native_h.and_then(|h| h.join().unwrap_or(None));
-        let btormc = btormc_h.and_then(|h| h.join().unwrap_or(None));
-        let pono = pono_h.and_then(|h| h.join().unwrap_or(None));
-        let ric3 = ric3_h.and_then(|h| h.join().unwrap_or(None));
-        let ric3_bmc = ric3_bmc_h.and_then(|h| h.join().unwrap_or(None));
-        let interp = interp_h.and_then(|h| h.join().unwrap_or(None));
-        let sat_bmc = sat_bmc_h.and_then(|h| h.join().unwrap_or(None));
-        let ic3 = ic3_h.and_then(|h| h.join().unwrap_or(None));
+        // A panicked member thread abstains (None) rather than poisoning the merge, and is
+        // named in `refused` as the exact member is (mununu#1143); a member not started is None.
+        let native = native_h.and_then(|h| settle_join(refused, "native", h.join()));
+        let btormc = btormc_h.and_then(|h| settle_join(refused, "btormc", h.join()));
+        let pono = pono_h.and_then(|h| settle_join(refused, "pono", h.join()));
+        let ric3 = ric3_h.and_then(|h| settle_join(refused, "ric3", h.join()));
+        let ric3_bmc = ric3_bmc_h.and_then(|h| settle_join(refused, "ric3-bmc", h.join()));
+        let interp = interp_h.and_then(|h| settle_join(refused, "interp", h.join()));
+        let sat_bmc = sat_bmc_h.and_then(|h| settle_join(refused, "sat-bmc", h.join()));
+        let ic3 = ic3_h.and_then(|h| settle_join(refused, "ic3", h.join()));
         finished.store(true, Relaxed);
         Members {
             exact,
@@ -1970,8 +2009,9 @@ fn decide_owned_only_using(
     let content = Arc::new(emit_btor2(&file));
     let decided = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
-    let (tx, rx) = mpsc::channel::<(&'static str, Option<bool>)>();
-    // The members this run starts, each sending its name once ([`owned_members`]).
+    let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
+    // The members this run starts, each sending its name once ([`owned_members`]); a member
+    // whose thread panics sends `Died` instead (mununu#1143).
     let members = owned_members();
     // The members' bounds here: this driver's wall is native's per-check allowance and the
     // interpolation search's overall bound; interpolation keeps its default query bound.
@@ -1993,7 +2033,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
-        std::thread::spawn(move || {
+        spawn_owned("native", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#893 — `timeout_ms` is the member's NOMINAL per-check allowance (a resource
             // limit inside); a budget stop is an abstention with its cause, an encode error a
@@ -2010,7 +2050,7 @@ fn decide_owned_only_using(
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("native", v));
+            let _ = tx.send(("native", OwnedReport::Verdict(v)));
         });
     }
     // Safety proof — McMillan interpolation.
@@ -2024,7 +2064,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
-        std::thread::spawn(move || {
+        spawn_owned("interp", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("interp", || {
                 interp_member(
@@ -2040,7 +2080,7 @@ fn decide_owned_only_using(
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("interp", v));
+            let _ = tx.send(("interp", OwnedReport::Verdict(v)));
         });
     }
     // Deep BV counterexample search. With the `boolector` feature the in-process Boolector
@@ -2050,7 +2090,7 @@ fn decide_owned_only_using(
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         let budget = budget.clone();
-        std::thread::spawn(move || {
+        spawn_owned("boolector", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("boolector", || {
                 crate::adapter::btor2::native_boolector::decide_reachable_boolector(
@@ -2063,7 +2103,7 @@ fn decide_owned_only_using(
             if v == Some(true) {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("boolector", v));
+            let _ = tx.send(("boolector", OwnedReport::Verdict(v)));
         });
     }
     #[cfg(not(feature = "boolector"))]
@@ -2077,7 +2117,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
-        std::thread::spawn(move || {
+        spawn_owned("cex", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#955 — a budget stop (the deadline, the resource limit) is an abstention with
             // its cause, an encoder refusal a refusal, as for the native member above.
@@ -2088,7 +2128,10 @@ fn decide_owned_only_using(
             if hit {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("cex", if hit { Some(true) } else { None }));
+            let _ = tx.send((
+                "cex",
+                OwnedReport::Verdict(if hit { Some(true) } else { None }),
+            ));
         });
     }
     // N5.4 — the owned SAT BMC with the dynamic step, beside the z3 / Boolector deep-CEX member:
@@ -2106,7 +2149,7 @@ fn decide_owned_only_using(
         );
         let budget = budget.clone();
         let carried = witness.then(|| Arc::clone(&carried_store));
-        std::thread::spawn(move || {
+        spawn_owned("sat-bmc", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let r = (runners.sat_bmc)(&file, deadline, Arc::clone(&decided), carried.as_deref());
             let v = settle_native(
@@ -2120,7 +2163,7 @@ fn decide_owned_only_using(
             if v == Some(true) {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("sat-bmc", v));
+            let _ = tx.send(("sat-bmc", OwnedReport::Verdict(v)));
         });
     }
     // N5.1 — the owned IC3 (started per [`ic3_default`] since N5.5): the first owned member that
@@ -2136,15 +2179,15 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
-        let carried = witness.then(|| Arc::clone(&carried_store));
-        std::thread::spawn(move || {
+        let store = Arc::clone(&carried_store);
+        spawn_owned("ic3", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), carried.as_deref());
+            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), &store, witness);
             let v = settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "ic3", r);
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("ic3", v));
+            let _ = tx.send(("ic3", OwnedReport::Verdict(v)));
         });
     }
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
@@ -2156,7 +2199,7 @@ fn decide_owned_only_using(
             Arc::clone(&refused),
         );
         let budget = budget.clone();
-        std::thread::spawn(move || {
+        spawn_owned("exact", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#873 — a refusal (over-cap cone, free init) is an abstention AND a recorded
             // reason, as in the scoped driver; it used to be dropped here.
@@ -2164,17 +2207,110 @@ fn decide_owned_only_using(
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
-            let _ = tx.send(("exact", v));
+            let _ = tx.send(("exact", OwnedReport::Verdict(v)));
         });
     }
     drop(tx); // the collector's `rx` disconnects once every member thread has finished.
 
-    let n_members = members.len();
+    let OwnedReports {
+        reachable_by,
+        unreachable_by,
+        reported,
+        dead,
+        disconnected,
+    } = collect_owned(&rx, members.len(), deadline, STRAGGLER_GRACE);
+    // mununu#1143 — a member whose thread panicked said so on the channel (`spawn_owned`), while
+    // the others may still be running; before this the collector named it "still running at
+    // the owned-only wall deadline", or nothing when a verdict was in.
+    for m in &dead {
+        note_refusal(&refused, m, panicked_reason(m));
+    }
+    let heard = reported.len() + dead.len();
+    if disconnected && heard < members.len() {
+        // The backstop: every sender is gone and a member sent neither a verdict nor its death
+        // (a thread that ended without unwinding).
+        for m in members
+            .iter()
+            .copied()
+            .filter(|m| !reported.contains(m) && !dead.contains(m))
+        {
+            note_refusal(&refused, m, panicked_reason(m));
+        }
+    } else if reachable_by.is_empty() && unreachable_by.is_empty() && heard < members.len() {
+        let accounted: Vec<&'static str> = reported.iter().chain(dead.iter()).copied().collect();
+        for (m, cause) in unreported_at_deadline(&members, &accounted, timeout_ms) {
+            note_refusal(&abstained, m, cause);
+        }
+    }
+    let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
+    out.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
+    out.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
+    out.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
+    // N5.4 — what the carrying members had left by now (a member still running carries nothing
+    // into this outcome, as it is not cross-checked either).
+    let (traces, mut replay_failed) = carried_store.take();
+    out.trace = pick_carried(traces);
+    replay_failed.sort_by_key(|(a, _)| member_rank(a));
+    out.trace_replay_failed = replay_failed;
+    out
+}
+
+/// mununu#1143 — what an owned-only member thread sends the collector: its verdict, or that
+/// it died (the thread panicked) — sent by [`spawn_owned`] on the unwind, so a dead member is
+/// reported while every other member is still alive, not inferred from a disconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedReport {
+    Verdict(Option<bool>),
+    Died,
+}
+
+/// mununu#1143 — an owned-only member thread: the body sends its own verdict; a panic inside
+/// it sends `Died` for the name instead of leaving the collector to guess from a disconnect.
+fn spawn_owned(
+    name: &'static str,
+    tx: std::sync::mpsc::Sender<(&'static str, OwnedReport)>,
+    body: impl FnOnce() + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+            let _ = tx.send((name, OwnedReport::Died));
+        }
+    });
+}
+
+/// mununu#1143 — what the owned-only collector gathered from the member channel.
+struct OwnedReports {
+    reachable_by: Vec<&'static str>,
+    unreachable_by: Vec<&'static str>,
+    /// The members that sent, in arrival order (a dead member is in `dead`, not here).
+    reported: Vec<&'static str>,
+    /// The members whose thread panicked ([`OwnedReport::Died`]).
+    dead: Vec<&'static str>,
+    /// The channel disconnected before every member reported: every sender is gone, so a
+    /// member missing from `reported` ended without sending (its thread panicked) — not a
+    /// member still running at the deadline.
+    disconnected: bool,
+}
+
+/// The owned-only collector: wait for the first definite verdict, then a short grace for a
+/// co-completing contradiction; with no verdict by the deadline, the same grace for the members'
+/// own budget stops. Pure over the channel, so the seam is testable without an engine
+/// (mununu#1143).
+fn collect_owned(
+    rx: &std::sync::mpsc::Receiver<(&'static str, OwnedReport)>,
+    n_members: usize,
+    deadline: std::time::Instant,
+    grace: std::time::Duration,
+) -> OwnedReports {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
     let mut reachable_by: Vec<&'static str> = Vec::new();
     let mut unreachable_by: Vec<&'static str> = Vec::new();
+    let mut dead: Vec<&'static str> = Vec::new();
     let mut reports = 0usize;
     let mut reported: Vec<&'static str> = Vec::new();
     let mut definite = false;
+    let mut disconnected = false;
     // Wait for a definite verdict, or all members to abstain, or the deadline.
     while reports < n_members && !definite {
         let now = Instant::now();
@@ -2182,7 +2318,11 @@ fn decide_owned_only_using(
             break;
         }
         match rx.recv_timeout(deadline - now) {
-            Ok((name, v)) => {
+            Ok((name, OwnedReport::Died)) => {
+                reports += 1;
+                dead.push(name);
+            }
+            Ok((name, OwnedReport::Verdict(v))) => {
                 reports += 1;
                 reported.push(name);
                 match v {
@@ -2197,8 +2337,12 @@ fn decide_owned_only_using(
                     None => {}
                 }
             }
-            // Timeout (deadline) or all members finished (disconnected) — stop waiting.
-            Err(_) => break,
+            // Timeout (deadline) or every sender gone (disconnected) — stop waiting; which one
+            // decides how an unreported member is named (mununu#1143).
+            Err(e) => {
+                disconnected = e == RecvTimeoutError::Disconnected;
+                break;
+            }
         }
     }
     // A definite verdict is in. Give the OTHER members a SHORT bounded grace to finish so a
@@ -2207,18 +2351,22 @@ fn decide_owned_only_using(
     // deadline: a slow, non-interruptible straggler (the exact BDD engine on a wide datapath)
     // would defeat the owned early-return. The grace catches the fast members (native / interp /
     // boolector), which co-complete within ms; a genuinely-slow engine is simply not waited on.
-    // Bounded — the added latency past first-definite is at most `STRAGGLER_GRACE` (and the
+    // Bounded — the added latency past first-definite is at most `grace` (and the
     // overall `deadline` still caps it). Was a non-blocking `try_recv` only, which missed a
     // straggler that hadn't landed at the exact instant the first verdict arrived (DET-2).
     if definite {
-        let grace_deadline = (Instant::now() + STRAGGLER_GRACE).min(deadline);
+        let grace_deadline = (Instant::now() + grace).min(deadline);
         while reports < n_members {
             let now = Instant::now();
             if now >= grace_deadline {
                 break;
             }
             match rx.recv_timeout(grace_deadline - now) {
-                Ok((name, v)) => {
+                Ok((name, OwnedReport::Died)) => {
+                    reports += 1;
+                    dead.push(name);
+                }
+                Ok((name, OwnedReport::Verdict(v))) => {
                     reports += 1;
                     reported.push(name);
                     match v {
@@ -2231,7 +2379,11 @@ fn decide_owned_only_using(
                         break;
                     }
                 }
-                Err(_) => break, // grace elapsed or all members disconnected
+                Err(e) => {
+                    // grace elapsed or every sender gone
+                    disconnected = e == RecvTimeoutError::Disconnected;
+                    break;
+                }
             }
         }
     }
@@ -2240,14 +2392,18 @@ fn decide_owned_only_using(
     // that still has not reported. Before this an owned-only `unknown` at the wall said nothing
     // about any member.
     if !definite && reports < n_members {
-        let grace_deadline = Instant::now() + STRAGGLER_GRACE;
+        let grace_deadline = Instant::now() + grace;
         while reports < n_members {
             let now = Instant::now();
             if now >= grace_deadline {
                 break;
             }
             match rx.recv_timeout(grace_deadline - now) {
-                Ok((name, v)) => {
+                Ok((name, OwnedReport::Died)) => {
+                    reports += 1;
+                    dead.push(name);
+                }
+                Ok((name, OwnedReport::Verdict(v))) => {
                     reports += 1;
                     reported.push(name);
                     match v {
@@ -2256,26 +2412,20 @@ fn decide_owned_only_using(
                         None => {}
                     }
                 }
-                Err(_) => break,
-            }
-        }
-        if reachable_by.is_empty() && unreachable_by.is_empty() {
-            for (m, cause) in unreported_at_deadline(&members, &reported, timeout_ms) {
-                note_refusal(&abstained, m, cause);
+                Err(e) => {
+                    disconnected = e == RecvTimeoutError::Disconnected;
+                    break;
+                }
             }
         }
     }
-    let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
-    out.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
-    out.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
-    out.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
-    // N5.4 — what the carrying members had left by now (a member still running carries nothing
-    // into this outcome, as it is not cross-checked either).
-    let (traces, mut replay_failed) = carried_store.take();
-    out.trace = pick_carried(traces);
-    replay_failed.sort_by_key(|(a, _)| member_rank(a));
-    out.trace_replay_failed = replay_failed;
-    out
+    OwnedReports {
+        reachable_by,
+        unreachable_by,
+        reported,
+        dead,
+        disconnected,
+    }
 }
 
 /// mununu#1022 — the owned-only members that had not reported when the collector gave up at its
@@ -3154,6 +3304,148 @@ mod tests {
         );
     }
 
+    /// mununu#1143 — the owned-only collector reads a member's death notice while the others
+    /// are still alive, tells a disconnect from the deadline as the backstop, and still reads a
+    /// co-completing verdict within the grace. The seam the driver consumes; the driver itself
+    /// runs real engines, so a panic is injected through `spawn_owned` below instead.
+    #[test]
+    fn x1143_the_owned_collector_tells_a_dead_member_from_one_still_running() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        let grace = Duration::from_secs(5);
+        // A member that panicked while another is still running: its death notice arrives, the
+        // other's sender stays alive past the deadline.
+        let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
+        let _still_running = tx.clone();
+        tx.send(("native", OwnedReport::Verdict(None)))
+            .expect("send");
+        tx.send(("interp", OwnedReport::Died)).expect("send");
+        drop(tx);
+        let r = collect_owned(&rx, 3, Instant::now() + Duration::from_millis(50), grace);
+        assert_eq!(r.reported, vec!["native"]);
+        assert_eq!(r.dead, vec!["interp"], "the death notice, not a guess");
+        assert!(!r.disconnected, "the third member is still running");
+        // The backstop: a sender dropped without any report (a thread that did not unwind).
+        let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
+        let tx_dead = tx.clone();
+        tx.send(("native", OwnedReport::Verdict(None)))
+            .expect("send");
+        drop(tx);
+        drop(tx_dead);
+        let r = collect_owned(&rx, 2, Instant::now() + Duration::from_secs(5), grace);
+        assert!(
+            r.disconnected,
+            "every sender gone before every member reported"
+        );
+        assert_eq!(r.reported, vec!["native"]);
+        assert!(r.dead.is_empty());
+        // A definite verdict, then a disagreeing straggler inside the grace: both are read, and
+        // the contradiction returns at once (the third member is unreported, not dead).
+        let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
+        tx.send(("native", OwnedReport::Verdict(Some(true))))
+            .expect("send");
+        tx.send(("exact", OwnedReport::Verdict(Some(false))))
+            .expect("send");
+        drop(tx);
+        let r = collect_owned(&rx, 3, Instant::now() + Duration::from_secs(5), grace);
+        assert_eq!(
+            (r.reachable_by, r.unreachable_by),
+            (vec!["native"], vec!["exact"])
+        );
+        assert_eq!(r.reported, vec!["native", "exact"]);
+        assert!(!r.disconnected);
+    }
+
+    /// mununu#1143 — a member thread that panics sends its death notice through `spawn_owned`
+    /// (the owned-only driver), and a scoped member's panicked join is `None` AND a named
+    /// refusal with its owner (the full driver).
+    #[test]
+    fn x1143_a_panicked_member_is_a_named_refusal_in_both_drivers() {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
+        spawn_owned("pono", tx.clone(), || panic!("boom"));
+        spawn_owned("ric3", tx, || {});
+        let got: Vec<(&str, OwnedReport)> = rx.iter().collect();
+        assert_eq!(
+            got,
+            vec![("pono", OwnedReport::Died)],
+            "a body that sends nothing and does not panic is silent; a panic is a death notice"
+        );
+        let refused = std::sync::Mutex::new(Vec::new());
+        let joined = std::thread::spawn(|| -> Option<bool> { panic!("boom") }).join();
+        assert_eq!(settle_join(&refused, "pono", joined), None);
+        let ok = std::thread::spawn(|| Some(false)).join();
+        assert_eq!(settle_join(&refused, "ric3", ok), Some(false));
+        let got = refused.lock().expect("lock").clone();
+        assert_eq!(got, vec![("pono", panicked_reason("pono"))]);
+        assert!(
+            got[0].1.contains("it panicked") && got[0].1.contains("mununu defect"),
+            "{}",
+            got[0].1
+        );
+    }
+
+    /// mununu#1143 — REPRODUCER through the public driver: an IC3-only portfolio on a design
+    /// with a 130-bit cell, no witness asked for, lists the unreplayed counterexample in
+    /// `trace_replay_failed`. Fails on the parent (empty: the reason went to the log).
+    #[test]
+    fn x1143_the_portfolio_lists_an_unreplayed_ic3_violation_without_a_witness() {
+        const WIDE: &str = "1 sort bitvec 130\n2 sort bitvec 1\n3 state 1 c\n4 next 1 3 3\n\
+                            5 constd 1 5\n6 eq 2 3 5\n7 bad 6\n";
+        let file = parser::parse(WIDE).expect("parse");
+        let ic3_only = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            sat_bmc: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ic3: true,
+            witness: false,
+            ..ReachMembers::ALL
+        };
+        let out = decide_reach_portfolio_with_members(
+            &file,
+            std::time::Duration::from_secs(60),
+            None,
+            ic3_only,
+        );
+        assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
+        assert_eq!(out.trace_replay_failed.len(), 1, "{out:?}");
+        assert_eq!(out.trace_replay_failed[0].0, "ic3");
+        assert!(out.trace_replay_failed[0].1.contains("128"), "{out:?}");
+    }
+
+    /// mununu#1143 — an IC3 `Violated` on a design the simulator cannot carry is listed as
+    /// unreplayed whether or not a witness was asked for; with one, the trace itself is not
+    /// carried (there is none).
+    #[test]
+    fn x1143_an_unreplayed_ic3_violation_is_listed_without_a_witness() {
+        const WIDE: &str = "1 sort bitvec 130\n2 sort bitvec 1\n3 state 1 c\n4 next 1 3 3\n\
+                            5 constd 1 5\n6 eq 2 3 5\n7 bad 6\n";
+        let file = parser::parse(WIDE).expect("parse");
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        for witness in [false, true] {
+            let store = Carried::default();
+            let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            assert_eq!(run_ic3(&file, later, go, &store, witness), Ok(Some(true)));
+            let (traces, failed) = store.take();
+            assert!(
+                traces.is_empty(),
+                "witness={witness}: nothing replayed, nothing carried"
+            );
+            assert_eq!(failed.len(), 1, "witness={witness}: {failed:?}");
+            assert_eq!(failed[0].0, "ic3");
+            assert!(
+                failed[0].1.contains("128"),
+                "witness={witness}: {}",
+                failed[0].1
+            );
+        }
+    }
+
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:
     /// `Unknown`, no engine credited. That no member starts is asserted on the runners
     /// (`scripted::an_expired_budget_starts_no_member`), not on how fast the call came back. The
@@ -3574,24 +3866,33 @@ mod tests {
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
         assert_eq!(
-            run_ic3(&parse(COUNTER), later(), go(), None),
+            run_ic3(&parse(COUNTER), later(), go(), &Carried::default(), false),
             Ok(Some(true))
         );
-        assert_eq!(run_ic3(&parse(SAFE), later(), go(), None), Ok(Some(false)));
+        assert_eq!(
+            run_ic3(&parse(SAFE), later(), go(), &Carried::default(), false),
+            Ok(Some(false))
+        );
         assert!(
             matches!(
-                run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None),
+                run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), &Carried::default(), false),
                 Err(MemberStop::Cancelled(p)) if p.starts_with("IC3 stopped at frame")
             ),
             "a member stopped on the shared flag says how far it got (mununu#1043)"
         );
-        match run_ic3(&parse(SAFE), std::time::Instant::now(), go(), None) {
+        match run_ic3(
+            &parse(SAFE),
+            std::time::Instant::now(),
+            go(),
+            &Carried::default(),
+            false,
+        ) {
             Err(MemberStop::Abstained(cause)) => assert!(cause.contains("deadline"), "{cause}"),
             other => panic!("a run past its deadline abstains with the cause: {other:?}"),
         }
         assert!(
             matches!(
-                run_ic3(&parse(ARRAY), later(), go(), None),
+                run_ic3(&parse(ARRAY), later(), go(), &Carried::default(), false),
                 Err(MemberStop::Refused(why)) if why.starts_with("ic3:")
             ),
             "an array design is refused by name"
@@ -3939,6 +4240,16 @@ mod tests {
             Err(MemberStop::Cancelled("stopped at frame 2".into()))
         }
 
+        fn ic3_stopped(
+            f: &Btor2File,
+            d: Instant,
+            stop: Arc<AtomicBool>,
+            _: &Carried,
+            _: bool,
+        ) -> Result<Option<bool>, MemberStop> {
+            owned_stopped(f, d, stop, None)
+        }
+
         fn interp_stopped(
             _: &Btor2File,
             stop: &AtomicBool,
@@ -3967,7 +4278,7 @@ mod tests {
             exact: exact_never_returns,
             native: native_stopped,
             sat_bmc: owned_stopped,
-            ic3: owned_stopped,
+            ic3: ic3_stopped,
             interp_available: || Ok(()),
             interp_search: interp_stopped,
             btormc: |f, _, t, stop, c| subprocess_stopped(f, t, stop, c),
@@ -4021,14 +4332,14 @@ mod tests {
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _| Ok(Some(false)),
+                        ic3: |_, _, _, _, _| Ok(Some(false)),
                         ..ALL_RUNNING
                     },
                     safe("ic3"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _| Ok(Some(true)),
+                        ic3: |_, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("ic3"),
@@ -4074,7 +4385,7 @@ mod tests {
         fn a_verdict_that_lands_after_the_first_is_credited_and_a_disagreement_is_the_alarm() {
             let agreeing = Runners {
                 native: |_, _, _, _| Ok(Some(true)),
-                ic3: |_, _, stop, _| {
+                ic3: |_, _, stop, _, _| {
                     until_stopped(&stop);
                     Ok(Some(true))
                 },
@@ -4110,7 +4421,7 @@ mod tests {
                 exact: |_| Err("exact: over the cap".into()),
                 native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
                 sat_bmc: |_, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
-                ic3: |_, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
+                ic3: |_, _, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
                 interp_available: || Err("no cvc5".into()),
                 interp_search: |_, _, _| unreachable!("no search without cvc5"),
                 btormc: |_, _, _, _, _| Ok(Some(McVerdict::Unknown)),
@@ -4214,7 +4525,7 @@ mod tests {
             exact: |_| Ok(Some(true)),
             native: |_, _, _, _| Ok(Some(true)),
             sat_bmc: |_, _, _, _| Ok(Some(true)),
-            ic3: |_, _, _, _| Ok(Some(true)),
+            ic3: |_, _, _, _, _| Ok(Some(true)),
             interp_available: || Ok(()),
             interp_search: |_, _, _| InterpSafetyVerdict::Unsafe { depth: 1 },
             btormc: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
@@ -4263,7 +4574,7 @@ mod tests {
                 exact: |_| stuck(),
                 native: |_, _, _, _| stuck(),
                 sat_bmc: |_, _, _, _| stuck(),
-                ic3: |_, _, _, _| stuck(),
+                ic3: |_, _, _, _, _| stuck(),
                 interp_search: |_, _, _| stuck(),
                 cex: |_, _, _| stuck(),
                 ..ALL_RUNNING
@@ -4328,7 +4639,7 @@ mod tests {
                 if ic3_starts() {
                     cases.push((
                         Runners {
-                            ic3: |_, _, _, _| Ok(Some(false)),
+                            ic3: |_, _, _, _, _| Ok(Some(false)),
                             ..ALL_RUNNING
                         },
                         safe("ic3"),
@@ -4347,7 +4658,7 @@ mod tests {
                     exact: |_| Err("exact: over the cap".into()),
                     native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
                     sat_bmc: |_, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
-                    ic3: |_, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
+                    ic3: |_, _, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
                     interp_available: || Err("no cvc5".into()),
                     cex: |_, _, _| Err(MemberStop::Abstained("query budget spent".into())),
                     ..ALL_RUNNING
