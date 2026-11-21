@@ -3492,7 +3492,10 @@ mod tests {
         for witness in [false, true] {
             let store = Carried::default();
             let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            assert_eq!(run_ic3(&file, later, go, &store, witness, &SharedAig::new()), Ok(Some(true)));
+            assert_eq!(
+                run_ic3(&file, later, go, &store, witness, &SharedAig::new()),
+                Ok(Some(true))
+            );
             let (traces, failed) = store.take();
             assert!(
                 traces.is_empty(),
@@ -4083,11 +4086,25 @@ mod tests {
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
         assert_eq!(
-            run_ic3(&parse(COUNTER), later(), go(), &Carried::default(), false, &SharedAig::new()),
+            run_ic3(
+                &parse(COUNTER),
+                later(),
+                go(),
+                &Carried::default(),
+                false,
+                &SharedAig::new()
+            ),
             Ok(Some(true))
         );
         assert_eq!(
-            run_ic3(&parse(SAFE), later(), go(), &Carried::default(), false, &SharedAig::new()),
+            run_ic3(
+                &parse(SAFE),
+                later(),
+                go(),
+                &Carried::default(),
+                false,
+                &SharedAig::new()
+            ),
             Ok(Some(false))
         );
         assert!(
@@ -4465,9 +4482,9 @@ mod tests {
             stop: Arc<AtomicBool>,
             _: &Carried,
             _: bool,
-            _: &SharedAig,
+            aig: &SharedAig,
         ) -> Result<Option<bool>, MemberStop> {
-            owned_stopped(f, d, stop, None)
+            owned_stopped(f, d, stop, None, aig)
         }
 
         fn interp_stopped(
