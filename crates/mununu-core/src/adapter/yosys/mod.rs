@@ -3486,7 +3486,7 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
                 &text,
                 "a path without whitespace, quotes or `;` on this platform (slang takes it as \
                  one unquoted token and the lift stages no link here)",
-                "move or rename the directory given to `--include-dir`",
+                "move or rename the directory given to `--include-dir` on the `sv` verbs",
             ));
         }
     }
@@ -4843,9 +4843,8 @@ endmodule
         // mununu#1138 — an include directory with a space is staged as a link the script names,
         // so it is no longer hostile where links exist; where they do not, the #1133 refusal
         // stays.
-        let spaced = plan(&|o: &mut YosysOptions| {
-            o.extra_include_dirs = vec![PathBuf::from("inc dir")]
-        });
+        let spaced =
+            plan(&|o: &mut YosysOptions| o.extra_include_dirs = vec![PathBuf::from("inc dir")]);
         if cfg!(unix) {
             spaced.expect("an include directory with a space is staged as a link");
         } else {
