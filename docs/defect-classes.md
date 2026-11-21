@@ -66,7 +66,7 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the member panicked | open: unrecorded, or reported as still running | mununu#1143 |
 | a rung of the justice / response ladder panicked | open | mununu#1140 |
 
-**Enumerating test:** none recorded.
+**Enumerating test:** none in one table; `x1142_the_sat_members_share_one_aig_model_and_its_stop`, `x1142_a_cap_stop_abstains_both_members_in_both_drivers` and the exhaustive `BuildStop` matches in `sat_bmc_built` / `ic3_built` pin the build-stop row.
 
 ### `server-side-file-read`
 

@@ -550,12 +550,13 @@ fn run_sat_bmc(
         // mununu#1142 — a build that stopped (the cap, the wall, a peer's verdict) is a
         // `Stopped` at depth 0 carrying the build's reason: a cancelled one keeps the reason
         // (the model was never built — "every depth below 0 refuted" says nothing).
-        Ok(SatBmcOutcome::Stopped { depth: 0, reason })
-            if cancelled() && reason.starts_with("aig:") =>
-        {
-            Err(MemberStop::Cancelled(format!(
-                "SAT BMC stopped before its first depth ({reason})"
-            )))
+        Ok(SatBmcOutcome::Stopped { depth: 0, reason }) if reason.starts_with("aig:") => {
+            let why = format!("SAT BMC stopped before its first depth ({reason})");
+            Err(if cancelled() {
+                MemberStop::Cancelled(why)
+            } else {
+                MemberStop::Abstained(why)
+            })
         }
         Ok(SatBmcOutcome::Stopped { depth, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("SAT BMC stopped; every depth below {depth} refuted"),
@@ -619,12 +620,13 @@ fn run_ic3(
             }
             // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
             // reason; a cancelled one keeps the reason (the model was never built).
-            Ok(Ic3Outcome::Stopped { frames: 0, reason })
-                if cancelled() && reason.starts_with("aig:") =>
-            {
-                Err(MemberStop::Cancelled(format!(
-                    "IC3 stopped at frame 0 ({reason})"
-                )))
+            Ok(Ic3Outcome::Stopped { frames: 0, reason }) if reason.starts_with("aig:") => {
+                let why = format!("IC3 stopped at frame 0 ({reason})");
+                Err(if cancelled() {
+                    MemberStop::Cancelled(why)
+                } else {
+                    MemberStop::Abstained(why)
+                })
             }
             Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
                 format!("IC3 stopped at frame {frames}"),
@@ -3286,6 +3288,68 @@ mod tests {
             run_ic3(&safe, later(), go(), None, &shared),
             Ok(Some(false)),
             "the proof on the model the SAT member built"
+        );
+    }
+
+    /// mununu#1142 — a cap stop reaches the report as both members' `abstained` entries, in
+    /// both drivers: the runner table lets a non-capturing stub pre-set the shared cell with the
+    /// stop and call the real member, so the mapping from a stopped build to the lists is
+    /// exercised end to end without a design large enough to trip the cap.
+    #[test]
+    fn x1142_a_cap_stop_abstains_both_members_in_both_drivers() {
+        use crate::adapter::btor2::aig::BuildStop;
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 sort bitvec 1\n9 constd 1 5\n\
+                               10 eq 8 3 9\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let capped = Runners {
+            sat_bmc: |f, d, c, carried, aig| {
+                let _ = aig.set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }));
+                run_sat_bmc(f, d, c, carried, aig)
+            },
+            ic3: |f, d, c, carried, aig| {
+                let _ = aig.set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }));
+                run_ic3(f, d, c, carried, aig)
+            },
+            ..Runners::SHIPPED
+        };
+        let only_sat = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            sat_bmc: true,
+            ic3: true,
+            witness: false,
+            ..ReachMembers::ALL
+        };
+        let full = decide_with_members_using(
+            &file,
+            std::time::Duration::from_secs(30),
+            None,
+            only_sat,
+            &capped,
+        );
+        assert_eq!(full.verdict, ReachVerdict::Unknown, "{full:?}");
+        let abstained: Vec<&str> = full.abstained.iter().map(|(m, _)| *m).collect();
+        assert!(
+            abstained.contains(&"sat-bmc") && abstained.contains(&"ic3"),
+            "{full:?}"
+        );
+        assert!(
+            full.abstained
+                .iter()
+                .all(|(_, why)| why.contains("node cap") && why.contains("40 nodes")),
+            "{full:?}"
+        );
+        let owned = decide_owned_only_using(&file, 30_000, false, &capped);
+        let names: Vec<&str> = owned.abstained.iter().map(|(m, _)| *m).collect();
+        assert!(
+            names.contains(&"sat-bmc") && names.contains(&"ic3"),
+            "the owned-only driver names both too: {owned:?}"
         );
     }
 

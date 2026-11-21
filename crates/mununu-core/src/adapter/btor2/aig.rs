@@ -202,6 +202,9 @@ pub struct Aig {
     /// The first stop hit; once set, no node is created (every request returns FALSE) and the
     /// build returns it.
     tripped: Option<BuildStop>,
+    /// Whether the clocks and the run budget are polled: true while a build runs, false once
+    /// it finished (a finished model is extended without polls and never trips).
+    polling: bool,
 }
 
 impl Default for Aig {
@@ -232,6 +235,7 @@ impl Aig {
             deadline: limits.deadline,
             cancel: limits.cancel.clone(),
             tripped: None,
+            polling: true,
         }
     }
 
@@ -259,8 +263,8 @@ impl Aig {
         // mununu#1142 — a tripped graph creates nothing more: the build returns the stop, and
         // memory stops growing at the cap (every later request is answered with FALSE).
         // SOUNDNESS: the FALSE placeholder is never read as a model — `build_with` returns the
-        // stop before any caller sees the graph, and a successful build clears its limits, so a
-        // finished model never trips.
+        // stop before any caller sees the graph, and a successful build clears its limits and
+        // its polls, so a finished model trips only at the literal space's own limit.
         if self.tripped.is_some() {
             return 0;
         }
@@ -271,7 +275,7 @@ impl Aig {
                 nodes,
                 cap: self.cap,
             })
-        } else if n % POLL_EVERY == 1 {
+        } else if self.polling && n % POLL_EVERY == 1 {
             if self
                 .cancel
                 .as_ref()
@@ -1069,11 +1073,13 @@ impl AigModel {
         if let Some(stop) = aig.tripped.take() {
             return Err(stop);
         }
-        // The limits were the BUILD's: a finished model keeps no clock and no flag, so a later
-        // extension of the graph cannot be answered with silent FALSE literals.
+        // The limits were the BUILD's: a finished model keeps no clock, no flag and no poll, so
+        // a later extension of the graph cannot be answered with silent FALSE literals (the
+        // hard cap of the literal space is the one bound that stays).
         aig.cap = MAX_NODES;
         aig.deadline = None;
         aig.cancel = None;
+        aig.polling = false;
         Ok(Self {
             aig,
             states,
