@@ -1315,4 +1315,62 @@ endmodule
         assert_eq!(bus.outcome, PropertyVerdict::Holds, "{bus:#?}");
         assert_eq!(gray.worst(), PropertyVerdict::Holds, "{gray:#?}");
     }
+
+    /// mununu#1148 — the lint through the real lift on a clock the design holds no driver for,
+    /// in the two shapes yosys leaves (a declared empty black box becomes a cut net, a
+    /// missing-module stub stays a cell of its own type): the lint runs — it was refused as "a
+    /// verb that drops the roots" — finds the crossing into that domain, and names the root in
+    /// its notes. Needs yosys.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_cdc_lint_lints_a_clock_rooted_at_a_black_box_and_names_the_root() {
+        use crate::adapter::sv_verify::{SvLift, sv_cdc_lint};
+        use crate::adapter::yosys::MISSING_MODULE_ATTR;
+        const TOP: &str = "\
+module top(input clk, input en, input d, output reg q, output reg r);
+  wire gclk;
+  prim_clock_gating u_cg(.clk_i(clk), .en_i(en), .clk_o(gclk));
+  always @(posedge clk) r <= d;
+  always @(posedge gclk) q <= r;
+endmodule
+";
+        let declared = format!(
+            "module prim_clock_gating(input clk_i, input en_i, output clk_o);\nendmodule\n{TOP}"
+        );
+        let stub = format!(
+            "(* {MISSING_MODULE_ATTR} *)\nmodule prim_clock_gating(input clk_i, input en_i, \
+             output clk_o);\nendmodule\n{TOP}"
+        );
+        for (name, src, root) in [
+            ("declared", declared, "a cut net"),
+            ("stub", stub, "black box `prim_clock_gating`"),
+        ] {
+            let report = sv_cdc_lint(&SvLift {
+                primary_name: "top.sv".to_string(),
+                source: src,
+                additional_sources: Vec::new(),
+                top: Some("top".to_string()),
+                include_dirs: Vec::new(),
+                merge_clock_domains: false,
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{name}: the lint lifts a black-box clock: {e}"));
+            assert!(
+                report.domains.iter().any(|d| d.net == "gclk"),
+                "{name}: {report:#?}"
+            );
+            assert!(
+                report.crossings.iter().any(|c| c.source == "r"),
+                "{name}: the crossing from `r` into the black-box domain: {report:#?}"
+            );
+            assert!(
+                report
+                    .notes
+                    .iter()
+                    .any(|n| n.starts_with("clock `gclk` is driven by") && n.contains(root)),
+                "{name}: {:#?}",
+                report.notes
+            );
+        }
+    }
 }
