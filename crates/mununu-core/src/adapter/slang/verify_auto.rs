@@ -4528,8 +4528,8 @@ fn annotation_note(scan: &AnnotationScan) -> Option<VerificationNote> {
                  environment schedule satisfying the assumption infinitely often. For \
                  assumptions that do not fit `GF <REG op VALUE>` — a state predicate, a \
                  non-response guarantee shape, or a multi-guarantee-coupled fairness — the \
-                 assume is recorded here; use `mununu btor2 verify-liveness --fairness` \
-                 on the emitted BTOR2 or model in CTXDSL where the GR(1) game engine \
+                 assume is recorded here; use `--fairness` on `btor2 verify-liveness` over \
+                 the emitted BTOR2, or model in CTXDSL where the GR(1) game engine \
                  `(⋀ GF envᵢ) → (⋀ GF sysⱼ)` discharges multi-pair assume-guarantee liveness \
                  directly."
                 .into(),
@@ -7455,7 +7455,7 @@ pub(crate) fn verify_auto_impl(
         // J4 (2026-11-08): the wall is always measured and lands in `report.property_wall_ms`;
         // the variable only decides whether the stderr line is printed.
         let prop_t0 = std::time::Instant::now();
-        let print_timing = std::env::var("MUNUNU_PROPERTY_TIMING").is_ok();
+        let print_timing = crate::adapter::env_var::read("MUNUNU_PROPERTY_TIMING").is_some();
         // mununu#504 — install the PER-PROPERTY budget for this iteration. `child` clamps to the
         // earlier of (now + per-property) and the run deadline, so a generous per-property value
         // cannot extend the run. RAII: the guard restores the previous budget on EVERY exit from
@@ -8681,7 +8681,7 @@ pub(crate) fn escalate_bottom_with_slice(
         // cube ladder legitimately runs minutes. `[mununu-timing] … phase=replan` names the lane.
         // J4: always measured (→ `report.property_wall_ms`); the stderr line stays opt-in.
         let row_t0 = std::time::Instant::now();
-        let print_timing = std::env::var_os("MUNUNU_PROPERTY_TIMING").is_some();
+        let print_timing = crate::adapter::env_var::read("MUNUNU_PROPERTY_TIMING").is_some();
         let row_budget = crate::adapter::run_budget::Budget::child(
             &crate::adapter::run_budget::current(),
             crate::adapter::run_budget::property_budget_ms(),
@@ -9591,7 +9591,7 @@ impl BottomReason {
                  — its monitor could not bind an atom, or it returned no verdict in its slice. \
                  The counterexample may be a schedule the assumption forbids, so the violation \
                  is withheld rather than reported. Fairness atoms must be single register \
-                 comparisons; `mununu sv verify-liveness --fairness` decides one response \
+                 comparisons; `--fairness` on `sv verify-liveness` decides one response \
                  directly (mununu#1073).",
                 assumptions.join(" && ")
             ),
@@ -10135,7 +10135,7 @@ pub(crate) fn rescue_skipped_via_exact(
             .property_wall_ms
             .entry(prop.name.clone())
             .or_insert(0) += row_ms;
-        if std::env::var_os("MUNUNU_PROPERTY_TIMING").is_some() {
+        if crate::adapter::env_var::read("MUNUNU_PROPERTY_TIMING").is_some() {
             eprintln!(
                 "[mununu-timing] property={} outcome={} elapsed_ms={row_ms} phase=skip-rescue",
                 prop.name,

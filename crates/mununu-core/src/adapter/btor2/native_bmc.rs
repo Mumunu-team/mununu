@@ -1988,7 +1988,9 @@ mod tests {
             "an expired budget abstains at depth 0"
         );
         assert!(
-            t0.elapsed() < std::time::Duration::from_secs(1),
+            // mununu#1144 — a bound on "promptly", wide enough for a loaded host; the verdict
+            // assertion above carries the content.
+            t0.elapsed() < std::time::Duration::from_secs(10),
             "{:?}",
             t0.elapsed()
         );

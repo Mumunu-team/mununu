@@ -3073,7 +3073,9 @@ mod tests {
     /// F.1 (2026-07-24) — the must-precondition Craig refinement is SOUND on a recoverability
     /// property (never falsifies a HOLDS), and its DECIDING is gated on MathSAT (host make-ci has no
     /// mathsat → the query is inert → WP fallback → sound-but-undecided; the deciding is validated in
-    /// `e2e_craig_must_precondition_decides_emergent_recoverability`, `mununu-sva`). `busy` returns to
+    /// `craig_must_precondition_decides_emergent_recoverability_under_mathsat`, by hand under
+    /// `mununu-sva-pono` — the e2e sweep's image has no MathSAT, so as an `e2e_` it counted a
+    /// skip as a pass, mununu#1144). `busy` returns to
     /// idle (`busy==0`) exactly when `data == target`; `data`/`target` increment in LOCKSTEP so
     /// `data == target` is INVARIANT (never syntactically compared beyond the gate). `AG EF (busy==0)`
     /// genuinely HOLDS (exact oracle), yet the cube over `{busy==0}` alone leaves ⊥. The
@@ -3147,11 +3149,12 @@ mod tests {
     /// the emergent-invariant recoverability the WP splitter cannot. Same `data==target`-gated
     /// `AG EF (busy==0)` design (exact oracle HOLDS); MathSAT's lazy-BV interpolation discovers
     /// `data == target`, the ⊥ closes → `Converged` with the sound HOLDS verdict, whereas WP
-    /// exhausts. `#[ignore]`d (needs MathSAT, subprocess-only per the not-bundled policy — run in the
-    /// `mununu-sva` image with `MUNUNU_MATHSAT_PATH` set).
+    /// exhausts. `#[ignore]`d as `manual:` (needs MathSAT, subprocess-only per the not-bundled
+    /// policy; the `mununu-sva` image lacks it, `mununu-sva-pono` has it — run with `--ignored`
+    /// and `MUNUNU_MATHSAT_PATH` set).
     #[test]
-    #[ignore = "requires MathSAT (mununu-sva image); run with --ignored + MUNUNU_MATHSAT_PATH"]
-    fn e2e_craig_must_precondition_decides_emergent_recoverability() {
+    #[ignore = "manual: needs MathSAT, which the mununu-sva image lacks (mununu-sva-pono has it); run with --ignored and MUNUNU_MATHSAT_PATH=<binary>"]
+    fn craig_must_precondition_decides_emergent_recoverability_under_mathsat() {
         // MathSAT is not in the `mununu-sva` image (it ships in `mununu-sva-pono`).
         // Skip rather than fail: an absent optional tool is not a regression, and a
         // red result here masks the genuine failures in the `--ignored` sweep.

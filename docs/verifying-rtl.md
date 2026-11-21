@@ -29,7 +29,7 @@ signal/value of interest (`"state_q == 3"`).
 
 ### `btor2 verify` — safety / reachability
 
-> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L852) — surface: (CLI+API+UI)
+> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L917) — surface: (CLI+API+UI)
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
 engine, the in-house native BMC + k-induction engine (in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
@@ -627,7 +627,9 @@ re-derivation) — that member's own path, **not necessarily the shallowest**: `
 the member established that no shorter counterexample exists (`true` for `native-bmc` and for `sat-bmc`'s
 plain search; `false` when `sat-bmc`'s dynamic step answered a window with a deeper path, mununu#1057;
 absent when the member does not say — `ic3`, btormc, rIC3); a member whose own witness
-did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone). A member
+did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone; the owned
+`ic3` replays inside the engine, so its failure — a cell wider than the simulator's 128 bits — is listed with or
+without `--witness`, mununu#1143). A member
 of that second search that PROVES `bad` unreachable is a contradiction, not a note (mununu#1076): the verdict becomes
 `unknown` with `contradiction: true`, that member joins `unreachable_by` beside `reachable_by`, no trace ships, and
 `trace_unavailable_reason` says so; a `sv verify-auto` row goes to `unknown` with `bottom_reason: engine-contradiction`.
