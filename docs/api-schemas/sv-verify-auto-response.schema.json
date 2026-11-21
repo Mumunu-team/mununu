@@ -454,7 +454,7 @@
           ]
         },
         "merged_clock_domains": {
-          "description": "The clock domains `merge_clock_domains` lifted onto one clock, each `\"<net> (<edge>, <n> cells)\"`, a derived clock suffixed `\", derived: driven by \\`<cell>\\`\"`; empty for a design on one root clock. Non-empty means every verdict assumes the domains tick together, and a derived one on every step (the `clock-domains-merged` note).",
+          "description": "The clock domains `merge_clock_domains` lifted onto one clock, each `\"<net> (<edge>, <n> cells)\"`, a derived clock suffixed `\", derived: driven by \\`<cell>\\`\"`; empty for a design on one root clock. Non-empty means every verdict assumes the domains tick together, and a derived one on every step (the `clock-domains-merged` note). mununu#1148 — a domain whose root the model ticks every step without a driver it can read ends with \", rooted at black box `<cell>`\", \", rooted at a cut net (…)\" or \", undriven\"; a derived one with \", derived: driven by `<cell>`\".",
           "items": {
             "type": "string"
           },

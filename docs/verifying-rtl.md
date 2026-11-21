@@ -1046,6 +1046,22 @@ keeps that reading as an explicit choice: `diagnostics.merged_clock_domains` lis
 the `clock-domains-merged` soundness caveat says what a verdict is worth. A design clocked on a
 single edge of a single net, falling edge included, is one domain and lifts as before.
 
+What drives a clock net is classified by one walk (mununu#1148), and every kind but a top-level
+input (an `inout` counts) is an abstraction decision. A **`$`-cell** (a gating `$and`, a divider
+flop) is a *derived* clock, refused as above. A **free source** — a cut net (`$anyseq`: the output
+of a declared or empty black-box module such as a PLL or a clock gate with no body, or a
+`--cutpoint` on the clock net), the output of a **black box the netlist still holds under its own
+type** (a `(* mununu_missing_module *)` stub deleted after the hierarchy snapshot), or a net with
+**no driver** — is refused the same way, naming the net, the root and the remedy: ticking it on
+every step is right for an independent clock and neither an over- nor an under-approximation of a
+clock that is gated, divided or never runs. `--merge-clock-domains` on `sv verify-auto` accepts
+the lockstep model; the domain list then prints the root (`rooted at black box \`<cell>\``,
+`rooted at a cut net (…)`, `undriven`) and the report carries a `clock-rooted-at-black-box` or
+`clock-undriven` soundness caveat per such clock (`items` = the net, the cell or "cut net", the
+storage cells it clocks) beside `clock-domains-merged`. Before 2026-11-21 the cut shape was refused
+as "derived from logic (driven by `$anyseq`)" and a deleted stub's output lifted as a silent root
+clock. The cases still open are mununu#1180.
+
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 
 > Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L129) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
