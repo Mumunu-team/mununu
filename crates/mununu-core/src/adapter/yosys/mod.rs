@@ -3508,16 +3508,18 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
     // `-I` token, which slang takes verbatim, so there whitespace, quotes and `;` are refused as
     // before (#1133).
     for dir in &yopts.extra_include_dirs {
-        let abs = absolute_include_dir(dir)?;
-        let text = abs.display().to_string();
-        if text.is_empty() {
+        // The caller's own text first: an empty path would otherwise be joined onto the working
+        // directory and read as `--include-dir .`.
+        if dir.as_os_str().is_empty() {
             return Err(refuse_lift_input(
                 "the include directory",
-                &text,
+                "",
                 "a directory path",
                 "check the path given to `--include-dir` on the `sv` verbs",
             ));
         }
+        let abs = absolute_include_dir(dir)?;
+        let text = abs.display().to_string();
         if !cfg!(unix)
             && text
                 .chars()

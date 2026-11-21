@@ -527,7 +527,10 @@ mod tests {
         ab.include_dirs = vec!["/inc/a".into(), "/inc/b".into()];
         let mut ba = manifest("module m; endmodule");
         ba.include_dirs = vec!["/inc/b".into(), "/inc/a".into()];
-        assert_eq!(ab.include_files, ba.include_files, "the walked files cannot tell them apart");
+        assert_eq!(
+            ab.include_files, ba.include_files,
+            "the walked files cannot tell them apart"
+        );
         assert_ne!(
             LiftCacheKey::new(&ab).unwrap().index(),
             LiftCacheKey::new(&ba).unwrap().index()
