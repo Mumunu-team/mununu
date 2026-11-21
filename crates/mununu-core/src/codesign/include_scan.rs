@@ -38,13 +38,13 @@ pub(crate) fn unconfined_c_includes_in_tree(
     include_dirs: &[PathBuf],
     root: &Path,
 ) -> Vec<String> {
-    let Ok(root) = root.canonicalize() else {
+    let Ok(root) = crate::deployment::canonical_root(root) else {
         return vec![format!(
             "the server's file_root {} is unusable",
             root.display()
         )];
     };
-    let under_root = |p: &Path| p.canonicalize().is_ok_and(|real| real.starts_with(&root));
+    let under_root = |p: &Path| crate::deployment::resolve_under(&root, p).is_ok();
     let mut out = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut queue: VecDeque<PathBuf> = files.iter().cloned().collect();

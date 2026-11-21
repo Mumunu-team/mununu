@@ -153,6 +153,39 @@ pub fn current() -> Result<DeploymentConfig, String> {
     }
 }
 
+/// Why a path is not one the server may read for a caller ([`resolve_under`]).
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) enum Escape {
+    /// The path does not canonicalise (it does not exist, or a component cannot be read).
+    Unresolvable(std::io::Error),
+    /// The path canonicalises to a location outside the root.
+    Outside,
+}
+
+/// The canonical form of a `[server] file_root`, the form [`resolve_under`] compares against.
+// Read only by the server's request checks; see `codesign::include_scan` for the same posture.
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
+pub(crate) fn canonical_root(root: &Path) -> std::io::Result<PathBuf> {
+    root.canonicalize()
+}
+
+/// The one decision "this path lies under the server's `file_root`": `path` canonicalised (so
+/// neither `..` nor a symlink can leave) must start with `canonical_root`
+/// ([`canonical_root`]). Every path the server resolves for a caller under a root goes through
+/// it: the request's path fields and the paths inside a verify config (mununu#935), and the
+/// headers the C include scan follows (mununu#994). `tests/policy` enumerates the callers and
+/// fails on a path resolved beside it.
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
+pub(crate) fn resolve_under(canonical_root: &Path, path: &Path) -> Result<PathBuf, Escape> {
+    let real = path.canonicalize().map_err(Escape::Unresolvable)?;
+    if real.starts_with(canonical_root) {
+        Ok(real)
+    } else {
+        Err(Escape::Outside)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +231,24 @@ mod tests {
         let err =
             DeploymentConfig::parse("enabled_domain = []\n", Path::new("m.toml")).unwrap_err();
         assert!(err.contains("enabled_domain"), "{err}");
+    }
+
+    /// The one decision under a `file_root`: a path inside resolves to its canonical form, a
+    /// `..` that leaves is outside, a path that does not exist does not resolve.
+    #[test]
+    fn resolve_under_accepts_inside_and_names_why_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = canonical_root(dir.path()).expect("the root canonicalises");
+        std::fs::create_dir(root.join("in")).expect("mkdir");
+        std::fs::write(root.join("in").join("a.sv"), "").expect("write");
+        let inside = resolve_under(&root, &root.join("in").join("a.sv")).expect("inside");
+        assert!(inside.starts_with(&root) && inside.ends_with("a.sv"));
+        let up = root.join("in").join("..").join("..");
+        assert!(matches!(resolve_under(&root, &up), Err(Escape::Outside)));
+        assert!(matches!(
+            resolve_under(&root, &root.join("missing.sv")),
+            Err(Escape::Unresolvable(_))
+        ));
     }
 
     /// mununu#934 / #935 — the `[server]` table, and the bundle's own `deploy/mununu.toml` parses

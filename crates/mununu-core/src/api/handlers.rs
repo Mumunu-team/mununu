@@ -4334,7 +4334,8 @@ pub(crate) fn confine_under(
         message,
         details: None,
     };
-    let root = root.canonicalize().map_err(|e| {
+    use crate::deployment::{Escape, canonical_root, resolve_under};
+    let root = canonical_root(root).map_err(|e| {
         bad(format!(
             "`{field}`: the server's file_root {} is unusable ({e})",
             root.display()
@@ -4346,17 +4347,14 @@ pub(crate) fn confine_under(
     } else {
         root.join(p)
     };
-    let real = joined
-        .canonicalize()
-        .map_err(|e| bad(format!("`{field}` `{raw}`: {e}")))?;
-    if !real.starts_with(&root) {
-        return Err(bad(format!(
+    resolve_under(&root, &joined).map_err(|escape| match escape {
+        Escape::Unresolvable(e) => bad(format!("`{field}` `{raw}`: {e}")),
+        Escape::Outside => bad(format!(
             "`{field}` `{raw}` is outside the server's file_root ({}); paths a request names must \
              lie under it",
             root.display()
-        )));
-    }
-    Ok(real)
+        )),
+    })
 }
 
 // ============================================================================
