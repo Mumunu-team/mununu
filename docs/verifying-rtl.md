@@ -29,7 +29,7 @@ signal/value of interest (`"state_q == 3"`).
 
 ### `btor2 verify` — safety / reachability
 
-> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L917) — surface: (CLI+API+UI)
+> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1105) — surface: (CLI+API+UI)
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
 engine, the in-house native BMC + k-induction engine (in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
