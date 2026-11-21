@@ -123,6 +123,34 @@ impl CdcReport {
     }
 }
 
+/// mununu#1148 — one note per domain whose clock the lifted design holds no driver for: the lint
+/// classifies its crossings as from an independent clock, which is right for a PLL and wrong for
+/// a black-boxed clock gate or divider (then the two "domains" are one clock, gated). Exhaustive
+/// over `ClockRoot`, so a new root kind is a compile error here.
+pub(crate) fn clock_root_notes(domains: &[ClockDomain]) -> Vec<String> {
+    use crate::adapter::yosys::ClockRoot;
+    domains
+        .iter()
+        .filter_map(|d| {
+            let source = match &d.root {
+                ClockRoot::Input | ClockRoot::Derived(_) => return None,
+                ClockRoot::BlackBox(t) => format!("the output of black box `{t}`"),
+                ClockRoot::Cut => {
+                    "a cut net (the output of a declared or empty black box, or a cut point)"
+                        .to_string()
+                }
+                ClockRoot::Undriven => "nothing (the net has no driver)".to_string(),
+            };
+            Some(format!(
+                "clock `{}` is driven by {source}: crossings from or to it are classified as from \
+                 an independent clock, which holds for a PLL and not for a gated or divided copy \
+                 of another domain's clock (provide the cell's source to see which)",
+                d.net
+            ))
+        })
+        .collect()
+}
+
 /// Run the lint over a flattened netlist (`flat_json`) and, for the gray-step query, the BTOR2 the
 /// same lift produced (`btor2`, lifted with merged clock domains; `None` skips the query and
 /// leaves multi-bit buses `unknown`).
@@ -150,6 +178,7 @@ pub fn cdc_lint(flat_json: &str, btor2: Option<&str>) -> Result<CdcReport, Strin
             .notes
             .push("latches are not analysed; their outputs are treated as unclocked".to_string());
     }
+    report.notes.extend(clock_root_notes(&report.domains));
     if report.domains.iter().any(|d| !d.posedge) {
         report.notes.push(
             "a negedge domain exists: the lift refuses it, and the lint treats both edges of one \
@@ -1110,6 +1139,43 @@ mod tests {
             .iter()
             .map(|c| (c.kind.as_str(), c.outcome.as_str()))
             .collect()
+    }
+
+    /// mununu#1148 — a free-source clock is named in the lint's notes, one line per domain, and an
+    /// input or derived clock adds none.
+    #[test]
+    fn x1148_a_clock_with_no_driver_is_named_in_the_lint_notes() {
+        use crate::adapter::yosys::ClockRoot;
+        let d = |net: &str, root: ClockRoot| ClockDomain {
+            net: net.into(),
+            posedge: true,
+            cells: 1,
+            root,
+        };
+        let notes = clock_root_notes(&[
+            d("clk", ClockRoot::Input),
+            d("gated", ClockRoot::Derived("$and".into())),
+            d("pll", ClockRoot::Cut),
+            d("gclk", ClockRoot::BlackBox("prim_clock_gating".into())),
+            d("lost", ClockRoot::Undriven),
+        ]);
+        assert_eq!(notes.len(), 3, "{notes:#?}");
+        assert!(
+            notes[0].starts_with("clock `pll` is driven by a cut net"),
+            "{}",
+            notes[0]
+        );
+        assert!(
+            notes[1].contains("black box `prim_clock_gating`"),
+            "{}",
+            notes[1]
+        );
+        assert!(
+            notes[2].starts_with("clock `lost` is driven by nothing"),
+            "{}",
+            notes[2]
+        );
+        assert!(notes.iter().all(|n| n.contains("independent clock")));
     }
 
     #[test]

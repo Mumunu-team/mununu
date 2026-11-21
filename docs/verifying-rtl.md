@@ -1056,7 +1056,8 @@ type** (a `(* mununu_missing_module *)` stub deleted after the hierarchy snapsho
 every step is right for an independent clock and neither an over- nor an under-approximation of a
 clock that is gated, divided or never runs. `--merge-clock-domains` accepts
 the lockstep model on `sv verify-auto` alone — the verb that reports the roots; on the other `sv`
-verbs, which take the flag but drop the domains, it does not lift such a clock (a derived or
+verbs, which take the flag but drop the domains, it does not lift such a clock (`sv cdc-lint`, which
+reads the domains, lints it and names the root in its notes) (a derived or
 multi-clock design does lift there under it, with nothing in the report: mununu#1181). The domain
 list then prints the root (`rooted at black box \`<cell>\``,
 `rooted at a cut net (…)`, `undriven`) and the report carries a `clock-rooted-at-black-box` or

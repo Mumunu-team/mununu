@@ -137,8 +137,12 @@ pub fn parse_params(entries: &[String]) -> Result<Vec<(String, String)>, String>
 pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport, String> {
     let primary_name = lift.primary_name.as_str();
     let (source, yopts) = lift.staged()?;
+    // mununu#1148 — the lint reads the domains it lints and names every free-source root in its
+    // notes (`cdc_lint::clock_root_notes`), so it is a verb that reports the roots: a PLL behind
+    // a black box against the reference clock is the textbook crossing it exists to classify.
     let yopts = YosysOptions {
         merge_clock_domains: true,
+        report_clock_roots: true,
         ..yopts
     };
     let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)

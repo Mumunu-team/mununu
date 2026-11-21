@@ -277,10 +277,11 @@ pub struct YosysOptions {
     /// design is refused at lift time ([`clock_domains`]). verify-auto reports the merged domains
     /// as a soundness caveat.
     pub merge_clock_domains: bool,
-    /// mununu#1148 — set by the verb that reads [`SvLiftResult::clock_domains`] and reports
-    /// every free-source root (a black box, a cut net, no driver) to the reader: `sv verify-auto`
+    /// mununu#1148 — set by a verb that reads [`SvLiftResult::clock_domains`] and reports every
+    /// free-source root (a black box, a cut net, no driver) to the reader: `sv verify-auto`
     /// (`lift_sv`), whose report carries the `clock-rooted-at-black-box` / `clock-undriven`
-    /// notes. Under [`Self::merge_clock_domains`] such a clock lifts only when this is set; a
+    /// notes, and `sv cdc-lint` (`sv_cdc_lint`), whose notes name the root. The setters are
+    /// listed by the policy test `report_clock_roots_is_set_only_where_the_roots_are_reported`. Under [`Self::merge_clock_domains`] such a clock lifts only when this is set; a
     /// verb that drops the domains is refused instead, so no verb ships a lockstep verdict on a
     /// driverless clock with nothing in its report ([`refuse_merged_clock_domains`]). A derived
     /// clock and a multi-domain design are not gated by it (they lift under the opt-in on every
@@ -1022,9 +1023,9 @@ pub(crate) fn refuse_merged_clock_domains(
                 message: format!(
                     "adapter/yosys: the clock net `{}` has no driver in the lifted design; \
                      `--merge-clock-domains` lifts such a clock only on `sv verify-auto`, whose \
-                     report names the root in a note — this verb drops the clock domains, so \
-                     the lockstep model would ship with nothing said about it (a mununu \
-                     limitation). Clock domains: {}.",
+                     report names the root in a note (`sv cdc-lint` lints it too) — this verb \
+                     drops the clock domains, so the lockstep model would ship with nothing said \
+                     about it (a mununu limitation). Clock domains: {}.",
                     d.net,
                     describe_clock_domains(domains)
                 ),
