@@ -56,24 +56,36 @@ fn files_to_scan(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every `yosys ≥ N.NN` / `yosys >= N.NN` in `text`, with its line number.
+/// Every `yosys ≥ N.NN` / `yosys >= N.NN` / `yosys N.NN or later|newer` in `text`, any case
+/// of "yosys" (mununu#1144 — "Yosys 0.67 or later" used to pass unseen), with its line number.
 fn version_mentions(text: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     for (ln, line) in text.lines().enumerate() {
-        let mut rest = line;
+        let lower = line.to_ascii_lowercase();
+        let mut rest = lower.as_str();
         while let Some(at) = rest.find("yosys ") {
             let after = &rest[at + "yosys ".len()..];
-            let after = after
+            let compared = after
                 .strip_prefix("≥ ")
                 .or_else(|| after.strip_prefix("≥"))
                 .or_else(|| after.strip_prefix(">= "))
                 .or_else(|| after.strip_prefix(">="));
-            if let Some(after) = after {
-                let version: String = after
-                    .chars()
+            let number = |s: &str| -> String {
+                s.chars()
                     .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
+                    .collect()
+            };
+            if let Some(after) = compared {
+                let version = number(after);
                 if version.contains('.') {
+                    out.push((version, ln + 1));
+                }
+            } else {
+                let version = number(after);
+                let tail = after[version.len()..].trim_start();
+                if version.contains('.')
+                    && (tail.starts_with("or later") || tail.starts_with("or newer"))
+                {
                     out.push((version, ln + 1));
                 }
             }
@@ -121,15 +133,22 @@ fn every_message_and_page_names_the_same_minimum_yosys_version() {
     );
 }
 
-/// Negative control: the scanner sees both spellings and both numbers in a text that carries
-/// the audit's pair, so an empty result above would not be the scanner missing them.
+/// Negative control: the scanner sees every spelling — the two comparison forms, "or later"
+/// / "or newer", and a capitalised "Yosys" — and not a bare version, so an empty result above
+/// would not be the scanner missing them.
 #[test]
 fn the_scanner_finds_both_spellings_and_both_numbers() {
-    let text = "install yosys ≥ 0.40\nuse yosys >= 0.67 (built in)\nyosys 0.59 has neither\n";
+    let text = "install yosys ≥ 0.40\nuse yosys >= 0.67 (built in)\nyosys 0.59 has neither\n\
+                needs Yosys 0.67 or later\nor yosys 0.68 or newer\n";
     let found = version_mentions(text);
     assert_eq!(
         found,
-        vec![("0.40".to_string(), 1), ("0.67".to_string(), 2)],
+        vec![
+            ("0.40".to_string(), 1),
+            ("0.67".to_string(), 2),
+            ("0.67".to_string(), 4),
+            ("0.68".to_string(), 5),
+        ],
         "{found:?}"
     );
 }

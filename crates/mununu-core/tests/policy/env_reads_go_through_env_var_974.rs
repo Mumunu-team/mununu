@@ -61,27 +61,20 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The product part of a source file: everything before its first `#[cfg(test)]` line that
-/// opens a module.
-fn product_lines(text: &str) -> Vec<(usize, &str)> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = Vec::new();
-    for (i, l) in lines.iter().enumerate() {
-        let t = l.trim_start();
-        if t.starts_with("#[cfg(test)]")
-            && lines.get(i + 1).is_some_and(|n| {
-                let n = n.trim_start();
-                n.starts_with("mod ")
-                    || n.starts_with("pub mod ")
-                    || n.starts_with("pub(crate) mod ")
-            })
-        {
-            break;
-        }
-        out.push((i + 1, *l));
-    }
-    out
+/// The product part of a source file, line by line with its line number: every `#[cfg(test)]
+/// mod … { … }` block blanked (mununu#1144 — the gate used to stop at the first one, and
+/// `verify_auto.rs` has product code after its).
+fn product_lines(text: &str) -> Vec<(usize, String)> {
+    crate::source_scan::blank_test_modules_keeping_lines(text)
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l.to_string()))
+        .collect()
 }
+
+/// The read spellings the gate sees: the full path and the `use std::env;` form (mununu#1144).
+/// `env_var::read` contains neither.
+const READ_PATTERNS: [&str; 2] = ["env::var(", "env::var_os("];
 
 /// Every direct read in product code: `(file, line, argument)`.
 fn direct_reads() -> Vec<(String, usize, String)> {
@@ -96,7 +89,7 @@ fn direct_reads() -> Vec<(String, usize, String)> {
             .replace('\\', "/");
         for (n, line) in product_lines(&text) {
             let code = line.split("//").next().unwrap_or("");
-            for pat in ["std::env::var(", "std::env::var_os("] {
+            for pat in READ_PATTERNS {
                 let mut rest = code;
                 while let Some(at) = rest.find(pat) {
                     let after = &rest[at + pat.len()..];
@@ -131,20 +124,31 @@ fn product_code_reads_the_environment_through_env_var() {
     );
 }
 
-/// The gate's own controls: the scan sees a direct read, stops at a test module, skips a
-/// comment, and every allowlist entry still names a real read (a stale entry is a hole).
+/// The gate's own controls: the scan sees a direct read in both spellings, skips a test module
+/// wherever it sits and keeps the product code after it, skips a comment, and every allowlist
+/// entry still names a real read (a stale entry is a hole).
 #[test]
 fn the_env_read_gate_sees_what_it_must_and_its_allowlist_is_live() {
-    let sample = "fn a() { let x = std::env::var(\"GATE_CONTROL_VAR\"); }\n\
+    let sample = "use std::env;\nfn a() { let x = std::env::var(\"GATE_CONTROL_VAR\"); }\n\
                   // std::env::var(\"IN_A_COMMENT\")\n\
-                  #[cfg(test)]\nmod tests { fn b() { std::env::var(\"IN_A_TEST\"); } }\n";
-    let seen: Vec<&str> = product_lines(sample)
+                  #[cfg(test)]\nmod tests { fn b() { std::env::var(\"IN_A_TEST\"); } }\n\
+                  fn c() { let y = env::var(\"AFTER_THE_TEST_MODULE\"); }\n\
+                  fn d() { let z = crate::adapter::env_var::read(\"THROUGH_THE_SEAM\"); }\n";
+    let seen: Vec<(usize, String)> = product_lines(sample)
         .into_iter()
-        .map(|(_, l)| l.split("//").next().unwrap_or(""))
-        .filter(|l| l.contains("std::env::var("))
+        .map(|(n, l)| (n, l.split("//").next().unwrap_or("").to_string()))
+        .filter(|(_, l)| READ_PATTERNS.iter().any(|p| l.contains(p)))
         .collect();
-    assert_eq!(seen.len(), 1, "exactly the product read: {seen:?}");
-    assert!(seen[0].contains("GATE_CONTROL_VAR"));
+    assert_eq!(
+        seen.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        vec![2, 6],
+        "the product reads, with their line numbers kept across the blanked module: {seen:?}"
+    );
+    assert!(seen[0].1.contains("GATE_CONTROL_VAR"));
+    assert!(
+        seen[1].1.contains("AFTER_THE_TEST_MODULE"),
+        "the import form, after the module"
+    );
 
     let reads = direct_reads();
     for (suffix, arg, why) in ALLOWED {
