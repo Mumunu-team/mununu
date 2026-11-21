@@ -5385,13 +5385,11 @@ endmodule
             ..Default::default()
         };
         let dir = Path::new("/tmp/staging dir/mununu-yosys-9");
-        let plan = plan_lift(
-            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n",
-            &yopts,
-            dir,
-        )
-        .expect("a plan needs no tool");
+        let src =
+            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n";
+        let planned = plan_lift(src, &yopts, dir);
         if cfg!(unix) {
+            let plan = planned.expect("a plan needs no tool");
             assert!(
                 plan.script
                     .contains(" -I. -Iinc0 -Iinc1 -Iinc2 -Iinc3 -Iinc4 work.sv"),
@@ -5414,6 +5412,18 @@ endmodule
                 assert!(plan.include_links[i].1.is_absolute());
             }
         } else {
+            // No links on this platform: the directory with a space is the documented refusal
+            // naming the flag, and a plain one is written as its absolute path, no link.
+            let Err(err) = planned else {
+                panic!("a spaced include directory needs a link to be accepted")
+            };
+            assert!(err.message.contains("--include-dir"), "{}", err.message);
+            let plain = YosysOptions {
+                top: Some("m".into()),
+                extra_include_dirs: vec![PathBuf::from("rel/inc2")],
+                ..Default::default()
+            };
+            let plan = plan_lift(src, &plain, dir).expect("a plan needs no tool");
             assert!(plan.include_links.is_empty());
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -5442,10 +5452,10 @@ endmodule
             absolute_if_relative_path(Path::new("yosys")),
             PathBuf::from("yosys")
         );
-        assert_eq!(
-            absolute_if_relative_path(Path::new("/usr/bin/yosys")),
-            PathBuf::from("/usr/bin/yosys")
-        );
+        // An absolute path in the platform's own form (`/usr/bin/yosys` has no drive on
+        // Windows, where it is drive-relative and joined like any other relative path).
+        let absolute = cwd.join("bin").join("yosys");
+        assert_eq!(absolute_if_relative_path(&absolute), absolute);
         let _p = crate::adapter::env_var::override_for_test("MUNUNU_YOSYS_PATH", "tools/yosys");
         assert_eq!(
             locate_yosys().expect("the variable wins"),
