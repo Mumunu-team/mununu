@@ -13,7 +13,8 @@
 - **A relative `MUNUNU_YOSYS_PATH` or `MUNUNU_YOSYS_SLANG_PLUGIN` with a separator** (`./oss-cad-suite/bin/yosys`, `tools/slang.so`) is joined onto mununu's working directory before yosys moves into the staging directory; a bare name is still looked up on `$PATH` or by yosys.
 - **`sv emit-btor2-per-module`:** a relative `--output-dir build/`, and the default (the source's parent), resolve against mununu's working directory as before — made absolute before the script, since yosys now runs inside the staging directory. A directory with a space is accepted (quoted to `write_btor`); one with a `"` or a line break is refused, naming `--output-dir`.
 - **`MUNUNU_LIFT_STAGING_ROOT` and `TMPDIR` may be relative:** the staging root is made absolute.
-- **No verdict or JSON shape change.** `diagnostics.blackboxed_modules[].source_file` still carries the user's invocation path for the primary source (the rewrite matches the staged name yosys now reports).
+- **No verdict or JSON shape change.** `diagnostics.blackboxed_modules[].source_file` still carries the user's invocation path for the primary source (the rewrite matches the staged name yosys now reports). **One text changes:** a source location inside a header reached through an include directory now reads the link's name (`inc0/defs.svh`) where it read the caller's path — the primary's name is mapped back, a header's is not (an open row of the `lift-script-path` class).
+- **Relative include directories, every form.** `--include-dir inc`, `.`, `rel/inc2` and the `rtl` that `--design-dir rtl/` derives are joined onto mununu's working directory before the link is made (yosys runs inside the staging directory, where a relative link target would dangle). **The lift-cache key keeps the include directories' order** (format 4): `-I A -I B` and `-I B -I A` with a shadowed header are two keys.
 
 ## Per consumer
 

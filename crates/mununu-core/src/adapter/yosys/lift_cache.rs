@@ -152,6 +152,11 @@ pub(super) struct LiftManifest {
     /// Every file under an include directory a tool may read, and every absolutely-`include`d
     /// file, `(path, content)` with the content in [`key_bytes`] form, sorted.
     pub include_files: Vec<(String, String)>,
+    /// mununu#1138 — the caller's include directories in SEARCH ORDER, made absolute: the
+    /// script names only the links (`-Iinc0 -Iinc1`), and `include_files` is sorted, so without
+    /// this two swapped directories holding a shadowed header would share a key and the second
+    /// run would be served the first's model (the third cross-review of #1169).
+    pub include_dirs: Vec<String>,
 }
 
 /// The serialised manifest and its index.
@@ -510,7 +515,23 @@ mod tests {
             },
             staged: vec![("work.sv".into(), primary.into())],
             include_files: Vec::new(),
+            include_dirs: Vec::new(),
         }
+    }
+
+    /// mununu#1138 — the include directories' order is part of the key: `-I A -I B` and
+    /// `-I B -I A` resolve a shadowed header differently and must never share a model.
+    #[test]
+    fn x1138_swapping_two_include_directories_is_another_key() {
+        let mut ab = manifest("module m; endmodule");
+        ab.include_dirs = vec!["/inc/a".into(), "/inc/b".into()];
+        let mut ba = manifest("module m; endmodule");
+        ba.include_dirs = vec!["/inc/b".into(), "/inc/a".into()];
+        assert_eq!(ab.include_files, ba.include_files, "the walked files cannot tell them apart");
+        assert_ne!(
+            LiftCacheKey::new(&ab).unwrap().index(),
+            LiftCacheKey::new(&ba).unwrap().index()
+        );
     }
 
     fn lift() -> CachedLift {
