@@ -4841,7 +4841,9 @@ endmodule
         // mununu#1138 — an include directory with a space is staged as a link the script names,
         // so it is no longer hostile where links exist; where they do not, the #1133 refusal
         // stays.
-        let spaced = plan(|o| o.extra_include_dirs = vec![PathBuf::from("inc dir")]);
+        let spaced = plan(&|o: &mut YosysOptions| {
+            o.extra_include_dirs = vec![PathBuf::from("inc dir")]
+        });
         if cfg!(unix) {
             spaced.expect("an include directory with a space is staged as a link");
         } else {
@@ -5304,7 +5306,7 @@ endmodule
         assert!(
             script.contains(&format!(
                 "write_btor {}",
-                cwd.join("build/m.btor2").display()
+                cwd.join("build").join("m.btor2").display()
             )),
             "{script}"
         );
