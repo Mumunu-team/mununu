@@ -2709,13 +2709,23 @@ pub(crate) fn clock_root_notes(
                     "clock-rooted-at-black-box",
                     "a cut net (the output of a declared or empty black box, or a cut point)"
                         .to_string(),
-                    "$anyseq".to_string(),
+                    "cut net".to_string(),
                 ),
                 ClockRoot::Undriven => (
                     "clock-undriven",
                     "nothing: the net has no driver".to_string(),
                     String::new(),
                 ),
+            };
+            let remedy = match &d.root {
+                ClockRoot::BlackBox(_) => {
+                    "Provide the source of the cell that drives the clock, or model its gating \
+                     as a clock enable on the root clock."
+                }
+                ClockRoot::Cut => {
+                    "Provide the black box's source, or remove the cut point from the clock net."
+                }
+                _ => "Connect the clock in the RTL.",
             };
             Some(VerificationNote {
                 kind: kind.into(),
@@ -2725,15 +2735,15 @@ pub(crate) fn clock_root_notes(
                      ticks it on every step",
                     d.net, d.cells
                 ),
-                detail: "The clock's real source is not in the lifted design, so the scan cannot \
-                         tell an independent clock (a PLL — the lockstep model is right) from a \
-                         cell that gates or divides its input, or from a net nothing drives (the \
-                         flops never tick). In the last two cases the model is neither an over- \
-                         nor an under-approximation of the design, and no verdict on the flops \
-                         this clock drives transfers on its own. Provide the source of the cell \
-                         that drives the clock, or model the gating as a clock enable on the \
-                         root clock."
-                    .into(),
+                detail: format!(
+                    "The clock's real source is not in the lifted design, so the scan cannot \
+                     tell an independent clock (a PLL — the lockstep model is right) from a \
+                     cell that gates or divides its input, or from a net nothing drives (the \
+                     flops never tick). In the last two cases the model is neither an over- nor \
+                     an under-approximation of the design, and no verdict on the flops this \
+                     clock drives transfers on its own; the lift accepted it because \
+                     `--merge-clock-domains` was given. {remedy}"
+                ),
                 items: vec![d.net.clone(), cell, d.cells.to_string()],
                 property: None,
             })
@@ -6210,7 +6220,11 @@ pub(crate) fn prepare_model(
     report.diagnostics.trace_names = trace_names;
     // Roadmap B2 — a lone DERIVED domain (a gated or divided clock) that `--merge-clock-domains`
     // let through is merged onto the model's clock as surely as a second domain is.
-    if clock_domains.len() > 1 || clock_domains.iter().any(|d| d.derived_from().is_some()) {
+    if clock_domains.len() > 1
+        || clock_domains
+            .iter()
+            .any(|d| d.derived_from().is_some() || d.is_free_source())
+    {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))

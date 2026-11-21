@@ -1045,19 +1045,20 @@ the `clock-domains-merged` soundness caveat says what a verdict is worth. A desi
 single edge of a single net, falling edge included, is one domain and lifts as before.
 
 What drives a clock net is classified by one walk (mununu#1148), and every kind but a top-level
-input is an abstraction decision the report names. A **`$`-cell** (a gating `$and`, a divider flop)
-is a *derived* clock, refused as above. A **cut net** (`$anyseq`: `cutpoint -blackbox` on a declared
-or empty black box such as a PLL or a clock gate under `--empty-blackboxes`, or a `--cutpoint`) and
-the output of a **black box the netlist still holds under its own type** (a `(* mununu_missing_module *)`
-stub, deleted after the hierarchy snapshot) are *free sources*: the model ticks them on every
-step, which is right for an independent clock and neither an over- nor an under-approximation of
-a cell that gates or divides its input. The domain list prints them as `rooted at black box
-\`<cell>\`` or `rooted at a cut net (…)`, and `sv verify-auto` adds a `clock-rooted-at-black-box`
-note (a soundness caveat; `items` = the net, the cell, the storage cells it clocks). A net with
-**no driver** prints as `undriven` and gets a `clock-undriven` note: the flops on it never tick in
-the real design. Before 2026-11-20 a cut-net clock was refused as "derived from logic (driven by
-`$anyseq`)" and a deleted stub's output was a silent root clock. If the cell gates or divides,
-provide its source or model the gating as a clock enable on the root clock.
+input (an `inout` counts) is an abstraction decision. A **`$`-cell** (a gating `$and`, a divider
+flop) is a *derived* clock, refused as above. A **free source** — a cut net (`$anyseq`: the output
+of a declared or empty black-box module such as a PLL or a clock gate with no body, or a
+`--cutpoint` on the clock net), the output of a **black box the netlist still holds under its own
+type** (a `(* mununu_missing_module *)` stub deleted after the hierarchy snapshot), or a net with
+**no driver** — is refused the same way, naming the net, the root and the remedy: ticking it on
+every step is right for an independent clock and neither an over- nor an under-approximation of a
+clock that is gated, divided or never runs. `--merge-clock-domains` on `sv verify-auto` accepts
+the lockstep model; the domain list then prints the root (`rooted at black box \`<cell>\``,
+`rooted at a cut net (…)`, `undriven`) and the report carries a `clock-rooted-at-black-box` or
+`clock-undriven` soundness caveat per such clock (`items` = the net, the cell or "cut net", the
+storage cells it clocks) beside `clock-domains-merged`. Before 2026-11-21 the cut shape was refused
+as "derived from logic (driven by `$anyseq`)" and a deleted stub's output lifted as a silent root
+clock. The cases still open are mununu#1180.
 
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 

@@ -1025,6 +1025,47 @@ fn refuse_merged_clock_domains(
             location: None,
         });
     }
+    // mununu#1148 — a clock the lifted design holds no driver for (a black box's output, a cut
+    // net, no driver at all) is refused the same way: whether ticking it on every step is right
+    // (an independent source) or hides gating, division or a clock that never runs is not in
+    // the model. `--merge-clock-domains` accepts the lockstep reading, and `sv verify-auto`
+    // then names the root in a `clock-rooted-at-black-box` / `clock-undriven` note. Before this
+    // the cut shape was refused as "derived from logic" and the stub shape lifted silently.
+    if let Some(d) = domains.iter().find(|d| d.is_free_source()) {
+        let (what, remedy) = match &d.root {
+            ClockRoot::BlackBox(t) => (
+                format!("the output of black box `{t}`, whose body is not in the lifted design"),
+                "provide the source of the cell that drives the clock, or model its gating as a \
+                 clock enable on the root clock",
+            ),
+            ClockRoot::Cut => (
+                "a cut net (the output of a declared or empty black box, or a cut point: \
+                 `--cutpoint` on `sv verify-auto`)"
+                    .to_string(),
+                "provide the black box's source, or remove the cut point from the clock net",
+            ),
+            _ => (
+                "undriven: no cell or input drives it, so its flops never tick".to_string(),
+                "connect the clock in the RTL",
+            ),
+        };
+        return Err(AdapterError {
+            kind: AdapterErrorKind::UnsupportedConstruct,
+            message: format!(
+                "adapter/yosys: the clock net `{}` is {what}; the model has one implicit clock \
+                 that ticks on every step, which is right for an independent source and neither \
+                 an over- nor an under-approximation of a clock that is gated, divided or never \
+                 runs, so no verdict on the {} storage cell(s) it clocks would transfer on its \
+                 own. Clock domains: {}. {remedy}; `--merge-clock-domains` on `sv verify-auto` \
+                 accepts the lockstep model explicitly and names the root in a note, and the \
+                 other verbs have no such switch (a mununu limitation).",
+                d.net,
+                d.cells,
+                describe_clock_domains(domains)
+            ),
+            location: None,
+        });
+    }
     if domains.len() > 1 {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
@@ -1304,11 +1345,10 @@ pub struct ClockDomain {
     /// muxed (`$mux`) or divided (a flop's `Q`) clock, traced back through inverters and buffers.
     /// `None` when it is rooted in a top-level input or a black-box output (a PLL), or undriven.
     /// The model's one implicit clock ticks such a net on every step, ignoring the logic that
-    /// gates or divides it, so a derived domain is refused like a second domain (see
-    /// [`refuse_merged_clock_domains`]). mununu#1148 — one walk classifies every root
-    /// ([`ClockRoot`]); the kinds the model ticks every step without knowing what the real
-    /// source does (a black box, a cut net, no driver) are named in the description and in a
-    /// `sv verify-auto` note.
+    /// mununu#1148 — what drives the net, from one walk ([`ClockRoot`]). A derived clock and a
+    /// free-source root (a black box, a cut net, no driver) are both refused like a second
+    /// domain unless `--merge-clock-domains` ([`refuse_merged_clock_domains`]); the description
+    /// and, under the opt-in, a `sv verify-auto` note name the root.
     pub root: ClockRoot,
 }
 
@@ -1721,7 +1761,7 @@ struct ClockDrivers {
     /// directions for a cell of unknown type, so every port is a candidate output. A bit with
     /// a real driver, or a top-level input, is never read as one.
     candidate: HashMap<i64, String>,
-    /// The module's top-level input bits.
+    /// The module's top-level input (and `inout`) bits: a clock the design receives.
     inputs: std::collections::HashSet<i64>,
 }
 
@@ -1738,7 +1778,12 @@ fn clock_drivers(body: &serde_json::Value) -> ClockDrivers {
         .and_then(|p| p.as_object())
         .into_iter()
         .flat_map(|ports| ports.values())
-        .filter(|p| p.get("direction").and_then(|d| d.as_str()) == Some("input"))
+        .filter(|p| {
+            matches!(
+                p.get("direction").and_then(|d| d.as_str()),
+                Some("input") | Some("inout")
+            )
+        })
         .flat_map(|p| {
             p.get("bits")
                 .and_then(|b| b.as_array())
@@ -3966,6 +4011,61 @@ mod tests {
     /// both domains ticked together, and only clock-shaped input NAMES were refused, so
     /// `clk_src` / `clk_dst` passed silently. `merge_clock_domains` lifts it and reports the
     /// domains; a one-clock design is untouched. Needs yosys ⇒ mununu-sva image.
+    /// mununu#1148 — the two black-box shapes through the real lift: a declared (empty) clock
+    /// gate becomes a cut net, a `(* mununu_missing_module *)` stub stays a cell of its own type;
+    /// both are refused by default naming the root and lift under `--merge-clock-domains` with
+    /// the root classified. Pins the yosys shapes the fixtures were captured from.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_a_black_box_clock_is_refused_unless_merged_and_its_root_is_classified() {
+        const TOP: &str = "\
+module top(input clk, input en, input d, output reg q, output reg r);
+  wire gclk;
+  prim_clock_gating u_cg(.clk_i(clk), .en_i(en), .clk_o(gclk));
+  always @(posedge clk) r <= d;
+  always @(posedge gclk) q <= d;
+endmodule
+";
+        let declared = format!(
+            "module prim_clock_gating(input clk_i, input en_i, output clk_o);\nendmodule\n{TOP}"
+        );
+        let stub = format!(
+            "(* {MISSING_MODULE_ATTR} *)\nmodule prim_clock_gating(input clk_i, input en_i, \
+             output clk_o);\nendmodule\n{TOP}"
+        );
+        for (name, src, root) in [
+            ("declared", &declared, ClockRoot::Cut),
+            (
+                "stub",
+                &stub,
+                ClockRoot::BlackBox("prim_clock_gating".into()),
+            ),
+        ] {
+            let err = sv_to_btor2_with_blackboxes(src, &YosysOptions::default())
+                .err()
+                .unwrap_or_else(|| panic!("{name}: a black-box clock is refused by default"));
+            assert!(
+                err.message.contains("`gclk`") && err.message.contains("--merge-clock-domains"),
+                "{name}: {}",
+                err.message
+            );
+            let merged = sv_to_btor2_with_blackboxes(
+                src,
+                &YosysOptions {
+                    merge_clock_domains: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{name}: the opt-in lifts it: {}", e.message));
+            let gclk = merged
+                .clock_domains
+                .iter()
+                .find(|d| d.net == "gclk")
+                .unwrap_or_else(|| panic!("{name}: gclk is a domain: {:?}", merged.clock_domains));
+            assert_eq!(gclk.root, root, "{name}");
+        }
+    }
+
     #[test]
     #[ignore = "requires yosys (mununu-sva image)"]
     fn e2e_two_clock_design_is_refused_at_lift() {
@@ -4113,8 +4213,25 @@ endmodule
                 .filter(|d| d.net == "gclk")
                 .cloned()
                 .collect();
-            refuse_merged_clock_domains(&only_gated, &YosysOptions::default())
-                .expect("a free root alone is not a derived domain");
+            let err = refuse_merged_clock_domains(&only_gated, &YosysOptions::default())
+                .expect_err("a free root is refused like a derived clock unless merged");
+            assert!(
+                err.message.contains("`gclk`") && err.message.contains("--merge-clock-domains"),
+                "{}",
+                err.message
+            );
+            assert!(
+                err.message.contains("black box `prim_clock_gating`")
+                    || err.message.contains("a cut net"),
+                "{}",
+                err.message
+            );
+            let merged = YosysOptions {
+                merge_clock_domains: true,
+                ..Default::default()
+            };
+            refuse_merged_clock_domains(&only_gated, &merged)
+                .expect("the explicit opt-in accepts the lockstep model");
         }
     }
 
@@ -4125,8 +4242,8 @@ endmodule
     #[test]
     fn every_clock_root_kind_is_classified_and_described() {
         let json = r#"{"modules": {"top": {
-            "ports": {"clk": {"direction": "input", "bits": [2]}, "en": {"direction": "input", "bits": [3]}},
-            "netnames": {"clk": {"hide_name": 0, "bits": [2]}, "gated": {"hide_name": 0, "bits": [4]},
+            "ports": {"clk": {"direction": "input", "bits": [2]}, "en": {"direction": "input", "bits": [3]}, "io": {"direction": "inout", "bits": [11]}},
+            "netnames": {"clk": {"hide_name": 0, "bits": [2]}, "gated": {"hide_name": 0, "bits": [4]}, "io": {"hide_name": 0, "bits": [11]},
                          "div": {"hide_name": 0, "bits": [5]}, "cut": {"hide_name": 0, "bits": [6]},
                          "bb": {"hide_name": 0, "bits": [7]}, "bb_n": {"hide_name": 0, "bits": [8]},
                          "none": {"hide_name": 0, "bits": [9]}, "none_n": {"hide_name": 0, "bits": [10]}},
@@ -4142,7 +4259,8 @@ endmodule
                 "f2": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [5], "D": [3], "Q": [22]}},
                 "f3": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [6], "D": [3], "Q": [23]}},
                 "f4": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [8], "D": [3], "Q": [24]}},
-                "f5": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [10], "D": [3], "Q": [25]}}
+                "f5": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [10], "D": [3], "Q": [25]}},
+                "f6": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [11], "D": [3], "Q": [26]}}
             }
         }}}"#;
         let domains = clock_domains(json);
@@ -4155,6 +4273,11 @@ endmodule
                 .clone()
         };
         assert_eq!(root("clk"), ClockRoot::Input);
+        assert_eq!(
+            root("io"),
+            ClockRoot::Input,
+            "an inout port is a clock the design receives"
+        );
         assert_eq!(root("gated"), ClockRoot::Derived("$and".into()));
         assert_eq!(root("div"), ClockRoot::Derived("$dff".into()));
         assert_eq!(root("cut"), ClockRoot::Cut);
