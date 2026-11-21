@@ -3067,6 +3067,9 @@ pub struct ModelDiagnosticsView {
     /// empty for a design on one root clock. Non-empty means every verdict assumes the domains
     /// tick together, and a derived one on every step (the `clock-domains-merged` note).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// mununu#1148 — a domain whose root the model ticks every step without a driver it can
+    /// read ends with ", rooted at black box `<cell>`", ", rooted at a cut net (…)" or
+    /// ", undriven"; a derived one with ", derived: driven by `<cell>`".
     pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
     /// under a pin is a claim about THAT configuration only, so the scope ships with it.

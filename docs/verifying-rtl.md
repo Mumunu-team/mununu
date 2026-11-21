@@ -1044,14 +1044,20 @@ keeps that reading as an explicit choice: `diagnostics.merged_clock_domains` lis
 the `clock-domains-merged` soundness caveat says what a verdict is worth. A design clocked on a
 single edge of a single net, falling edge included, is one domain and lifts as before.
 
-A clock net driven by the **output of a black box** (a PLL, a clock generator, a black-boxed or
-auto-stubbed clock gate — the cell's body is not in the lifted design) is taken as a root clock and
-ticks on every step. That is right for an independent source and neither an over- nor an
-under-approximation of a cell that gates or divides its input, and the scan cannot tell the two
-apart, so `sv verify-auto` adds a `clock-rooted-at-black-box` note per such net (the cell type, the
-net, the number of storage cells it clocks; mununu#1148) and the domain list prints it as
-`rooted at black box \`<cell>\``. If the cell gates or divides, provide its source or model the
-gating as a clock enable on the root clock.
+What drives a clock net is classified by one walk (mununu#1148), and every kind but a top-level
+input is an abstraction decision the report names. A **`$`-cell** (a gating `$and`, a divider flop)
+is a *derived* clock, refused as above. A **cut net** (`$anyseq`: `cutpoint -blackbox` on a declared
+or empty black box such as a PLL or a clock gate under `--empty-blackboxes`, or a `--cutpoint`) and
+the output of a **black box the netlist still holds under its own type** (a `(* mununu_missing_module *)`
+stub, deleted after the hierarchy snapshot) are *free sources*: the model ticks them on every
+step, which is right for an independent clock and neither an over- nor an under-approximation of
+a cell that gates or divides its input. The domain list prints them as `rooted at black box
+\`<cell>\`` or `rooted at a cut net (…)`, and `sv verify-auto` adds a `clock-rooted-at-black-box`
+note (a soundness caveat; `items` = the net, the cell, the storage cells it clocks). A net with
+**no driver** prints as `undriven` and gets a `clock-undriven` note: the flops on it never tick in
+the real design. Before 2026-11-20 a cut-net clock was refused as "derived from logic (driven by
+`$anyseq`)" and a deleted stub's output was a silent root clock. If the cell gates or divides,
+provide its source or model the gating as a clock enable on the root clock.
 
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 

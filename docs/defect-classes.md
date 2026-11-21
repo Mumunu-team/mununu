@@ -26,17 +26,21 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 ### `clock-net-driver`
 
-**What varies:** what drives a net a flop or memory port is clocked by, after the walk through inverters and buffers (`ClockDrivers` in `adapter/yosys/mod.rs`). The BTOR2 model has one implicit clock, so every domain that is not the root is an abstraction decision the report must name.
+**What varies:** what drives a net a flop or memory port is clocked by, after the walk through inverters and buffers — read off the netlist the lift's script writes after `delete =A:mununu_missing_module; cutpoint -blackbox; flatten; opt_clean` (`ClockDrivers::root_of` → `ClockRoot` in `adapter/yosys/mod.rs`). The BTOR2 model has one implicit clock, so every root but a top-level input is an abstraction decision the report must name. The two black-box shapes were measured in `mununu-sva` on 2026-11-20 (the fixtures of the enumerating tests are those captures).
 
 | Case | Behaviour | Landed |
 |---|---|---|
 | a top-level input | the root clock | — |
-| a `$`-cell (a divider flop, a gating `$and`) | a derived domain, refused like a second domain unless `--merge-clock-domains` | mununu#758 |
-| a black-box instance's output (a PLL, a black-boxed or stubbed clock gate) | a root clock named as rooted at the cell; a `clock-rooted-at-black-box` note on `sv verify-auto` | mununu#1148 |
+| a `$`-cell (a gating `$and`, a divider flop) | a derived domain, refused like a second domain unless `--merge-clock-domains` | mununu#758 |
+| `$anyseq` from `cutpoint -blackbox` (a declared or empty black box: a PLL, a clock gate under `--empty-blackboxes`) or from `--cutpoint` on the net | a cut net: a free root, named; the `clock-rooted-at-black-box` note. Was refused as "derived from logic (driven by `$anyseq`)" | mununu#1148 |
+| a non-`$` cell with no `port_directions` (a `(* mununu_missing_module *)` stub deleted after the snapshot) | a black box, named with its type; the same note. Was a silent root — the case of mununu#1148 | mununu#1148 |
+| a non-`$` cell with `port_directions` (a hand-written fixture; no lift path found that produces it) | a black box, as above | mununu#1148 |
 | the other edge of a net already used as a clock | its own domain | mununu#758 |
-| an undriven net | open: counted as a root with no note | — |
+| an undriven net | named `undriven`; the `clock-undriven` note. Was a silent root | mununu#1148 |
+| an `inout` port of a black box | open: a silent root | — |
+| a bit with two drivers | open: the last cell inserted wins | — |
 
-**Enumerating test:** none in one table; `clock_domains_marks_a_gated_or_divided_clock_as_derived` and `x1148_a_clock_rooted_at_a_black_box_output_is_named_in_the_description` pin the second and third cases.
+**Enumerating test:** `every_clock_root_kind_is_classified_and_described` (exhaustive match over `ClockRoot`, one net per kind) and `the_two_black_box_shapes_are_free_roots_not_derived_domains` (the captured shapes); the note's seam: `x1148_a_free_source_clock_is_a_soundness_caveat_with_its_cell`.
 
 ### `initial-cube-doubt`
 

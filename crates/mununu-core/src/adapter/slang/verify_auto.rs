@@ -2685,6 +2685,62 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
     slot.items = engines_ran.iter().map(|e| format!("ran:{e}")).collect();
 }
 
+/// mununu#1148 — one note per clock domain whose root the model ticks every step without a
+/// driver it can read. SOUNDNESS: right for an independent source (a PLL behind a black box or
+/// a cut); for a black-boxed or stubbed clock gate or divider, or a net nothing drives, the
+/// lockstep model is neither an over- nor an under-approximation of the real design, so no
+/// verdict on the flops it clocks transfers on its own — a soundness caveat, like
+/// `blackbox-cut`. Pure over the domains: the seam `sv verify-auto` consumes.
+pub(crate) fn clock_root_notes(
+    domains: &[crate::adapter::yosys::ClockDomain],
+) -> Vec<VerificationNote> {
+    use crate::adapter::yosys::ClockRoot;
+    domains
+        .iter()
+        .filter_map(|d| {
+            let (kind, source, cell) = match &d.root {
+                ClockRoot::Input | ClockRoot::Derived(_) => return None,
+                ClockRoot::BlackBox(t) => (
+                    "clock-rooted-at-black-box",
+                    format!("the output of black box `{t}`"),
+                    t.clone(),
+                ),
+                ClockRoot::Cut => (
+                    "clock-rooted-at-black-box",
+                    "a cut net (the output of a declared or empty black box, or a cut point)"
+                        .to_string(),
+                    "$anyseq".to_string(),
+                ),
+                ClockRoot::Undriven => (
+                    "clock-undriven",
+                    "nothing: the net has no driver".to_string(),
+                    String::new(),
+                ),
+            };
+            Some(VerificationNote {
+                kind: kind.into(),
+                level: NoteLevel::SoundnessCaveat,
+                summary: format!(
+                    "clock `{}` is driven by {source} and clocks {} storage cell(s); the model \
+                     ticks it on every step",
+                    d.net, d.cells
+                ),
+                detail: "The clock's real source is not in the lifted design, so the scan cannot \
+                         tell an independent clock (a PLL — the lockstep model is right) from a \
+                         cell that gates or divides its input, or from a net nothing drives (the \
+                         flops never tick). In the last two cases the model is neither an over- \
+                         nor an under-approximation of the design, and no verdict on the flops \
+                         this clock drives transfers on its own. Provide the source of the cell \
+                         that drives the clock, or model the gating as a clock enable on the \
+                         root clock."
+                    .into(),
+                items: vec![d.net.clone(), cell, d.cells.to_string()],
+                property: None,
+            })
+        })
+        .collect()
+}
+
 fn build_notes(
     report: &AutoVerifyReport,
     must_edge_posture: &str,
@@ -6154,37 +6210,16 @@ pub(crate) fn prepare_model(
     report.diagnostics.trace_names = trace_names;
     // Roadmap B2 — a lone DERIVED domain (a gated or divided clock) that `--merge-clock-domains`
     // let through is merged onto the model's clock as surely as a second domain is.
-    if clock_domains.len() > 1 || clock_domains.iter().any(|d| d.derived_from.is_some()) {
+    if clock_domains.len() > 1 || clock_domains.iter().any(|d| d.derived_from().is_some()) {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
             .collect();
     }
-    // mununu#1148 — a clock rooted at a black-box output ticks in lockstep with the model's
-    // step. SOUNDNESS: right for an independent source (a PLL); for a black-boxed or auto-stubbed
-    // clock gate or divider it is NEITHER an over- nor an under-approximation of the gated
-    // design, so the report names the cell, the net and the flops it clocks.
-    for d in clock_domains.iter().filter(|d| d.black_box_root.is_some()) {
-        let cell = d.black_box_root.clone().unwrap_or_default();
-        report.notes.push(VerificationNote {
-            kind: "clock-rooted-at-black-box".into(),
-            level: NoteLevel::ScopeCaveat,
-            summary: format!(
-                "clock `{}` is rooted at the output of black box `{cell}` and clocks {} storage \
-                 cell(s); the model ticks it on every step",
-                d.net, d.cells
-            ),
-            detail: "The cell's body is not in the lifted design, so the scan cannot tell an \
-                     independent clock source (a PLL — the lockstep model is right) from a cell \
-                     that gates or divides its input (the lockstep model is neither an over- nor \
-                     an under-approximation of the gated design, and no verdict on the flops it \
-                     clocks transfers on its own). If the cell gates or divides, provide its \
-                     source or model the gating as a clock enable on the root clock."
-                .into(),
-            items: vec![d.net.clone(), cell.clone(), d.cells.to_string()],
-            property: None,
-        });
-    }
+    // mununu#1148 — a clock the model ticks every step without a driver it can read (a black
+    // box, a cut net, no driver) is a note the reader sees; the rebuild below keeps it (a kind
+    // it does not regenerate).
+    report.notes.extend(clock_root_notes(&clock_domains));
     report.diagnostics.blackboxed_modules = blackboxed_modules;
     report.diagnostics.auto_provided_stubs = auto_provided_stubs;
     // Which RTL front end produced this lift — provenance on the report.
@@ -24896,6 +24931,83 @@ mod source_map_tests {
             why("p_other", None, None),
             None,
             "no selection runs every row"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clock_root_note_tests {
+    //! mununu#1148 — the clock-root note at its seam.
+    use super::*;
+    use crate::adapter::yosys::{ClockDomain, ClockRoot};
+
+    fn domain(net: &str, root: ClockRoot) -> ClockDomain {
+        ClockDomain {
+            net: net.into(),
+            posedge: true,
+            cells: 3,
+            root,
+        }
+    }
+
+    /// One note per free-source root, none for an input or a derived clock; the kind, the
+    /// level and the items are what a consumer gates on.
+    #[test]
+    fn x1148_a_free_source_clock_is_a_soundness_caveat_with_its_cell() {
+        let notes = clock_root_notes(&[
+            domain("clk", ClockRoot::Input),
+            domain("gated", ClockRoot::Derived("$and".into())),
+            domain("gclk", ClockRoot::BlackBox("prim_clock_gating".into())),
+            domain("pll", ClockRoot::Cut),
+            domain("floating", ClockRoot::Undriven),
+        ]);
+        let kinds: Vec<&str> = notes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "clock-rooted-at-black-box",
+                "clock-rooted-at-black-box",
+                "clock-undriven"
+            ]
+        );
+        assert!(notes.iter().all(|n| n.level == NoteLevel::SoundnessCaveat));
+        assert_eq!(
+            notes[0].items,
+            vec!["gclk".to_string(), "prim_clock_gating".into(), "3".into()]
+        );
+        assert!(
+            notes[0].summary.contains("black box `prim_clock_gating`"),
+            "{}",
+            notes[0].summary
+        );
+        assert!(
+            notes[1].summary.contains("a cut net"),
+            "{}",
+            notes[1].summary
+        );
+        assert!(
+            notes[2].summary.contains("no driver"),
+            "{}",
+            notes[2].summary
+        );
+    }
+
+    /// The report's notes rebuild keeps the note (a kind it does not regenerate), so a note
+    /// pushed before `build_notes` survives into the shipped report.
+    #[test]
+    fn x1148_the_clock_root_note_survives_the_notes_rebuild() {
+        let mut report = AutoVerifyReport::default();
+        report.notes.extend(clock_root_notes(&[domain(
+            "gclk",
+            ClockRoot::BlackBox("pll".into()),
+        )]));
+        let rebuilt = build_notes(&report, "", &[], &[], &[], &[], &NotePosture::Exact);
+        assert!(
+            rebuilt
+                .iter()
+                .any(|n| n.kind == "clock-rooted-at-black-box"),
+            "{:?}",
+            rebuilt.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
         );
     }
 }
