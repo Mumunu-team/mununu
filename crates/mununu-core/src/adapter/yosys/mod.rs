@@ -1014,22 +1014,22 @@ pub(crate) fn refuse_merged_clock_domains(
         // caller reports the root ([`YosysOptions::report_clock_roots`]: `sv verify-auto`). The
         // flag is on every `sv` verb and API route; the others drop the clock domains, and a
         // lockstep verdict on such a clock with nothing in the report would be silent.
-        if !yopts.report_clock_roots {
-            if let Some(d) = domains.iter().find(|d| d.is_free_source()) {
-                return Err(AdapterError {
-                    kind: AdapterErrorKind::UnsupportedConstruct,
-                    message: format!(
-                        "adapter/yosys: the clock net `{}` has no driver in the lifted design; \
-                         `--merge-clock-domains` lifts such a clock only on `sv verify-auto`, \
-                         whose report names the root in a note — this verb drops the clock \
-                         domains, so the lockstep model would ship with nothing said about it \
-                         (a mununu limitation). Clock domains: {}.",
-                        d.net,
-                        describe_clock_domains(domains)
-                    ),
-                    location: None,
-                });
-            }
+        if !yopts.report_clock_roots
+            && let Some(d) = domains.iter().find(|d| d.is_free_source())
+        {
+            return Err(AdapterError {
+                kind: AdapterErrorKind::UnsupportedConstruct,
+                message: format!(
+                    "adapter/yosys: the clock net `{}` has no driver in the lifted design; \
+                     `--merge-clock-domains` lifts such a clock only on `sv verify-auto`, whose \
+                     report names the root in a note — this verb drops the clock domains, so \
+                     the lockstep model would ship with nothing said about it (a mununu \
+                     limitation). Clock domains: {}.",
+                    d.net,
+                    describe_clock_domains(domains)
+                ),
+                location: None,
+            });
         }
         return Ok(());
     }
@@ -4085,7 +4085,9 @@ endmodule
                 },
             )
             .err()
-            .unwrap_or_else(|| panic!("{name}: the opt-in alone (a verb that drops the roots) is refused"));
+            .unwrap_or_else(|| {
+                panic!("{name}: the opt-in alone (a verb that drops the roots) is refused")
+            });
             assert!(
                 opt_in_only.message.contains("only on `sv verify-auto`"),
                 "{name}: {}",
@@ -4099,7 +4101,12 @@ endmodule
                     ..Default::default()
                 },
             )
-            .unwrap_or_else(|e| panic!("{name}: the opt-in where the root is reported lifts it: {}", e.message));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{name}: the opt-in where the root is reported lifts it: {}",
+                    e.message
+                )
+            });
             let gclk = merged
                 .clock_domains
                 .iter()
