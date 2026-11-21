@@ -500,6 +500,28 @@ fn run_native(
 /// geometrically, so the bound costs nothing on a design whose counterexample is shallow; the
 /// deepest one it decided on HWMCC'20 is `mul9` at 126 (rIC3's dynamic step found 238).
 const SAT_BMC_MAX_DEPTH: u32 = 1_000;
+/// mununu#1142 — the one AIG model of a run, shared by the owned SAT BMC and the owned IC3:
+/// whichever member gets there first builds it under its own deadline and cancel flag (the two
+/// members share both), the other waits for it; a stopped build is the abstention of both.
+pub(crate) type SharedAig = std::sync::OnceLock<
+    Result<crate::adapter::btor2::aig::AigModel, crate::adapter::btor2::aig::BuildStop>,
+>;
+
+/// The shared model, built on first use under the member's limits.
+fn shared_aig<'a>(
+    aig: &'a SharedAig,
+    file: &Btor2File,
+    deadline: std::time::Instant,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> &'a Result<crate::adapter::btor2::aig::AigModel, crate::adapter::btor2::aig::BuildStop> {
+    use crate::adapter::btor2::aig::{AigModel, BuildLimits};
+    aig.get_or_init(|| {
+        AigModel::build_with(
+            file,
+            &BuildLimits::member(Some(deadline), Some(std::sync::Arc::clone(cancel))),
+        )
+    })
+}
 
 /// N5.4 — the owned **SAT BMC** member: bit-level BMC over the AIG model on in-process CaDiCaL
 /// ([`sat_bmc`](crate::adapter::btor2::sat_bmc)) with the dynamic step, the owned counterpart of
@@ -512,8 +534,8 @@ fn run_sat_bmc(
     deadline: std::time::Instant,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     carried: Option<&Carried>,
+    aig: &SharedAig,
 ) -> Result<Option<bool>, MemberStop> {
-    use crate::adapter::btor2::aig::AigModel;
     use crate::adapter::btor2::sat_bmc::{self, DynamicStep, SatBmcOptions, SatBmcOutcome};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
     let opts = SatBmcOptions {
@@ -523,36 +545,45 @@ fn run_sat_bmc(
         dynamic_step: Some(DynamicStep::default()),
         ..Default::default()
     };
-    // N5.4 — with a witness asked for, the model is kept so the counterexample's BTOR2 witness
-    // (the format the tier replays) can be built from it and replayed; the search is the same.
+    // mununu#1142 — one model per run, shared with the owned IC3. N5.4 — with a witness asked
+    // for, the counterexample's BTOR2 witness (the format the tier replays) is built from the
+    // model and replayed; the search is the same.
     let run = || -> Result<SatBmcOutcome, String> {
-        match carried {
-            None => sat_bmc::sat_bmc(file, &opts),
-            Some(carried) => {
-                let model = AigModel::build(file)?;
-                let outcome = sat_bmc::sat_bmc_model(&model, &opts)?;
-                if let Some(witness) = sat_bmc::btor2_witness(&model, &outcome) {
-                    // mununu#1057 — the member says whether it refuted every shorter depth.
-                    let shortest = match &outcome {
-                        SatBmcOutcome::Violated {
-                            depth,
-                            refuted_below,
-                            ..
-                        } => Some(refuted_below == depth),
-                        _ => None,
-                    };
-                    carried.carry(
-                        "sat-bmc",
-                        replayed_subprocess_witness(file, &witness),
-                        shortest,
-                    );
-                }
-                Ok(outcome)
-            }
+        let built = shared_aig(aig, file, deadline, &cancel);
+        let outcome = sat_bmc::sat_bmc_built(built, &opts)?;
+        if let (Some(carried), Ok(model)) = (carried, built)
+            && let Some(witness) = sat_bmc::btor2_witness(model, &outcome)
+        {
+            // mununu#1057 — the member says whether it refuted every shorter depth.
+            let shortest = match &outcome {
+                SatBmcOutcome::Violated {
+                    depth,
+                    refuted_below,
+                    ..
+                } => Some(refuted_below == depth),
+                _ => None,
+            };
+            carried.carry(
+                "sat-bmc",
+                replayed_subprocess_witness(file, &witness),
+                shortest,
+            );
         }
+        Ok(outcome)
     };
     timed("sat-bmc", || match run() {
         Ok(SatBmcOutcome::Violated { .. }) => Ok(Some(true)),
+        // mununu#1142 — a build that stopped (the cap, the wall, a peer's verdict) is a
+        // `Stopped` at depth 0 carrying the build's reason: a cancelled one keeps the reason
+        // (the model was never built — "every depth below 0 refuted" says nothing).
+        Ok(SatBmcOutcome::Stopped { depth: 0, reason }) if reason.starts_with("aig:") => {
+            let why = format!("SAT BMC stopped before its first depth ({reason})");
+            Err(if cancelled() {
+                MemberStop::Cancelled(why)
+            } else {
+                MemberStop::Abstained(why)
+            })
+        }
         Ok(SatBmcOutcome::Stopped { depth, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("SAT BMC stopped; every depth below {depth} refuted"),
         )),
@@ -578,6 +609,7 @@ fn run_ic3(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     store: &Carried,
     witness: bool,
+    aig: &SharedAig,
 ) -> Result<Option<bool>, MemberStop> {
     use crate::adapter::btor2::ic3::{self, Ic3Options, Ic3Outcome, Replay};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -586,38 +618,53 @@ fn run_ic3(
         cancel: Some(std::sync::Arc::clone(&cancel)),
         max_frames: None,
     };
-    timed("ic3", || match ic3::ic3(file, &opts) {
-        Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
-        Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
-            // N5.4 — the engine replayed the trace already; with a witness asked for it is
-            // carried out as it is. A design the simulator cannot carry ships unreplayed and the
-            // report says so whether or not a witness was asked for: before mununu#1143 the
-            // reason went to the log alone and the verdict read like a replayed one.
-            // SOUNDNESS: the verdict is the engine's concretised counterexample, unconfirmed by
-            // the simulator; it is listed in `trace_replay_failed` (`sole_decider` when it is
-            // the whole verdict), which `btor2 verify` prints on CLI and API — the other verbs
-            // drop the list on their way to the report (mununu#1175).
-            match replay {
-                Replay::Confirmed(trace) if witness => store.carry("ic3", Ok(trace), None),
-                Replay::Confirmed(_) => {}
-                Replay::Unavailable(why) => {
-                    tracing::info!(
-                        depth,
-                        why,
-                        "ic3: the counterexample ships without a simulator replay"
-                    );
-                    store.carry("ic3", Err(format!("not replayed: {why}")), None);
+    // mununu#1142 — one model per run, shared with the owned SAT BMC; built inside the timed
+    // span, as the SAT member's is, so the two attribute the build alike.
+    timed("ic3", || {
+        let built = shared_aig(aig, file, deadline, &cancel);
+        match ic3::ic3_built(file, built, &opts) {
+            Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
+            Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
+                // N5.4 — the engine replayed the trace already; with a witness asked for it is
+                // carried out as it is. A design the simulator cannot carry ships unreplayed and
+                // the report says so whether or not a witness was asked for: before mununu#1143
+                // the reason went to the log alone and the verdict read like a replayed one.
+                // SOUNDNESS: the verdict is the engine's concretised counterexample, unconfirmed
+                // by the simulator; it is listed in `trace_replay_failed` (`sole_decider` when it
+                // is the whole verdict), which `btor2 verify` prints on CLI and API — the other
+                // verbs drop the list on their way to the report (mununu#1175).
+                match replay {
+                    Replay::Confirmed(trace) if witness => store.carry("ic3", Ok(trace), None),
+                    Replay::Confirmed(_) => {}
+                    Replay::Unavailable(why) => {
+                        tracing::info!(
+                            depth,
+                            why,
+                            "ic3: the counterexample ships without a simulator replay"
+                        );
+                        store.carry("ic3", Err(format!("not replayed: {why}")), None);
+                    }
                 }
+                Ok(Some(true))
             }
-            Ok(Some(true))
+            // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
+            // reason; a cancelled one keeps the reason (the model was never built).
+            Ok(Ic3Outcome::Stopped { frames: 0, reason }) if reason.starts_with("aig:") => {
+                let why = format!("IC3 stopped at frame 0 ({reason})");
+                Err(if cancelled() {
+                    MemberStop::Cancelled(why)
+                } else {
+                    MemberStop::Abstained(why)
+                })
+            }
+            Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
+                format!("IC3 stopped at frame {frames}"),
+            )),
+            Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
+                "IC3 stopped at frame {frames} ({reason})"
+            ))),
+            Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
         }
-        Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
-            format!("IC3 stopped at frame {frames}"),
-        )),
-        Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
-            "IC3 stopped at frame {frames} ({reason})"
-        ))),
-        Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
     })
 }
 
@@ -1234,6 +1281,7 @@ type OwnedRunner = fn(
     std::time::Instant,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     Option<&Carried>,
+    &SharedAig,
 ) -> Result<Option<bool>, MemberStop>;
 
 /// The native member's runner ([`run_native`]): the design, the shared stop flag, the per-check
@@ -1246,6 +1294,7 @@ type Ic3Runner = fn(
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     &Carried,
     bool,
+    &SharedAig,
 ) -> Result<Option<bool>, MemberStop>;
 
 type NativeRunner = fn(
@@ -1439,6 +1488,9 @@ fn decide_with_members_using(
     // store whether or not a witness was asked for.
     let ic3_store: &Carried = &carried_store;
     let witness = members.witness;
+    // mununu#1142 — one AIG model for the two owned bit-level members.
+    let shared_aig = SharedAig::new();
+    let shared_aig = &shared_aig;
     // mununu#996 — the exact member runs on a DETACHED thread and reports over a channel, so the
     // join can leave it behind. It has no cancellation point inside one OxiDD apply (#816 polls
     // the budget only between stages), and when it ran on the calling thread it held the
@@ -1614,7 +1666,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "sat-bmc",
-                    (runners.sat_bmc)(file, deadline, cancel, carried),
+                    (runners.sat_bmc)(file, deadline, cancel, carried, shared_aig),
                 );
                 if v == Some(true) {
                     decided.store(true, Relaxed);
@@ -1636,7 +1688,7 @@ fn decide_with_members_using(
                     undecided,
                     clock_stop,
                     "ic3",
-                    (runners.ic3)(file, deadline, cancel, ic3_store, witness),
+                    (runners.ic3)(file, deadline, cancel, ic3_store, witness, shared_aig),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -1967,6 +2019,8 @@ fn decide_owned_only_using(
     }
     // N5.4 — where the carrying members leave their trace; read at return.
     let carried_store: Arc<Carried> = Arc::default();
+    // mununu#1142 — one AIG model for the two owned bit-level members.
+    let shared_aig: Arc<SharedAig> = Arc::default();
     // mununu#803 — a member's refusal (an `Err`, not an abstention) is kept here as the scoped
     // driver keeps it; the detached threads share the list through an `Arc`.
     let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
@@ -2149,9 +2203,16 @@ fn decide_owned_only_using(
         );
         let budget = budget.clone();
         let carried = witness.then(|| Arc::clone(&carried_store));
+        let aig = Arc::clone(&shared_aig);
         spawn_owned("sat-bmc", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = (runners.sat_bmc)(&file, deadline, Arc::clone(&decided), carried.as_deref());
+            let r = (runners.sat_bmc)(
+                &file,
+                deadline,
+                Arc::clone(&decided),
+                carried.as_deref(),
+                &aig,
+            );
             let v = settle_native(
                 &refused,
                 &abstained,
@@ -2180,9 +2241,10 @@ fn decide_owned_only_using(
         );
         let budget = budget.clone();
         let store = Arc::clone(&carried_store);
+        let aig = Arc::clone(&shared_aig);
         spawn_owned("ic3", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), &store, witness);
+            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), &store, witness, &aig);
             let v = settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "ic3", r);
             if v.is_some() {
                 decided.store(true, Relaxed);
@@ -3430,7 +3492,10 @@ mod tests {
         for witness in [false, true] {
             let store = Carried::default();
             let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            assert_eq!(run_ic3(&file, later, go, &store, witness), Ok(Some(true)));
+            assert_eq!(
+                run_ic3(&file, later, go, &store, witness, &SharedAig::new()),
+                Ok(Some(true))
+            );
             let (traces, failed) = store.take();
             assert!(
                 traces.is_empty(),
@@ -3444,6 +3509,161 @@ mod tests {
                 failed[0].1
             );
         }
+    }
+
+    /// mununu#1142 — the two owned bit-level members share one model: the first to arrive
+    /// builds it, the other reads it, and a build that stopped is the named abstention of BOTH
+    /// (the cap's text names the variable that raises it), never a refusal or a silent `None`.
+    #[test]
+    fn x1142_the_sat_members_share_one_aig_model_and_its_stop() {
+        use crate::adapter::btor2::aig::BuildStop;
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 sort bitvec 1\n9 constd 1 5\n\
+                               10 eq 8 3 9\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let go = || std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shared = SharedAig::new();
+        assert_eq!(
+            run_sat_bmc(&file, later(), go(), None, &shared),
+            Ok(Some(true))
+        );
+        assert!(
+            shared.get().is_some_and(Result::is_ok),
+            "built by the first member"
+        );
+        assert_eq!(
+            run_ic3(&file, later(), go(), &Carried::default(), false, &shared),
+            Ok(Some(true)),
+            "the second member reads the same model"
+        );
+        let stopped = SharedAig::new();
+        stopped
+            .set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }))
+            .expect("fresh cell");
+        for r in [
+            run_sat_bmc(&file, later(), go(), None, &stopped),
+            run_ic3(&file, later(), go(), &Carried::default(), false, &stopped),
+        ] {
+            match r {
+                Err(MemberStop::Abstained(why)) => {
+                    assert!(
+                        why.contains("node cap") && why.contains("MUNUNU_AIG_NODE_CAP"),
+                        "{why}"
+                    );
+                }
+                other => panic!("a stopped build is a named abstention: {other:?}"),
+            }
+        }
+        let cancelled = SharedAig::new();
+        cancelled
+            .set(Err(BuildStop::Cancelled { nodes: 7 }))
+            .expect("fresh cell");
+        let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(matches!(
+            run_ic3(&file, later(), up, &Carried::default(), false, &cancelled),
+            Err(MemberStop::Cancelled(why)) if why.starts_with("IC3 stopped at frame 0 (aig:") && why.contains("7 nodes")
+        ));
+        // A SAFE design shares the same way: the first member builds, the second proves on it.
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let safe = parser::parse(SAFE).expect("parse");
+        let shared = SharedAig::new();
+        assert!(matches!(
+            run_sat_bmc(&safe, later(), go(), None, &shared),
+            Err(MemberStop::Undecided(_))
+        ));
+        assert!(shared.get().is_some_and(Result::is_ok));
+        assert_eq!(
+            run_ic3(&safe, later(), go(), &Carried::default(), false, &shared),
+            Ok(Some(false)),
+            "the proof on the model the SAT member built"
+        );
+    }
+
+    /// mununu#1142 — a cap stop reaches the report as both members' `abstained` entries, in
+    /// both drivers: the runner table lets a non-capturing stub pre-set the shared cell with the
+    /// stop and call the real member, so the mapping from a stopped build to the lists is
+    /// exercised end to end without a design large enough to trip the cap.
+    #[test]
+    fn x1142_a_cap_stop_abstains_both_members_in_both_drivers() {
+        use crate::adapter::btor2::aig::BuildStop;
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 sort bitvec 1\n9 constd 1 5\n\
+                               10 eq 8 3 9\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let capped = Runners {
+            sat_bmc: |f, d, c, carried, aig| {
+                let _ = aig.set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }));
+                run_sat_bmc(f, d, c, carried, aig)
+            },
+            ic3: |f, d, c, store, witness, aig| {
+                let _ = aig.set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }));
+                run_ic3(f, d, c, store, witness, aig)
+            },
+            ..Runners::SHIPPED
+        };
+        let only_sat = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            sat_bmc: true,
+            ic3: true,
+            witness: false,
+            ..ReachMembers::ALL
+        };
+        let full = decide_with_members_using(
+            &file,
+            std::time::Duration::from_secs(30),
+            None,
+            only_sat,
+            &capped,
+        );
+        assert_eq!(full.verdict, ReachVerdict::Unknown, "{full:?}");
+        let abstained: Vec<&str> = full.abstained.iter().map(|(m, _)| *m).collect();
+        assert!(
+            abstained.contains(&"sat-bmc") && abstained.contains(&"ic3"),
+            "{full:?}"
+        );
+        assert!(
+            full.abstained
+                .iter()
+                .all(|(_, why)| why.contains("node cap") && why.contains("40 nodes")),
+            "{full:?}"
+        );
+        // The owned-only driver runs every owned member: on a design the others decide first
+        // the capped two are cancelled into no list (a peer decided), so the others are stubbed
+        // to find nothing and the design is SAFE (the real deep-CEX search finds no path).
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let safe = parser::parse(SAFE).expect("parse");
+        let owned_table = Runners {
+            exact: |_| Ok(None),
+            native: |_, _, _, _| Ok(None),
+            interp_available: || Err("not in this test".into()),
+            #[cfg(not(feature = "boolector"))]
+            cex: |_, _, _| Ok(None),
+            ..capped
+        };
+        let owned = decide_owned_only_using(&safe, 20_000, false, &owned_table);
+        assert_eq!(owned.verdict, ReachVerdict::Unknown, "{owned:?}");
+        let names: Vec<&str> = owned.abstained.iter().map(|(m, _)| *m).collect();
+        assert!(
+            names.contains(&"sat-bmc") && names.contains(&"ic3"),
+            "the owned-only driver names both too: {owned:?}"
+        );
+        assert!(
+            owned
+                .abstained
+                .iter()
+                .filter(|(m, _)| *m == "sat-bmc" || *m == "ic3")
+                .all(|(_, why)| why.contains("node cap")),
+            "{owned:?}"
+        );
     }
 
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:
@@ -3779,23 +3999,23 @@ mod tests {
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
         assert_eq!(
-            run_sat_bmc(&parse(COUNTER), later(), go(), None),
+            run_sat_bmc(&parse(COUNTER), later(), go(), None, &SharedAig::new()),
             Ok(Some(true))
         );
-        match run_sat_bmc(&parse(SAFE), later(), go(), None) {
+        match run_sat_bmc(&parse(SAFE), later(), go(), None, &SharedAig::new()) {
             Err(MemberStop::Undecided(p)) => assert!(p.contains("depth 1000"), "{p}"),
             other => panic!("a bounded search must not prove: {other:?}"),
         }
         assert!(
             matches!(
-                run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None),
+                run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None, &SharedAig::new()),
                 Err(MemberStop::Cancelled(p)) if p.starts_with("SAT BMC stopped")
             ),
             "a member stopped on the shared flag says how far it got (mununu#1043)"
         );
         assert!(
             matches!(
-                run_sat_bmc(&parse(ARRAY), later(), go(), None),
+                run_sat_bmc(&parse(ARRAY), later(), go(), None, &SharedAig::new()),
                 Err(MemberStop::Refused(why)) if why.starts_with("sat-bmc:")
             ),
             "an array design is refused by name"
@@ -3866,16 +4086,30 @@ mod tests {
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
         assert_eq!(
-            run_ic3(&parse(COUNTER), later(), go(), &Carried::default(), false),
+            run_ic3(
+                &parse(COUNTER),
+                later(),
+                go(),
+                &Carried::default(),
+                false,
+                &SharedAig::new()
+            ),
             Ok(Some(true))
         );
         assert_eq!(
-            run_ic3(&parse(SAFE), later(), go(), &Carried::default(), false),
+            run_ic3(
+                &parse(SAFE),
+                later(),
+                go(),
+                &Carried::default(),
+                false,
+                &SharedAig::new()
+            ),
             Ok(Some(false))
         );
         assert!(
             matches!(
-                run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), &Carried::default(), false),
+                run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), &Carried::default(), false, &SharedAig::new()),
                 Err(MemberStop::Cancelled(p)) if p.starts_with("IC3 stopped at frame")
             ),
             "a member stopped on the shared flag says how far it got (mununu#1043)"
@@ -3886,13 +4120,14 @@ mod tests {
             go(),
             &Carried::default(),
             false,
+            &SharedAig::new(),
         ) {
             Err(MemberStop::Abstained(cause)) => assert!(cause.contains("deadline"), "{cause}"),
             other => panic!("a run past its deadline abstains with the cause: {other:?}"),
         }
         assert!(
             matches!(
-                run_ic3(&parse(ARRAY), later(), go(), &Carried::default(), false),
+                run_ic3(&parse(ARRAY), later(), go(), &Carried::default(), false, &SharedAig::new()),
                 Err(MemberStop::Refused(why)) if why.starts_with("ic3:")
             ),
             "an array design is refused by name"
@@ -4235,6 +4470,7 @@ mod tests {
             _: Instant,
             stop: Arc<AtomicBool>,
             _: Option<&Carried>,
+            _: &SharedAig,
         ) -> Result<Option<bool>, MemberStop> {
             until_stopped(&stop);
             Err(MemberStop::Cancelled("stopped at frame 2".into()))
@@ -4246,8 +4482,9 @@ mod tests {
             stop: Arc<AtomicBool>,
             _: &Carried,
             _: bool,
+            aig: &SharedAig,
         ) -> Result<Option<bool>, MemberStop> {
-            owned_stopped(f, d, stop, None)
+            owned_stopped(f, d, stop, None, aig)
         }
 
         fn interp_stopped(
@@ -4325,21 +4562,21 @@ mod tests {
                 ),
                 (
                     Runners {
-                        sat_bmc: |_, _, _, _| Ok(Some(true)),
+                        sat_bmc: |_, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("sat-bmc"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _, _| Ok(Some(false)),
+                        ic3: |_, _, _, _, _, _| Ok(Some(false)),
                         ..ALL_RUNNING
                     },
                     safe("ic3"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _, _| Ok(Some(true)),
+                        ic3: |_, _, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("ic3"),
@@ -4385,7 +4622,7 @@ mod tests {
         fn a_verdict_that_lands_after_the_first_is_credited_and_a_disagreement_is_the_alarm() {
             let agreeing = Runners {
                 native: |_, _, _, _| Ok(Some(true)),
-                ic3: |_, _, stop, _, _| {
+                ic3: |_, _, stop, _, _, _| {
                     until_stopped(&stop);
                     Ok(Some(true))
                 },
@@ -4420,8 +4657,8 @@ mod tests {
             let stops = Runners {
                 exact: |_| Err("exact: over the cap".into()),
                 native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
-                sat_bmc: |_, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
-                ic3: |_, _, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
+                sat_bmc: |_, _, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
+                ic3: |_, _, _, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
                 interp_available: || Err("no cvc5".into()),
                 interp_search: |_, _, _| unreachable!("no search without cvc5"),
                 btormc: |_, _, _, _, _| Ok(Some(McVerdict::Unknown)),
@@ -4524,8 +4761,8 @@ mod tests {
         const ALL_DECIDE: Runners = Runners {
             exact: |_| Ok(Some(true)),
             native: |_, _, _, _| Ok(Some(true)),
-            sat_bmc: |_, _, _, _| Ok(Some(true)),
-            ic3: |_, _, _, _, _| Ok(Some(true)),
+            sat_bmc: |_, _, _, _, _| Ok(Some(true)),
+            ic3: |_, _, _, _, _, _| Ok(Some(true)),
             interp_available: || Ok(()),
             interp_search: |_, _, _| InterpSafetyVerdict::Unsafe { depth: 1 },
             btormc: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
@@ -4573,8 +4810,8 @@ mod tests {
             const ALL_STUCK: Runners = Runners {
                 exact: |_| stuck(),
                 native: |_, _, _, _| stuck(),
-                sat_bmc: |_, _, _, _| stuck(),
-                ic3: |_, _, _, _, _| stuck(),
+                sat_bmc: |_, _, _, _, _| stuck(),
+                ic3: |_, _, _, _, _, _| stuck(),
                 interp_search: |_, _, _| stuck(),
                 cex: |_, _, _| stuck(),
                 ..ALL_RUNNING
@@ -4630,7 +4867,7 @@ mod tests {
                     ),
                     (
                         Runners {
-                            sat_bmc: |_, _, _, _| Ok(Some(true)),
+                            sat_bmc: |_, _, _, _, _| Ok(Some(true)),
                             ..ALL_RUNNING
                         },
                         reach("sat-bmc"),
@@ -4639,7 +4876,7 @@ mod tests {
                 if ic3_starts() {
                     cases.push((
                         Runners {
-                            ic3: |_, _, _, _, _| Ok(Some(false)),
+                            ic3: |_, _, _, _, _, _| Ok(Some(false)),
                             ..ALL_RUNNING
                         },
                         safe("ic3"),
@@ -4657,8 +4894,8 @@ mod tests {
                 let stops = Runners {
                     exact: |_| Err("exact: over the cap".into()),
                     native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
-                    sat_bmc: |_, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
-                    ic3: |_, _, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
+                    sat_bmc: |_, _, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
+                    ic3: |_, _, _, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
                     interp_available: || Err("no cvc5".into()),
                     cex: |_, _, _| Err(MemberStop::Abstained("query budget spent".into())),
                     ..ALL_RUNNING
