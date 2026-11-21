@@ -295,17 +295,15 @@ fn settle<T>(
 fn settle_subprocess(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    decided: &std::sync::atomic::AtomicBool,
-    clock_stop: &std::sync::atomic::AtomicBool,
+    stop: &StopSignal,
     member: &'static str,
     timeout: std::time::Duration,
     r: Result<Option<McVerdict>, String>,
 ) -> Option<McVerdict> {
-    use std::sync::atomic::Ordering::Relaxed;
     let v = settle(refused, member, r);
-    // mununu#1043 — a member stopped by the wall or the budget raising `decided` is recorded
+    // mununu#1043 — a member stopped by the wall or the budget raising the flag is recorded
     // too; only a stop because a peer decided is in no list.
-    if v == Some(McVerdict::Unknown) && (!decided.load(Relaxed) || clock_stop.load(Relaxed)) {
+    if v == Some(McVerdict::Unknown) && (!stop.is_raised() || stop.clock_stopped()) {
         note_refusal(
             abstained,
             member,
@@ -373,13 +371,128 @@ pub(crate) enum MemberStop {
     /// mununu#1043 — stopped because the portfolio's shared stop flag was raised, with the
     /// progress it had made. The flag goes up when a peer decides (then the stop is in no list)
     /// and, in the full driver, when the wall or the run budget fires (then it is a budget
-    /// abstention, and the progress is its cause): [`settle_native`] tells the two apart.
+    /// abstention, and the progress is its cause): [`settle_native`] tells the two apart by the
+    /// flag's [`StopCause`].
     Cancelled(String),
 }
 
-/// mununu#1043 — no clock stop: the `--owned-only` driver has no watchdog, so its shared flag
-/// is raised only by a peer's verdict.
-static NO_CLOCK_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Why a portfolio's shared stop flag went up: the one type that carries the reason
+/// (`member-stop-reason` in `docs/defect-classes.md`). One flag used to mean all four, and
+/// mununu#1028, #1044 and #1067 each peeled one meaning off into a flag of its own. The matches
+/// on this enum are exhaustive ([`StopCause::is_clock`], [`StopCause::sweep_cause`],
+/// [`StopSignal::raise`]), so a new cause does not compile until each says where it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopCause {
+    /// A member reached a trusted definite verdict.
+    PeerDecided,
+    /// The caller cancelled the run (another rung won): a caller's decision, not a clock.
+    CallerCancelled,
+    /// The portfolio's own wall fired (mununu#1039).
+    Wall,
+    /// The run budget expired or was cancelled (mununu#1043).
+    RunBudget,
+}
+
+impl StopCause {
+    /// Whether a member this stop caught mid-search is reported. A clock stop is a budget
+    /// abstention carrying the member's progress; a peer's verdict or the caller's cancellation
+    /// means the member was not needed, and it is in no list.
+    fn is_clock(self) -> bool {
+        match self {
+            StopCause::Wall | StopCause::RunBudget => true,
+            StopCause::PeerDecided | StopCause::CallerCancelled => false,
+        }
+    }
+
+    /// mununu#1039 / #1043 — the cause the post-join sweep gives a member this stop left with
+    /// no verdict and no stop of its own on record; `None` when such a member stays in no list.
+    fn sweep_cause(self, wall_ms: u128) -> Option<String> {
+        match self {
+            StopCause::Wall => Some(clock_sweep_cause(true, wall_ms)),
+            StopCause::RunBudget => Some(clock_sweep_cause(false, wall_ms)),
+            StopCause::PeerDecided | StopCause::CallerCancelled => None,
+        }
+    }
+
+    const fn code(self) -> u8 {
+        match self {
+            StopCause::PeerDecided => 1,
+            StopCause::CallerCancelled => 2,
+            StopCause::Wall => 3,
+            StopCause::RunBudget => 4,
+        }
+    }
+
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(StopCause::PeerDecided),
+            2 => Some(StopCause::CallerCancelled),
+            3 => Some(StopCause::Wall),
+            4 => Some(StopCause::RunBudget),
+            _ => None,
+        }
+    }
+}
+
+/// A portfolio run's shared stop flag, with why it went up. The engines poll the flag
+/// ([`StopSignal::flag`]); the code that reports a stopped member reads the cause
+/// ([`StopSignal::cause`]).
+///
+/// The cause is written before the flag and both are `Relaxed`, as the two flags this replaces
+/// were (`clock_stop` before `decided`): a member may stop on the flag and still read no cause.
+/// It then records nothing itself, exactly as when the stop is a peer's, and the post-join sweep
+/// names it with the clock's cause, so the stop is never silent; only the member's own progress
+/// is lost in that window.
+#[derive(Debug, Default)]
+pub(crate) struct StopSignal {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cause: std::sync::atomic::AtomicU8,
+}
+
+impl StopSignal {
+    /// Raise the flag for `cause`. A clock's cause replaces a peer's or the caller's (the
+    /// watchdog checks the flag, then the clock: a verdict that lands between the two does not
+    /// stop the clock from being recorded); a peer's or the caller's never replaces a cause
+    /// already there.
+    fn raise(&self, cause: StopCause) {
+        use std::sync::atomic::Ordering::Relaxed;
+        match cause {
+            StopCause::Wall | StopCause::RunBudget => self.cause.store(cause.code(), Relaxed),
+            StopCause::PeerDecided | StopCause::CallerCancelled => {
+                // A cause already recorded stays: losing this exchange is the intended outcome.
+                let _ = self
+                    .cause
+                    .compare_exchange(0, cause.code(), Relaxed, Relaxed);
+            }
+        }
+        self.flag.store(true, Relaxed);
+    }
+
+    /// Whether the flag is up.
+    fn is_raised(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Why the flag went up; `None` while it is down, or in the window described on the type.
+    fn cause(&self) -> Option<StopCause> {
+        StopCause::from_code(self.cause.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Whether a clock raised the flag ([`StopCause::is_clock`]).
+    fn clock_stopped(&self) -> bool {
+        self.cause().is_some_and(StopCause::is_clock)
+    }
+
+    /// The flag the engines poll.
+    fn flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.flag
+    }
+
+    /// The flag, for an engine that keeps it.
+    fn flag_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.flag)
+    }
+}
 
 impl From<native_bmc::BmcError> for MemberStop {
     fn from(e: native_bmc::BmcError) -> Self {
@@ -399,7 +512,7 @@ fn settle_native<T>(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
     undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    clock_stop: &std::sync::atomic::AtomicBool,
+    stop: &StopSignal,
     member: &'static str,
     r: Result<Option<T>, MemberStop>,
 ) -> Option<T> {
@@ -408,7 +521,7 @@ fn settle_native<T>(
         Err(MemberStop::Cancelled(progress)) => {
             // mununu#1043 — the flag the member stopped on was the wall's or the budget's, not a
             // peer's verdict: a budget abstention, with the member's own progress as its cause.
-            if clock_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            if stop.clock_stopped() {
                 note_refusal(abstained, member, clock_stopped(&progress));
             }
             None
@@ -729,13 +842,13 @@ fn interp_search(
 /// found before the search and so recorded on every run whatever a peer did (as every other
 /// member locates its tool first); a search that ends undecided is `undecided`, unless the member
 /// stopped because a peer had already decided. mununu#1043 — a search stopped on the shared flag
-/// when the wall or the run budget raised it (`clock_stop`) is a budget abstention with its reason.
+/// when the wall or the run budget raised it ([`StopCause::is_clock`]) is a budget abstention with
+/// its reason.
 fn interp_member(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
     undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    cancel: &std::sync::atomic::AtomicBool,
-    clock_stop: &std::sync::atomic::AtomicBool,
+    stop: &StopSignal,
     available: Result<(), String>,
     search: impl FnOnce() -> InterpSafetyVerdict,
 ) -> Option<bool> {
@@ -747,10 +860,9 @@ fn interp_member(
         InterpSafetyVerdict::Unsafe { .. } => Some(true),
         InterpSafetyVerdict::Safe { .. } => Some(false),
         InterpSafetyVerdict::Undecided { reason } => {
-            use std::sync::atomic::Ordering::Relaxed;
-            if !cancel.load(Relaxed) {
+            if !stop.is_raised() {
                 note_refusal(undecided, "interp", reason);
-            } else if clock_stop.load(Relaxed) {
+            } else if stop.clock_stopped() {
                 note_refusal(abstained, "interp", clock_stopped(&reason));
             }
             None
@@ -1464,8 +1576,10 @@ fn decide_with_members_using(
     // the slowest member's timeout. A member still running when the flag is set is not
     // cross-checked, exactly as in the owned-only driver; every member is individually
     // sound, so the decision itself is.
-    let decided_flag = std::sync::Arc::new(AtomicBool::new(false));
-    let decided: &AtomicBool = &decided_flag;
+    let stop_signal = std::sync::Arc::new(StopSignal::default());
+    let stop: &StopSignal = &stop_signal;
+    let decided_flag = stop.flag_arc();
+    let decided: &AtomicBool = stop.flag();
     let finished = AtomicBool::new(false);
     let finished = &finished;
     let budget = &budget;
@@ -1503,12 +1617,12 @@ fn decide_with_members_using(
     // subprocess members; every member is individually sound, so the decision itself is.
     let exact_rx = members.exact.then(|| {
         let (tx, rx) = std::sync::mpsc::channel();
-        let (decided, budget) = (std::sync::Arc::clone(&decided_flag), budget.clone());
+        let (stop, budget) = (std::sync::Arc::clone(&stop_signal), budget.clone());
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let r = (runners.exact)(&content);
             if matches!(r, Ok(Some(_))) {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(r);
         });
@@ -1520,12 +1634,9 @@ fn decide_with_members_using(
     // a z3 rlimit, deterministic but not a wall, and on a loaded host one check ran 70 s past the
     // wall, or past an outer `timeout`, which then killed the run before any JSON was written.
     let wall_deadline = std::time::Instant::now() + subprocess_timeout + STRAGGLER_GRACE;
-    let wall_fired = AtomicBool::new(false);
-    let wall_fired = &wall_fired;
-    // mununu#1043 — set beside `decided` when the wall or the run budget fires, so a member that
-    // stops on the flag can tell a clock stop (a budget abstention) from a peer's verdict.
-    let clock_stop = AtomicBool::new(false);
-    let clock_stop = &clock_stop;
+    // mununu#1043 — the wall and the run budget raise the flag with their own cause
+    // ([`StopCause`]), so a member that stops on the flag can tell a clock stop (a budget
+    // abstention) from a peer's verdict.
     let started = members;
     let mut members = std::thread::scope(|scope| {
         // Forward an external cancellation, the budget's expiry, or the portfolio's wall into
@@ -1541,22 +1652,19 @@ fn decide_with_members_using(
                 }
                 // An external cancellation is a caller's decision (another rung won): no clock.
                 if cancel.is_some_and(|c| c.load(Relaxed)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::CallerCancelled);
                     break;
                 }
-                // `clock_stop` goes up before `decided`, but both are `Relaxed`: a member may stop
-                // on `decided` and still read `clock_stop` clear. It then records nothing itself,
+                // The cause goes up before the flag, both `Relaxed` ([`StopSignal`]): a member
+                // may stop on the flag and still read no cause. It then records nothing itself,
                 // and the post-join sweep below names it with the clock's cause, so the stop is
                 // never silent; only the member's own progress is lost in that window.
                 if budget.expired() {
-                    clock_stop.store(true, Relaxed);
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::RunBudget);
                     break;
                 }
                 if std::time::Instant::now() >= wall_deadline {
-                    wall_fired.store(true, Relaxed);
-                    clock_stop.store(true, Relaxed);
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::Wall);
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1566,17 +1674,10 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = (runners.btormc)(file, btormc_kmax, subprocess_timeout, decided, carried);
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "btormc",
-                    subprocess_timeout,
-                    v,
-                );
+                let v =
+                    settle_subprocess(refused, abstained, stop, "btormc", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1585,17 +1686,9 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = (runners.pono)(file, subprocess_timeout, decided);
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "pono",
-                    subprocess_timeout,
-                    v,
-                );
+                let v = settle_subprocess(refused, abstained, stop, "pono", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1615,17 +1708,9 @@ fn decide_with_members_using(
                     decided,
                     carried,
                 );
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "ric3",
-                    subprocess_timeout,
-                    v,
-                );
+                let v = settle_subprocess(refused, abstained, stop, "ric3", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1637,17 +1722,10 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = (runners.ric3_bmc)(file, subprocess_timeout, decided, carried);
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "ric3-bmc",
-                    subprocess_timeout,
-                    v,
-                );
+                let v =
+                    settle_subprocess(refused, abstained, stop, "ric3-bmc", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1664,12 +1742,12 @@ fn decide_with_members_using(
                     refused,
                     abstained,
                     undecided,
-                    clock_stop,
+                    stop,
                     "sat-bmc",
                     (runners.sat_bmc)(file, deadline, cancel, carried, shared_aig),
                 );
                 if v == Some(true) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1686,12 +1764,12 @@ fn decide_with_members_using(
                     refused,
                     abstained,
                     undecided,
-                    clock_stop,
+                    stop,
                     "ic3",
                     (runners.ic3)(file, deadline, cancel, ic3_store, witness, shared_aig),
                 );
                 if v.is_some() {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1706,12 +1784,12 @@ fn decide_with_members_using(
                     refused,
                     abstained,
                     undecided,
-                    clock_stop,
+                    stop,
                     "native",
                     (runners.native)(file, Some(decided), t.native_query_ms, Some(wall_deadline)),
                 );
                 if v.is_some() {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1726,8 +1804,7 @@ fn decide_with_members_using(
                         refused,
                         abstained,
                         undecided,
-                        decided,
-                        clock_stop,
+                        stop,
                         (runners.interp_available)(),
                         || (runners.interp_search)(file, decided, t),
                     )
@@ -1795,8 +1872,11 @@ fn decide_with_members_using(
     // stop recorded nothing for a member that had not noted its own cause).
     // A definite verdict means a peer stopped the rest, which stays in no list, even when the
     // clock rose in the same instant (the watchdog's check races the peer's store).
-    if clock_stop.load(Relaxed) && !any_definite(&members) {
-        let cause = clock_sweep_cause(wall_fired.load(Relaxed), subprocess_timeout.as_millis());
+    if let Some(cause) = stop
+        .cause()
+        .and_then(|c| c.sweep_cause(subprocess_timeout.as_millis()))
+        && !any_definite(&members)
+    {
         for name in stopped_by_wall_unrecorded(&started, &members) {
             members.abstained.push((name, cause.clone()));
         }
@@ -1833,7 +1913,7 @@ fn any_definite(m: &Members) -> bool {
 fn stopped_by_wall_unrecorded(started: &ReachMembers, m: &Members) -> Vec<&'static str> {
     // A subprocess member's `Some(Unknown)` is no verdict. `settle_subprocess` records its timeout
     // note on a clock stop (#1043), so the sweep only names one that settled before it saw
-    // `clock_stop`.
+    // the clock's cause.
     let definite = |v: Option<McVerdict>| matches!(v, Some(McVerdict::Violated | McVerdict::Safe));
     let ran: [(&'static str, bool, bool); 9] = [
         ("exact", started.exact, m.exact.is_some()),
@@ -2011,7 +2091,6 @@ fn decide_owned_only_using(
     witness: bool,
     runners: &Runners,
 ) -> ReachOutcome {
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::{Arc, mpsc};
     let runners = *runners;
     if let Some(outcome) = no_obligation(file) {
@@ -2061,7 +2140,10 @@ fn decide_owned_only_using(
     // is itself sound.
     let file = Arc::new(file.clone());
     let content = Arc::new(emit_btor2(&file));
-    let decided = Arc::new(AtomicBool::new(false));
+    // This driver has no watchdog: its flag is raised only by a member's verdict, so a member
+    // that stops on it is in no list (mununu#1043).
+    let stop = Arc::new(StopSignal::default());
+    let decided = stop.flag_arc();
     let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
     let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
     // The members this run starts, each sending its name once ([`owned_members`]); a member
@@ -2087,6 +2169,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("native", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#893 — `timeout_ms` is the member's NOMINAL per-check allowance (a resource
@@ -2097,12 +2180,12 @@ fn decide_owned_only_using(
                 &refused,
                 &abstained,
                 &undecided,
-                &NO_CLOCK_STOP,
+                &stop,
                 "native",
                 (runners.native)(&file, Some(&decided), t.native_query_ms, Some(deadline)),
             );
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("native", OwnedReport::Verdict(v)));
         });
@@ -2118,6 +2201,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("interp", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("interp", || {
@@ -2125,14 +2209,13 @@ fn decide_owned_only_using(
                     &refused,
                     &abstained,
                     &undecided,
-                    &decided,
-                    &NO_CLOCK_STOP,
+                    &stop,
                     (runners.interp_available)(),
                     || (runners.interp_search)(&file, &decided, t),
                 )
             });
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("interp", OwnedReport::Verdict(v)));
         });
@@ -2144,6 +2227,7 @@ fn decide_owned_only_using(
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("boolector", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("boolector", || {
@@ -2155,7 +2239,7 @@ fn decide_owned_only_using(
                 )
             });
             if v == Some(true) {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("boolector", OwnedReport::Verdict(v)));
         });
@@ -2171,16 +2255,17 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("cex", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#955 — a budget stop (the deadline, the resource limit) is an abstention with
             // its cause, an encoder refusal a refusal, as for the native member above.
             let hit = timed("cex", || {
                 let r = (runners.cex)(&file, deadline, &decided);
-                settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "cex", r).is_some()
+                settle_native(&refused, &abstained, &undecided, &stop, "cex", r).is_some()
             });
             if hit {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send((
                 "cex",
@@ -2202,6 +2287,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         let carried = witness.then(|| Arc::clone(&carried_store));
         let aig = Arc::clone(&shared_aig);
         spawn_owned("sat-bmc", tx.clone(), move || {
@@ -2213,16 +2299,9 @@ fn decide_owned_only_using(
                 carried.as_deref(),
                 &aig,
             );
-            let v = settle_native(
-                &refused,
-                &abstained,
-                &undecided,
-                &NO_CLOCK_STOP,
-                "sat-bmc",
-                r,
-            );
+            let v = settle_native(&refused, &abstained, &undecided, &stop, "sat-bmc", r);
             if v == Some(true) {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("sat-bmc", OwnedReport::Verdict(v)));
         });
@@ -2240,34 +2319,31 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         let store = Arc::clone(&carried_store);
         let aig = Arc::clone(&shared_aig);
         spawn_owned("ic3", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), &store, witness, &aig);
-            let v = settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "ic3", r);
+            let v = settle_native(&refused, &abstained, &undecided, &stop, "ic3", r);
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("ic3", OwnedReport::Verdict(v)));
         });
     }
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
     {
-        let (content, decided, tx, refused) = (
-            Arc::clone(&content),
-            Arc::clone(&decided),
-            tx.clone(),
-            Arc::clone(&refused),
-        );
+        let (content, tx, refused) = (Arc::clone(&content), tx.clone(), Arc::clone(&refused));
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("exact", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#873 — a refusal (over-cap cone, free init) is an abstention AND a recorded
             // reason, as in the scoped driver; it used to be dropped here.
             let v = settle(&refused, "exact", (runners.exact)(&content));
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("exact", OwnedReport::Verdict(v)));
         });
@@ -2541,6 +2617,126 @@ mod tests {
     use crate::adapter::btor2::cex_value::CexValue;
     use crate::adapter::btor2::parser;
 
+    /// A stop flag already up for `cause`.
+    fn raised(cause: StopCause) -> StopSignal {
+        let stop = StopSignal::default();
+        stop.raise(cause);
+        stop
+    }
+
+    /// `member-stop-reason` — every cause, and where a member it stopped goes. The first match
+    /// is exhaustive, so a new [`StopCause`] does not compile until it has a row here.
+    #[test]
+    fn every_stop_cause_reports_a_stopped_member_where_its_kind_goes() {
+        fn all(any: StopCause) -> [(StopCause, bool); 4] {
+            match any {
+                StopCause::PeerDecided
+                | StopCause::CallerCancelled
+                | StopCause::Wall
+                | StopCause::RunBudget => [
+                    (StopCause::PeerDecided, false),
+                    (StopCause::CallerCancelled, false),
+                    (StopCause::Wall, true),
+                    (StopCause::RunBudget, true),
+                ],
+            }
+        }
+        let lists = || {
+            (
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+            )
+        };
+        let wall = std::time::Duration::from_millis(60_000);
+        for (cause, clock) in all(StopCause::PeerDecided) {
+            assert_eq!(StopCause::from_code(cause.code()), Some(cause));
+            assert_eq!(cause.is_clock(), clock, "{cause:?}");
+            assert_eq!(cause.sweep_cause(60_000).is_some(), clock, "{cause:?}");
+            let stop = raised(cause);
+            assert!(stop.is_raised());
+            assert_eq!(stop.cause(), Some(cause));
+            // An owned member stopped mid-search: a budget abstention with its progress under a
+            // clock, in no list otherwise.
+            let (refused, abstained, undecided) = lists();
+            let v: Option<bool> = settle_native(
+                &refused,
+                &abstained,
+                &undecided,
+                &stop,
+                "ic3",
+                Err(MemberStop::Cancelled("at frame 2".into())),
+            );
+            assert_eq!(v, None);
+            let want = if clock {
+                vec![("ic3", clock_stopped("at frame 2"))]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*abstained.lock().unwrap(), want, "{cause:?}");
+            assert!(refused.lock().unwrap().is_empty() && undecided.lock().unwrap().is_empty());
+            // The interpolation search, stopped the same way.
+            let (refused, abstained, undecided) = lists();
+            interp_member(&refused, &abstained, &undecided, &stop, Ok(()), || {
+                InterpSafetyVerdict::Undecided {
+                    reason: "no fixpoint".into(),
+                }
+            });
+            let want = if clock {
+                vec![("interp", clock_stopped("no fixpoint"))]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*abstained.lock().unwrap(), want, "{cause:?}");
+            assert!(refused.lock().unwrap().is_empty() && undecided.lock().unwrap().is_empty());
+            // A killed child: its budget note under a clock, nothing otherwise.
+            let (refused, abstained, _) = lists();
+            settle_subprocess(
+                &refused,
+                &abstained,
+                &stop,
+                "pono",
+                wall,
+                Ok(Some(McVerdict::Unknown)),
+            );
+            assert_eq!(
+                abstained.lock().unwrap().len(),
+                usize::from(clock),
+                "{cause:?}"
+            );
+        }
+        assert_eq!(StopCause::from_code(0), None);
+        assert_eq!(StopSignal::default().cause(), None);
+        assert_eq!(
+            StopCause::Wall.sweep_cause(60_000),
+            Some(clock_sweep_cause(true, 60_000))
+        );
+        assert_eq!(
+            StopCause::RunBudget.sweep_cause(60_000),
+            Some(clock_sweep_cause(false, 60_000))
+        );
+    }
+
+    /// Which cause stands when two raise the flag: a clock's replaces a peer's or the caller's
+    /// (the watchdog's clock check can follow a verdict it did not see), and nothing replaces a
+    /// clock's.
+    #[test]
+    fn a_clocks_cause_replaces_a_peers_and_is_never_replaced() {
+        for clock in [StopCause::Wall, StopCause::RunBudget] {
+            for other in [StopCause::PeerDecided, StopCause::CallerCancelled] {
+                let stop = raised(other);
+                stop.raise(clock);
+                assert_eq!(stop.cause(), Some(clock), "{other:?} then {clock:?}");
+                let stop = raised(clock);
+                stop.raise(other);
+                assert_eq!(stop.cause(), Some(clock), "{clock:?} then {other:?}");
+            }
+        }
+        let stop = raised(StopCause::CallerCancelled);
+        stop.raise(StopCause::PeerDecided);
+        assert_eq!(stop.cause(), Some(StopCause::CallerCancelled));
+    }
+
     /// A one-register design with no `bad` line: nothing to decide.
     const NO_BAD: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
                           5 input 1 d\n6 next 1 3 5\n";
@@ -2613,7 +2809,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &NO_CLOCK_STOP,
+            &StopSignal::default(),
             "native",
             Err(MemberStop::from(stop)),
         );
@@ -2634,7 +2830,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &NO_CLOCK_STOP,
+            &StopSignal::default(),
             "native",
             Err(MemberStop::from(native_bmc::BmcError::NoBadProperty)),
         );
@@ -3199,7 +3395,6 @@ mod tests {
     /// `undecided` unless a peer had decided.
     #[test]
     fn an_interp_member_that_could_not_run_is_a_refusal_not_an_undecided_search() {
-        use std::sync::atomic::AtomicBool;
         let (refused, abstained, undecided) = (
             std::sync::Mutex::new(Vec::new()),
             std::sync::Mutex::new(Vec::new()),
@@ -3210,8 +3405,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
-            &NO_CLOCK_STOP,
+            &raised(StopCause::PeerDecided),
             Err("cvc5 missing".to_string()),
             || {
                 ran.set(true);
@@ -3227,8 +3421,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(false),
-            &NO_CLOCK_STOP,
+            &StopSignal::default(),
             Ok(()),
             undecided_search,
         );
@@ -3236,8 +3429,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
-            &NO_CLOCK_STOP,
+            &raised(StopCause::PeerDecided),
             Ok(()),
             undecided_search,
         );
@@ -3259,8 +3451,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
-            &AtomicBool::new(true),
+            &raised(StopCause::Wall),
             Ok(()),
             undecided_search,
         );
@@ -3280,7 +3471,6 @@ mod tests {
     /// generic "no result was collected"). The subprocess members' settle takes the same flag.
     #[test]
     fn a_member_stopped_by_the_clock_keeps_its_progress_and_a_peer_stop_is_in_no_list() {
-        use std::sync::atomic::AtomicBool;
         let lists = || {
             (
                 std::sync::Mutex::new(Vec::new()),
@@ -3296,7 +3486,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(false),
+            &raised(StopCause::PeerDecided),
             "ic3",
             stop(),
         );
@@ -3311,7 +3501,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
+            &raised(StopCause::Wall),
             "ic3",
             stop(),
         );
@@ -3333,8 +3523,11 @@ mod tests {
             settle_subprocess(
                 &refused,
                 &abstained,
-                &AtomicBool::new(true),
-                &AtomicBool::new(clock),
+                &raised(if clock {
+                    StopCause::RunBudget
+                } else {
+                    StopCause::PeerDecided
+                }),
                 "btormc",
                 t,
                 Ok(Some(McVerdict::Unknown)),
