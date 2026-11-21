@@ -45,8 +45,9 @@ pub const LIFT_CACHE_DIR_ENV: &str = "MUNUNU_LIFT_CACHE_DIR";
 /// manifest, so a change to any of those misses on its own. 2 (N1, 2026-11-04): one attempt per
 /// lift, the slang-only product front end. 3 (mununu#956/#957, 2026-11-10): include contents
 /// keyed as raw bytes, absolutely-`include`d files keyed, tool binaries keyed by size and mtime,
-/// and only lifts that wrote both JSON snapshots are stored.
-pub(super) const LIFT_CACHE_FORMAT: u32 = 3;
+/// and only lifts that wrote both JSON snapshots are stored. 4 (mununu#1138, 2026-11-20): yosys
+/// runs inside the staging directory and the script names the staged files relative to it.
+pub(super) const LIFT_CACHE_FORMAT: u32 = 4;
 
 /// Caps on the include-directory walk: above either, the manifest is not built and the lift
 /// bypasses the cache (a walk that large would cost more than the lift it saves).
@@ -151,6 +152,11 @@ pub(super) struct LiftManifest {
     /// Every file under an include directory a tool may read, and every absolutely-`include`d
     /// file, `(path, content)` with the content in [`key_bytes`] form, sorted.
     pub include_files: Vec<(String, String)>,
+    /// mununu#1138 — the caller's include directories in SEARCH ORDER, made absolute: the
+    /// script names only the links (`-Iinc0 -Iinc1`), and `include_files` is sorted, so without
+    /// this two swapped directories holding a shadowed header would share a key and the second
+    /// run would be served the first's model (the third cross-review of #1169).
+    pub include_dirs: Vec<String>,
 }
 
 /// The serialised manifest and its index.
@@ -501,16 +507,34 @@ mod tests {
             },
             attempt: AttemptManifest {
                 frontend: "slang",
-                script:
-                    "read_slang --ignore-assertions --ignore-timing /P/work.sv; hierarchy -auto-top"
-                        .into(),
-                cwd_in_staging_dir: false,
+                script: "read_slang --ignore-assertions --ignore-timing -I. work.sv; hierarchy -auto-top"
+                    .into(),
+                cwd_in_staging_dir: true,
                 plugin: None,
                 sv2v: None,
             },
             staged: vec![("work.sv".into(), primary.into())],
             include_files: Vec::new(),
+            include_dirs: Vec::new(),
         }
+    }
+
+    /// mununu#1138 — the include directories' order is part of the key: `-I A -I B` and
+    /// `-I B -I A` resolve a shadowed header differently and must never share a model.
+    #[test]
+    fn x1138_swapping_two_include_directories_is_another_key() {
+        let mut ab = manifest("module m; endmodule");
+        ab.include_dirs = vec!["/inc/a".into(), "/inc/b".into()];
+        let mut ba = manifest("module m; endmodule");
+        ba.include_dirs = vec!["/inc/b".into(), "/inc/a".into()];
+        assert_eq!(
+            ab.include_files, ba.include_files,
+            "the walked files cannot tell them apart"
+        );
+        assert_ne!(
+            LiftCacheKey::new(&ab).unwrap().index(),
+            LiftCacheKey::new(&ba).unwrap().index()
+        );
     }
 
     fn lift() -> CachedLift {
@@ -518,7 +542,7 @@ mod tests {
             btor2: "1 sort bitvec 1\n2 state 1 q\n".into(),
             hier_json: "{}".into(),
             flat_netlist_json: "{}".into(),
-            staged_primary: "/tmp/mununu-yosys-1-2-3-4/work.sv".into(),
+            staged_primary: "work.sv".into(),
             frontend_used: "verilog".into(),
             backend_retry: None,
         }
@@ -587,7 +611,7 @@ mod tests {
         m.attempt.script.push_str("; opt_clean");
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
-        m.attempt.cwd_in_staging_dir = true;
+        m.attempt.cwd_in_staging_dir = false;
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
         m.attempt.plugin = Some(ToolIdentity {
