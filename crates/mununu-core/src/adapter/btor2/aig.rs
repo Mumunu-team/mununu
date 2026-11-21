@@ -25,6 +25,9 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node, Op, Operand, Sort};
 use crate::adapter::btor2::bit_blast::eval_const_value;
@@ -72,11 +75,136 @@ pub enum AigNode {
     And(Lit, Lit),
 }
 
+/// mununu#1142 — the most nodes an AIG can hold: a [`Lit`] is `2 * node + complement` in a
+/// `u32`, so a node index past this would alias literals.
+pub const MAX_NODES: u32 = (1 << 31) - 1;
+
+/// mununu#1142 — the default node cap of a build ([`BuildLimits::node_cap`]), `MUNUNU_AIG_NODE_CAP`
+/// unset: 2^26 nodes (about 1.5 GB of nodes and hash entries). Below [`MAX_NODES`] by far, so a
+/// build stops with a named abstention long before the literal space is exhausted.
+pub const DEFAULT_NODE_CAP: u32 = 1 << 26;
+
+/// How often (in nodes) the build polls its deadline, cancel flag and the run budget.
+const POLL_EVERY: usize = 4096;
+
+/// mununu#1142 — what stops an [`AigModel::build_with`] before it has every gate: the design's
+/// own size against the cap, the member's deadline or cancel flag, or the thread's run budget.
+/// Every arm names how far the build got, so the report says what was built when it stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuildStop {
+    /// The design cannot be modelled (arrays, an operator the backend refuses): a refusal, more
+    /// budget will not help.
+    Refused(String),
+    /// The AIG passed the node cap.
+    NodeCap { nodes: u32, cap: u32 },
+    /// The member's deadline expired during the build.
+    Deadline { nodes: u32 },
+    /// The thread's run budget expired during the build.
+    RunBudget { nodes: u32 },
+    /// The member's cancel flag went up during the build (a peer decided).
+    Cancelled { nodes: u32 },
+}
+
+impl std::fmt::Display for BuildStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildStop::Refused(why) => f.write_str(why),
+            BuildStop::NodeCap { nodes, cap } if *cap >= MAX_NODES => write!(
+                f,
+                "aig: the model passed the node cap while being built ({nodes} nodes, cap \
+                 {cap}, the most the engine's literals can address — a limit of the technique); \
+                 a smaller design, or the SMT members"
+            ),
+            BuildStop::NodeCap { nodes, cap } => write!(
+                f,
+                "aig: the model passed the node cap while being built ({nodes} nodes, cap \
+                 {cap}); MUNUNU_AIG_NODE_CAP raises the cap (at most {MAX_NODES}), or the SMT \
+                 members take the design"
+            ),
+            BuildStop::Deadline { nodes } => write!(
+                f,
+                "aig: the member's deadline expired while the model was being built ({nodes} \
+                 nodes so far); more time on the verb's timeout, or a smaller design"
+            ),
+            BuildStop::RunBudget { nodes } => write!(
+                f,
+                "aig: the run budget expired while the model was being built ({nodes} nodes so \
+                 far); more time on the run's budget, or a smaller design"
+            ),
+            BuildStop::Cancelled { nodes } => {
+                write!(f, "aig: the build was cancelled ({nodes} nodes so far)")
+            }
+        }
+    }
+}
+
+impl From<String> for BuildStop {
+    fn from(why: String) -> Self {
+        BuildStop::Refused(why)
+    }
+}
+
+/// mununu#1142 — the stops a build honours. `Default` is the configured node cap and no clock.
+#[derive(Clone, Debug, Default)]
+pub struct BuildLimits {
+    /// The most nodes the build may create; `None` = [`default_node_cap`].
+    pub node_cap: Option<u32>,
+    /// A wall-clock deadline, polled every [`POLL_EVERY`] nodes.
+    pub deadline: Option<Instant>,
+    /// An external cancellation, polled with the deadline.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl BuildLimits {
+    /// The limits a member passes: its own deadline and cancel flag, the configured cap.
+    pub fn member(deadline: Option<Instant>, cancel: Option<Arc<AtomicBool>>) -> Self {
+        Self {
+            node_cap: None,
+            deadline,
+            cancel,
+        }
+    }
+}
+
+/// mununu#1142 — the node cap from `MUNUNU_AIG_NODE_CAP` (a node count, clamped to
+/// [`MAX_NODES`]), else [`DEFAULT_NODE_CAP`]. An unparsable value is the default, logged.
+pub fn default_node_cap() -> u32 {
+    node_cap_from(crate::adapter::env_var::read("MUNUNU_AIG_NODE_CAP").as_deref())
+}
+
+/// [`default_node_cap`] over the variable's value.
+pub fn node_cap_from(value: Option<&str>) -> u32 {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => DEFAULT_NODE_CAP,
+        Some(v) => match v.parse::<u64>() {
+            Ok(n) if n >= 1 => u32::try_from(n.min(u64::from(MAX_NODES))).unwrap_or(MAX_NODES),
+            _ => {
+                tracing::warn!(
+                    value = v,
+                    "MUNUNU_AIG_NODE_CAP is not a node count; using the default"
+                );
+                DEFAULT_NODE_CAP
+            }
+        },
+    }
+}
+
 /// A structurally hashed and-inverter graph.
 #[derive(Clone, Debug)]
 pub struct Aig {
     nodes: Vec<AigNode>,
     strash: HashMap<(Lit, Lit), u32>,
+    /// mununu#1142 — the cap and the clocks the builder honours; [`Aig::new`] has the hard cap
+    /// and no clock.
+    cap: u32,
+    deadline: Option<Instant>,
+    cancel: Option<Arc<AtomicBool>>,
+    /// The first stop hit; once set, no node is created (every request returns FALSE) and the
+    /// build returns it.
+    tripped: Option<BuildStop>,
+    /// Whether the clocks and the run budget are polled: true while a build runs, false once
+    /// it finished (a finished model is extended without polls and never trips).
+    polling: bool,
 }
 
 impl Default for Aig {
@@ -86,11 +214,34 @@ impl Default for Aig {
 }
 
 impl Aig {
+    /// An AIG with the hard cap ([`MAX_NODES`]) and no clock.
     pub fn new() -> Self {
+        Self::with_limits(&BuildLimits {
+            node_cap: Some(MAX_NODES),
+            deadline: None,
+            cancel: None,
+        })
+    }
+
+    /// mununu#1142 — an AIG that stops at `limits` (see [`BuildStop`]).
+    pub fn with_limits(limits: &BuildLimits) -> Self {
         Self {
             nodes: vec![AigNode::False],
             strash: HashMap::new(),
+            cap: limits
+                .node_cap
+                .unwrap_or_else(default_node_cap)
+                .min(MAX_NODES),
+            deadline: limits.deadline,
+            cancel: limits.cancel.clone(),
+            tripped: None,
+            polling: true,
         }
+    }
+
+    /// mununu#1142 — the stop the builder hit, if any.
+    pub fn tripped(&self) -> Option<&BuildStop> {
+        self.tripped.as_ref()
     }
 
     /// The number of nodes, the constant included.
@@ -109,9 +260,44 @@ impl Aig {
     }
 
     fn push(&mut self, node: AigNode) -> u32 {
-        let index = self.nodes.len() as u32;
+        // mununu#1142 — a tripped graph creates nothing more: the build returns the stop, and
+        // memory stops growing at the cap (every later request is answered with FALSE).
+        // SOUNDNESS: the FALSE placeholder is never read as a model — `build_with` returns the
+        // stop before any caller sees the graph, and a successful build clears its limits and
+        // its polls, so a finished model trips only at the literal space's own limit.
+        if self.tripped.is_some() {
+            return 0;
+        }
+        let n = self.nodes.len();
+        let nodes = u32::try_from(n).unwrap_or(u32::MAX);
+        let stop = if nodes >= self.cap {
+            Some(BuildStop::NodeCap {
+                nodes,
+                cap: self.cap,
+            })
+        } else if self.polling && n % POLL_EVERY == 1 {
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+            {
+                Some(BuildStop::Cancelled { nodes })
+            } else if self.deadline.is_some_and(|d| Instant::now() >= d) {
+                Some(BuildStop::Deadline { nodes })
+            } else if crate::adapter::run_budget::expired() {
+                Some(BuildStop::RunBudget { nodes })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(stop) = stop {
+            self.tripped = Some(stop);
+            return 0;
+        }
         self.nodes.push(node);
-        index
+        nodes
     }
 
     /// A fresh free leaf.
@@ -770,10 +956,18 @@ pub struct AigModel {
 }
 
 impl AigModel {
-    /// Build the model. Refuses (with the reason) a design with arrays, or an operator the
-    /// backend cannot express.
-    pub fn build(file: &Btor2File) -> Result<Self, String> {
-        let mut aig = Aig::new();
+    /// Build the model under the default limits ([`BuildLimits::default`]: the configured node
+    /// cap, no clock). Refuses (with the reason) a design with arrays, or an operator the
+    /// backend cannot express; stops with the count at the cap or the run budget.
+    pub fn build(file: &Btor2File) -> Result<Self, BuildStop> {
+        Self::build_with(file, &BuildLimits::default())
+    }
+
+    /// mununu#1142 — [`Self::build`] under `limits`: the node cap, the member's deadline and
+    /// cancel flag, and the thread's run budget are polled as the graph grows, so a member's
+    /// wall or a peer's verdict stops the build and not only the solve after it.
+    pub fn build_with(file: &Btor2File, limits: &BuildLimits) -> Result<Self, BuildStop> {
+        let mut aig = Aig::with_limits(limits);
         let mut env = HashMap::new();
         let mut states = Vec::new();
         let mut inputs = Vec::new();
@@ -821,7 +1015,13 @@ impl AigModel {
             }
         }
         let mut backend = AigBackend::new(&mut aig, env, false);
-        walk_design(file, &mut backend).map_err(|e| match e {
+        let walked = walk_design(file, &mut backend);
+        // mununu#1142 — a stop during the walk outranks whatever the walk made of the FALSE
+        // answers it got after it.
+        if let Some(stop) = backend.aig.tripped.take() {
+            return Err(stop);
+        }
+        walked.map_err(|e| match e {
             crate::adapter::btor2::term_backend::WalkError::Backend(m) => m,
             crate::adapter::btor2::term_backend::WalkError::NonBitvecSort(n) => {
                 format!("aig: node {n} has a sort the bit-level engines take no values of")
@@ -870,6 +1070,16 @@ impl AigModel {
             }
         }
         drop(backend);
+        if let Some(stop) = aig.tripped.take() {
+            return Err(stop);
+        }
+        // The limits were the BUILD's: a finished model keeps no clock, no flag and no poll, so
+        // a later extension of the graph cannot be answered with silent FALSE literals (the
+        // hard cap of the literal space is the one bound that stays).
+        aig.cap = MAX_NODES;
+        aig.deadline = None;
+        aig.cancel = None;
+        aig.polling = false;
         Ok(Self {
             aig,
             states,
@@ -1081,6 +1291,109 @@ mod tests {
     fn an_array_design_is_refused_with_its_name() {
         let text = "1 sort bitvec 2\n2 sort bitvec 4\n3 sort array 1 2\n4 state 3 mem\n";
         let err = AigModel::build(&parser::parse(text).unwrap()).unwrap_err();
-        assert!(err.contains("`mem` is an array"), "{err}");
+        assert!(err.to_string().contains("`mem` is an array"), "{err}");
+    }
+
+    /// mununu#1142 — the build stops at the node cap with the count, names the variable that
+    /// raises it, and creates nothing past the cap.
+    #[test]
+    fn x1142_the_build_stops_at_the_node_cap_and_names_the_count() {
+        let text = "1 sort bitvec 8\n2 state 1 a\n3 input 1 b\n4 add 1 2 3\n5 mul 1 4 4\n\
+                    6 next 1 2 5\n7 sort bitvec 1\n8 redor 7 5\n9 bad 8\n";
+        let file = parser::parse(text).unwrap();
+        let full = AigModel::build(&file).unwrap();
+        assert!(full.aig.len() > 40, "{}", full.aig.len());
+        let limits = BuildLimits {
+            node_cap: Some(40),
+            ..Default::default()
+        };
+        match AigModel::build_with(&file, &limits) {
+            Err(BuildStop::NodeCap { nodes, cap }) => {
+                assert_eq!((nodes, cap), (40, 40));
+                let text = BuildStop::NodeCap { nodes, cap }.to_string();
+                assert!(text.contains("MUNUNU_AIG_NODE_CAP"), "{text}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Past the cap the graph creates nothing: a direct user sees the trip and FALSE answers.
+        let mut aig = Aig::with_limits(&limits);
+        let leaves = aig.leaves(60);
+        assert_eq!(aig.len(), 40, "nothing past the cap");
+        assert!(matches!(aig.tripped(), Some(BuildStop::NodeCap { .. })));
+        assert!(leaves[41..].iter().all(|l| *l == Lit::FALSE));
+    }
+
+    /// mununu#1142 — a cancel flag already up, or a deadline already past, stops the build at
+    /// its first node with the count; a fresh run budget that has expired does the same.
+    #[test]
+    fn x1142_a_cancelled_or_expired_build_stops_at_once() {
+        let text = "1 sort bitvec 4\n2 state 1 a\n3 input 1 b\n4 add 1 2 3\n5 next 1 2 4\n\
+                    6 sort bitvec 1\n7 redor 6 4\n8 bad 7\n";
+        let file = parser::parse(text).unwrap();
+        let cancelled = BuildLimits::member(None, Some(Arc::new(AtomicBool::new(true))));
+        assert!(matches!(
+            AigModel::build_with(&file, &cancelled),
+            Err(BuildStop::Cancelled { nodes: 1 })
+        ));
+        let late = BuildLimits::member(Some(Instant::now()), None);
+        assert!(matches!(
+            AigModel::build_with(&file, &late),
+            Err(BuildStop::Deadline { nodes: 1 })
+        ));
+        // A finished model keeps no limit: the graph can grow past the build's cap afterwards.
+        let mut done = AigModel::build(&file).expect("builds");
+        let before = done.aig.len();
+        done.aig.leaves(4);
+        assert_eq!(done.aig.len(), before + 4);
+        assert!(done.aig.tripped().is_none());
+        let expired = crate::adapter::run_budget::Budget::with_ms(0);
+        let _g = crate::adapter::run_budget::enter(&expired);
+        assert!(matches!(
+            AigModel::build(&file),
+            Err(BuildStop::RunBudget { nodes: 1 })
+        ));
+        // Every stop names its count, and the texts are told apart.
+        for stop in [
+            BuildStop::NodeCap { nodes: 40, cap: 40 },
+            BuildStop::NodeCap {
+                nodes: 7,
+                cap: MAX_NODES,
+            },
+            BuildStop::Deadline { nodes: 7 },
+            BuildStop::RunBudget { nodes: 7 },
+            BuildStop::Cancelled { nodes: 7 },
+        ] {
+            let text = stop.to_string();
+            assert!(
+                text.starts_with("aig: ") && text.contains(" nodes"),
+                "{text}"
+            );
+        }
+        assert!(
+            BuildStop::NodeCap { nodes: 40, cap: 40 }
+                .to_string()
+                .contains("MUNUNU_AIG_NODE_CAP")
+        );
+        assert!(
+            !BuildStop::NodeCap {
+                nodes: 7,
+                cap: MAX_NODES
+            }
+            .to_string()
+            .contains("MUNUNU_AIG_NODE_CAP"),
+            "the hard cap offers no variable"
+        );
+    }
+
+    /// mununu#1142 — the cap variable: unset is the default, a count is clamped to the literal
+    /// space, junk is the default.
+    #[test]
+    fn the_node_cap_variable_is_a_clamped_count() {
+        assert_eq!(node_cap_from(None), DEFAULT_NODE_CAP);
+        assert_eq!(node_cap_from(Some("")), DEFAULT_NODE_CAP);
+        assert_eq!(node_cap_from(Some("1000")), 1000);
+        assert_eq!(node_cap_from(Some("99999999999")), MAX_NODES);
+        assert_eq!(node_cap_from(Some("0")), DEFAULT_NODE_CAP);
+        assert_eq!(node_cap_from(Some("lots")), DEFAULT_NODE_CAP);
     }
 }

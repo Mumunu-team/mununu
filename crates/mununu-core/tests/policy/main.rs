@@ -17,5 +17,6 @@ mod no_links_into_untracked_paths_g4;
 mod one_yosys_minimum_version_1121;
 mod remedies_name_real_flags_1106;
 mod remedies_on_the_verb_1121;
+mod server_paths_resolve_through_one_function;
 mod source_scan;
 mod third_party_inventory_g1;

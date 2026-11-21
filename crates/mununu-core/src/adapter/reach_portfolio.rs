@@ -295,17 +295,15 @@ fn settle<T>(
 fn settle_subprocess(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    decided: &std::sync::atomic::AtomicBool,
-    clock_stop: &std::sync::atomic::AtomicBool,
+    stop: &StopSignal,
     member: &'static str,
     timeout: std::time::Duration,
     r: Result<Option<McVerdict>, String>,
 ) -> Option<McVerdict> {
-    use std::sync::atomic::Ordering::Relaxed;
     let v = settle(refused, member, r);
-    // mununu#1043 — a member stopped by the wall or the budget raising `decided` is recorded
+    // mununu#1043 — a member stopped by the wall or the budget raising the flag is recorded
     // too; only a stop because a peer decided is in no list.
-    if v == Some(McVerdict::Unknown) && (!decided.load(Relaxed) || clock_stop.load(Relaxed)) {
+    if v == Some(McVerdict::Unknown) && (!stop.is_raised() || stop.clock_stopped()) {
         note_refusal(
             abstained,
             member,
@@ -373,13 +371,128 @@ pub(crate) enum MemberStop {
     /// mununu#1043 — stopped because the portfolio's shared stop flag was raised, with the
     /// progress it had made. The flag goes up when a peer decides (then the stop is in no list)
     /// and, in the full driver, when the wall or the run budget fires (then it is a budget
-    /// abstention, and the progress is its cause): [`settle_native`] tells the two apart.
+    /// abstention, and the progress is its cause): [`settle_native`] tells the two apart by the
+    /// flag's [`StopCause`].
     Cancelled(String),
 }
 
-/// mununu#1043 — no clock stop: the `--owned-only` driver has no watchdog, so its shared flag
-/// is raised only by a peer's verdict.
-static NO_CLOCK_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Why a portfolio's shared stop flag went up: the one type that carries the reason
+/// (`member-stop-reason` in `docs/defect-classes.md`). One flag used to mean all four, and
+/// mununu#1028, #1044 and #1067 each peeled one meaning off into a flag of its own. The matches
+/// on this enum are exhaustive ([`StopCause::is_clock`], [`StopCause::sweep_cause`],
+/// [`StopSignal::raise`]), so a new cause does not compile until each says where it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopCause {
+    /// A member reached a trusted definite verdict.
+    PeerDecided,
+    /// The caller cancelled the run (another rung won): a caller's decision, not a clock.
+    CallerCancelled,
+    /// The portfolio's own wall fired (mununu#1039).
+    Wall,
+    /// The run budget expired or was cancelled (mununu#1043).
+    RunBudget,
+}
+
+impl StopCause {
+    /// Whether a member this stop caught mid-search is reported. A clock stop is a budget
+    /// abstention carrying the member's progress; a peer's verdict or the caller's cancellation
+    /// means the member was not needed, and it is in no list.
+    fn is_clock(self) -> bool {
+        match self {
+            StopCause::Wall | StopCause::RunBudget => true,
+            StopCause::PeerDecided | StopCause::CallerCancelled => false,
+        }
+    }
+
+    /// mununu#1039 / #1043 — the cause the post-join sweep gives a member this stop left with
+    /// no verdict and no stop of its own on record; `None` when such a member stays in no list.
+    fn sweep_cause(self, wall_ms: u128) -> Option<String> {
+        match self {
+            StopCause::Wall => Some(clock_sweep_cause(true, wall_ms)),
+            StopCause::RunBudget => Some(clock_sweep_cause(false, wall_ms)),
+            StopCause::PeerDecided | StopCause::CallerCancelled => None,
+        }
+    }
+
+    const fn code(self) -> u8 {
+        match self {
+            StopCause::PeerDecided => 1,
+            StopCause::CallerCancelled => 2,
+            StopCause::Wall => 3,
+            StopCause::RunBudget => 4,
+        }
+    }
+
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(StopCause::PeerDecided),
+            2 => Some(StopCause::CallerCancelled),
+            3 => Some(StopCause::Wall),
+            4 => Some(StopCause::RunBudget),
+            _ => None,
+        }
+    }
+}
+
+/// A portfolio run's shared stop flag, with why it went up. The engines poll the flag
+/// ([`StopSignal::flag`]); the code that reports a stopped member reads the cause
+/// ([`StopSignal::cause`]).
+///
+/// The cause is written before the flag and both are `Relaxed`, as the two flags this replaces
+/// were (`clock_stop` before `decided`): a member may stop on the flag and still read no cause.
+/// It then records nothing itself, exactly as when the stop is a peer's, and the post-join sweep
+/// names it with the clock's cause, so the stop is never silent; only the member's own progress
+/// is lost in that window.
+#[derive(Debug, Default)]
+pub(crate) struct StopSignal {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cause: std::sync::atomic::AtomicU8,
+}
+
+impl StopSignal {
+    /// Raise the flag for `cause`. A clock's cause replaces a peer's or the caller's (the
+    /// watchdog checks the flag, then the clock: a verdict that lands between the two does not
+    /// stop the clock from being recorded); a peer's or the caller's never replaces a cause
+    /// already there.
+    fn raise(&self, cause: StopCause) {
+        use std::sync::atomic::Ordering::Relaxed;
+        match cause {
+            StopCause::Wall | StopCause::RunBudget => self.cause.store(cause.code(), Relaxed),
+            StopCause::PeerDecided | StopCause::CallerCancelled => {
+                // A cause already recorded stays: losing this exchange is the intended outcome.
+                let _ = self
+                    .cause
+                    .compare_exchange(0, cause.code(), Relaxed, Relaxed);
+            }
+        }
+        self.flag.store(true, Relaxed);
+    }
+
+    /// Whether the flag is up.
+    fn is_raised(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Why the flag went up; `None` while it is down, or in the window described on the type.
+    fn cause(&self) -> Option<StopCause> {
+        StopCause::from_code(self.cause.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Whether a clock raised the flag ([`StopCause::is_clock`]).
+    fn clock_stopped(&self) -> bool {
+        self.cause().is_some_and(StopCause::is_clock)
+    }
+
+    /// The flag the engines poll.
+    fn flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.flag
+    }
+
+    /// The flag, for an engine that keeps it.
+    fn flag_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.flag)
+    }
+}
 
 impl From<native_bmc::BmcError> for MemberStop {
     fn from(e: native_bmc::BmcError) -> Self {
@@ -399,7 +512,7 @@ fn settle_native<T>(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
     undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    clock_stop: &std::sync::atomic::AtomicBool,
+    stop: &StopSignal,
     member: &'static str,
     r: Result<Option<T>, MemberStop>,
 ) -> Option<T> {
@@ -408,7 +521,7 @@ fn settle_native<T>(
         Err(MemberStop::Cancelled(progress)) => {
             // mununu#1043 — the flag the member stopped on was the wall's or the budget's, not a
             // peer's verdict: a budget abstention, with the member's own progress as its cause.
-            if clock_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            if stop.clock_stopped() {
                 note_refusal(abstained, member, clock_stopped(&progress));
             }
             None
@@ -500,6 +613,28 @@ fn run_native(
 /// geometrically, so the bound costs nothing on a design whose counterexample is shallow; the
 /// deepest one it decided on HWMCC'20 is `mul9` at 126 (rIC3's dynamic step found 238).
 const SAT_BMC_MAX_DEPTH: u32 = 1_000;
+/// mununu#1142 — the one AIG model of a run, shared by the owned SAT BMC and the owned IC3:
+/// whichever member gets there first builds it under its own deadline and cancel flag (the two
+/// members share both), the other waits for it; a stopped build is the abstention of both.
+pub(crate) type SharedAig = std::sync::OnceLock<
+    Result<crate::adapter::btor2::aig::AigModel, crate::adapter::btor2::aig::BuildStop>,
+>;
+
+/// The shared model, built on first use under the member's limits.
+fn shared_aig<'a>(
+    aig: &'a SharedAig,
+    file: &Btor2File,
+    deadline: std::time::Instant,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> &'a Result<crate::adapter::btor2::aig::AigModel, crate::adapter::btor2::aig::BuildStop> {
+    use crate::adapter::btor2::aig::{AigModel, BuildLimits};
+    aig.get_or_init(|| {
+        AigModel::build_with(
+            file,
+            &BuildLimits::member(Some(deadline), Some(std::sync::Arc::clone(cancel))),
+        )
+    })
+}
 
 /// N5.4 — the owned **SAT BMC** member: bit-level BMC over the AIG model on in-process CaDiCaL
 /// ([`sat_bmc`](crate::adapter::btor2::sat_bmc)) with the dynamic step, the owned counterpart of
@@ -512,8 +647,8 @@ fn run_sat_bmc(
     deadline: std::time::Instant,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     carried: Option<&Carried>,
+    aig: &SharedAig,
 ) -> Result<Option<bool>, MemberStop> {
-    use crate::adapter::btor2::aig::AigModel;
     use crate::adapter::btor2::sat_bmc::{self, DynamicStep, SatBmcOptions, SatBmcOutcome};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
     let opts = SatBmcOptions {
@@ -523,36 +658,45 @@ fn run_sat_bmc(
         dynamic_step: Some(DynamicStep::default()),
         ..Default::default()
     };
-    // N5.4 — with a witness asked for, the model is kept so the counterexample's BTOR2 witness
-    // (the format the tier replays) can be built from it and replayed; the search is the same.
+    // mununu#1142 — one model per run, shared with the owned IC3. N5.4 — with a witness asked
+    // for, the counterexample's BTOR2 witness (the format the tier replays) is built from the
+    // model and replayed; the search is the same.
     let run = || -> Result<SatBmcOutcome, String> {
-        match carried {
-            None => sat_bmc::sat_bmc(file, &opts),
-            Some(carried) => {
-                let model = AigModel::build(file)?;
-                let outcome = sat_bmc::sat_bmc_model(&model, &opts)?;
-                if let Some(witness) = sat_bmc::btor2_witness(&model, &outcome) {
-                    // mununu#1057 — the member says whether it refuted every shorter depth.
-                    let shortest = match &outcome {
-                        SatBmcOutcome::Violated {
-                            depth,
-                            refuted_below,
-                            ..
-                        } => Some(refuted_below == depth),
-                        _ => None,
-                    };
-                    carried.carry(
-                        "sat-bmc",
-                        replayed_subprocess_witness(file, &witness),
-                        shortest,
-                    );
-                }
-                Ok(outcome)
-            }
+        let built = shared_aig(aig, file, deadline, &cancel);
+        let outcome = sat_bmc::sat_bmc_built(built, &opts)?;
+        if let (Some(carried), Ok(model)) = (carried, built)
+            && let Some(witness) = sat_bmc::btor2_witness(model, &outcome)
+        {
+            // mununu#1057 — the member says whether it refuted every shorter depth.
+            let shortest = match &outcome {
+                SatBmcOutcome::Violated {
+                    depth,
+                    refuted_below,
+                    ..
+                } => Some(refuted_below == depth),
+                _ => None,
+            };
+            carried.carry(
+                "sat-bmc",
+                replayed_subprocess_witness(file, &witness),
+                shortest,
+            );
         }
+        Ok(outcome)
     };
     timed("sat-bmc", || match run() {
         Ok(SatBmcOutcome::Violated { .. }) => Ok(Some(true)),
+        // mununu#1142 — a build that stopped (the cap, the wall, a peer's verdict) is a
+        // `Stopped` at depth 0 carrying the build's reason: a cancelled one keeps the reason
+        // (the model was never built — "every depth below 0 refuted" says nothing).
+        Ok(SatBmcOutcome::Stopped { depth: 0, reason }) if reason.starts_with("aig:") => {
+            let why = format!("SAT BMC stopped before its first depth ({reason})");
+            Err(if cancelled() {
+                MemberStop::Cancelled(why)
+            } else {
+                MemberStop::Abstained(why)
+            })
+        }
         Ok(SatBmcOutcome::Stopped { depth, .. }) if cancelled() => Err(MemberStop::Cancelled(
             format!("SAT BMC stopped; every depth below {depth} refuted"),
         )),
@@ -578,6 +722,7 @@ fn run_ic3(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     store: &Carried,
     witness: bool,
+    aig: &SharedAig,
 ) -> Result<Option<bool>, MemberStop> {
     use crate::adapter::btor2::ic3::{self, Ic3Options, Ic3Outcome, Replay};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -586,38 +731,53 @@ fn run_ic3(
         cancel: Some(std::sync::Arc::clone(&cancel)),
         max_frames: None,
     };
-    timed("ic3", || match ic3::ic3(file, &opts) {
-        Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
-        Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
-            // N5.4 — the engine replayed the trace already; with a witness asked for it is
-            // carried out as it is. A design the simulator cannot carry ships unreplayed and the
-            // report says so whether or not a witness was asked for: before mununu#1143 the
-            // reason went to the log alone and the verdict read like a replayed one.
-            // SOUNDNESS: the verdict is the engine's concretised counterexample, unconfirmed by
-            // the simulator; it is listed in `trace_replay_failed` (`sole_decider` when it is
-            // the whole verdict), which `btor2 verify` prints on CLI and API — the other verbs
-            // drop the list on their way to the report (mununu#1175).
-            match replay {
-                Replay::Confirmed(trace) if witness => store.carry("ic3", Ok(trace), None),
-                Replay::Confirmed(_) => {}
-                Replay::Unavailable(why) => {
-                    tracing::info!(
-                        depth,
-                        why,
-                        "ic3: the counterexample ships without a simulator replay"
-                    );
-                    store.carry("ic3", Err(format!("not replayed: {why}")), None);
+    // mununu#1142 — one model per run, shared with the owned SAT BMC; built inside the timed
+    // span, as the SAT member's is, so the two attribute the build alike.
+    timed("ic3", || {
+        let built = shared_aig(aig, file, deadline, &cancel);
+        match ic3::ic3_built(file, built, &opts) {
+            Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
+            Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
+                // N5.4 — the engine replayed the trace already; with a witness asked for it is
+                // carried out as it is. A design the simulator cannot carry ships unreplayed and
+                // the report says so whether or not a witness was asked for: before mununu#1143
+                // the reason went to the log alone and the verdict read like a replayed one.
+                // SOUNDNESS: the verdict is the engine's concretised counterexample, unconfirmed
+                // by the simulator; it is listed in `trace_replay_failed` (`sole_decider` when it
+                // is the whole verdict), which `btor2 verify` prints on CLI and API — the other
+                // verbs drop the list on their way to the report (mununu#1175).
+                match replay {
+                    Replay::Confirmed(trace) if witness => store.carry("ic3", Ok(trace), None),
+                    Replay::Confirmed(_) => {}
+                    Replay::Unavailable(why) => {
+                        tracing::info!(
+                            depth,
+                            why,
+                            "ic3: the counterexample ships without a simulator replay"
+                        );
+                        store.carry("ic3", Err(format!("not replayed: {why}")), None);
+                    }
                 }
+                Ok(Some(true))
             }
-            Ok(Some(true))
+            // mununu#1142 — a build that stopped is a `Stopped` at frame 0 carrying the build's
+            // reason; a cancelled one keeps the reason (the model was never built).
+            Ok(Ic3Outcome::Stopped { frames: 0, reason }) if reason.starts_with("aig:") => {
+                let why = format!("IC3 stopped at frame 0 ({reason})");
+                Err(if cancelled() {
+                    MemberStop::Cancelled(why)
+                } else {
+                    MemberStop::Abstained(why)
+                })
+            }
+            Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
+                format!("IC3 stopped at frame {frames}"),
+            )),
+            Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
+                "IC3 stopped at frame {frames} ({reason})"
+            ))),
+            Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
         }
-        Ok(Ic3Outcome::Stopped { frames, .. }) if cancelled() => Err(MemberStop::Cancelled(
-            format!("IC3 stopped at frame {frames}"),
-        )),
-        Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
-            "IC3 stopped at frame {frames} ({reason})"
-        ))),
-        Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
     })
 }
 
@@ -682,13 +842,13 @@ fn interp_search(
 /// found before the search and so recorded on every run whatever a peer did (as every other
 /// member locates its tool first); a search that ends undecided is `undecided`, unless the member
 /// stopped because a peer had already decided. mununu#1043 — a search stopped on the shared flag
-/// when the wall or the run budget raised it (`clock_stop`) is a budget abstention with its reason.
+/// when the wall or the run budget raised it ([`StopCause::is_clock`]) is a budget abstention with
+/// its reason.
 fn interp_member(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
     undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
-    cancel: &std::sync::atomic::AtomicBool,
-    clock_stop: &std::sync::atomic::AtomicBool,
+    stop: &StopSignal,
     available: Result<(), String>,
     search: impl FnOnce() -> InterpSafetyVerdict,
 ) -> Option<bool> {
@@ -700,10 +860,9 @@ fn interp_member(
         InterpSafetyVerdict::Unsafe { .. } => Some(true),
         InterpSafetyVerdict::Safe { .. } => Some(false),
         InterpSafetyVerdict::Undecided { reason } => {
-            use std::sync::atomic::Ordering::Relaxed;
-            if !cancel.load(Relaxed) {
+            if !stop.is_raised() {
                 note_refusal(undecided, "interp", reason);
-            } else if clock_stop.load(Relaxed) {
+            } else if stop.clock_stopped() {
                 note_refusal(abstained, "interp", clock_stopped(&reason));
             }
             None
@@ -1234,6 +1393,7 @@ type OwnedRunner = fn(
     std::time::Instant,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     Option<&Carried>,
+    &SharedAig,
 ) -> Result<Option<bool>, MemberStop>;
 
 /// The native member's runner ([`run_native`]): the design, the shared stop flag, the per-check
@@ -1246,6 +1406,7 @@ type Ic3Runner = fn(
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     &Carried,
     bool,
+    &SharedAig,
 ) -> Result<Option<bool>, MemberStop>;
 
 type NativeRunner = fn(
@@ -1415,8 +1576,10 @@ fn decide_with_members_using(
     // the slowest member's timeout. A member still running when the flag is set is not
     // cross-checked, exactly as in the owned-only driver; every member is individually
     // sound, so the decision itself is.
-    let decided_flag = std::sync::Arc::new(AtomicBool::new(false));
-    let decided: &AtomicBool = &decided_flag;
+    let stop_signal = std::sync::Arc::new(StopSignal::default());
+    let stop: &StopSignal = &stop_signal;
+    let decided_flag = stop.flag_arc();
+    let decided: &AtomicBool = stop.flag();
     let finished = AtomicBool::new(false);
     let finished = &finished;
     let budget = &budget;
@@ -1439,6 +1602,9 @@ fn decide_with_members_using(
     // store whether or not a witness was asked for.
     let ic3_store: &Carried = &carried_store;
     let witness = members.witness;
+    // mununu#1142 — one AIG model for the two owned bit-level members.
+    let shared_aig = SharedAig::new();
+    let shared_aig = &shared_aig;
     // mununu#996 — the exact member runs on a DETACHED thread and reports over a channel, so the
     // join can leave it behind. It has no cancellation point inside one OxiDD apply (#816 polls
     // the budget only between stages), and when it ran on the calling thread it held the
@@ -1451,12 +1617,12 @@ fn decide_with_members_using(
     // subprocess members; every member is individually sound, so the decision itself is.
     let exact_rx = members.exact.then(|| {
         let (tx, rx) = std::sync::mpsc::channel();
-        let (decided, budget) = (std::sync::Arc::clone(&decided_flag), budget.clone());
+        let (stop, budget) = (std::sync::Arc::clone(&stop_signal), budget.clone());
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let r = (runners.exact)(&content);
             if matches!(r, Ok(Some(_))) {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(r);
         });
@@ -1468,12 +1634,9 @@ fn decide_with_members_using(
     // a z3 rlimit, deterministic but not a wall, and on a loaded host one check ran 70 s past the
     // wall, or past an outer `timeout`, which then killed the run before any JSON was written.
     let wall_deadline = std::time::Instant::now() + subprocess_timeout + STRAGGLER_GRACE;
-    let wall_fired = AtomicBool::new(false);
-    let wall_fired = &wall_fired;
-    // mununu#1043 — set beside `decided` when the wall or the run budget fires, so a member that
-    // stops on the flag can tell a clock stop (a budget abstention) from a peer's verdict.
-    let clock_stop = AtomicBool::new(false);
-    let clock_stop = &clock_stop;
+    // mununu#1043 — the wall and the run budget raise the flag with their own cause
+    // ([`StopCause`]), so a member that stops on the flag can tell a clock stop (a budget
+    // abstention) from a peer's verdict.
     let started = members;
     let mut members = std::thread::scope(|scope| {
         // Forward an external cancellation, the budget's expiry, or the portfolio's wall into
@@ -1489,22 +1652,19 @@ fn decide_with_members_using(
                 }
                 // An external cancellation is a caller's decision (another rung won): no clock.
                 if cancel.is_some_and(|c| c.load(Relaxed)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::CallerCancelled);
                     break;
                 }
-                // `clock_stop` goes up before `decided`, but both are `Relaxed`: a member may stop
-                // on `decided` and still read `clock_stop` clear. It then records nothing itself,
+                // The cause goes up before the flag, both `Relaxed` ([`StopSignal`]): a member
+                // may stop on the flag and still read no cause. It then records nothing itself,
                 // and the post-join sweep below names it with the clock's cause, so the stop is
                 // never silent; only the member's own progress is lost in that window.
                 if budget.expired() {
-                    clock_stop.store(true, Relaxed);
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::RunBudget);
                     break;
                 }
                 if std::time::Instant::now() >= wall_deadline {
-                    wall_fired.store(true, Relaxed);
-                    clock_stop.store(true, Relaxed);
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::Wall);
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1514,17 +1674,10 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = (runners.btormc)(file, btormc_kmax, subprocess_timeout, decided, carried);
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "btormc",
-                    subprocess_timeout,
-                    v,
-                );
+                let v =
+                    settle_subprocess(refused, abstained, stop, "btormc", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1533,17 +1686,9 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = (runners.pono)(file, subprocess_timeout, decided);
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "pono",
-                    subprocess_timeout,
-                    v,
-                );
+                let v = settle_subprocess(refused, abstained, stop, "pono", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1563,17 +1708,9 @@ fn decide_with_members_using(
                     decided,
                     carried,
                 );
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "ric3",
-                    subprocess_timeout,
-                    v,
-                );
+                let v = settle_subprocess(refused, abstained, stop, "ric3", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1585,17 +1722,10 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = (runners.ric3_bmc)(file, subprocess_timeout, decided, carried);
-                let v = settle_subprocess(
-                    refused,
-                    abstained,
-                    decided,
-                    clock_stop,
-                    "ric3-bmc",
-                    subprocess_timeout,
-                    v,
-                );
+                let v =
+                    settle_subprocess(refused, abstained, stop, "ric3-bmc", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated)) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1612,12 +1742,12 @@ fn decide_with_members_using(
                     refused,
                     abstained,
                     undecided,
-                    clock_stop,
+                    stop,
                     "sat-bmc",
-                    (runners.sat_bmc)(file, deadline, cancel, carried),
+                    (runners.sat_bmc)(file, deadline, cancel, carried, shared_aig),
                 );
                 if v == Some(true) {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1634,12 +1764,12 @@ fn decide_with_members_using(
                     refused,
                     abstained,
                     undecided,
-                    clock_stop,
+                    stop,
                     "ic3",
-                    (runners.ic3)(file, deadline, cancel, ic3_store, witness),
+                    (runners.ic3)(file, deadline, cancel, ic3_store, witness, shared_aig),
                 );
                 if v.is_some() {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1654,12 +1784,12 @@ fn decide_with_members_using(
                     refused,
                     abstained,
                     undecided,
-                    clock_stop,
+                    stop,
                     "native",
                     (runners.native)(file, Some(decided), t.native_query_ms, Some(wall_deadline)),
                 );
                 if v.is_some() {
-                    decided.store(true, Relaxed);
+                    stop.raise(StopCause::PeerDecided);
                 }
                 v
             })
@@ -1674,8 +1804,7 @@ fn decide_with_members_using(
                         refused,
                         abstained,
                         undecided,
-                        decided,
-                        clock_stop,
+                        stop,
                         (runners.interp_available)(),
                         || (runners.interp_search)(file, decided, t),
                     )
@@ -1743,8 +1872,11 @@ fn decide_with_members_using(
     // stop recorded nothing for a member that had not noted its own cause).
     // A definite verdict means a peer stopped the rest, which stays in no list, even when the
     // clock rose in the same instant (the watchdog's check races the peer's store).
-    if clock_stop.load(Relaxed) && !any_definite(&members) {
-        let cause = clock_sweep_cause(wall_fired.load(Relaxed), subprocess_timeout.as_millis());
+    if let Some(cause) = stop
+        .cause()
+        .and_then(|c| c.sweep_cause(subprocess_timeout.as_millis()))
+        && !any_definite(&members)
+    {
         for name in stopped_by_wall_unrecorded(&started, &members) {
             members.abstained.push((name, cause.clone()));
         }
@@ -1781,7 +1913,7 @@ fn any_definite(m: &Members) -> bool {
 fn stopped_by_wall_unrecorded(started: &ReachMembers, m: &Members) -> Vec<&'static str> {
     // A subprocess member's `Some(Unknown)` is no verdict. `settle_subprocess` records its timeout
     // note on a clock stop (#1043), so the sweep only names one that settled before it saw
-    // `clock_stop`.
+    // the clock's cause.
     let definite = |v: Option<McVerdict>| matches!(v, Some(McVerdict::Violated | McVerdict::Safe));
     let ran: [(&'static str, bool, bool); 9] = [
         ("exact", started.exact, m.exact.is_some()),
@@ -1959,7 +2091,6 @@ fn decide_owned_only_using(
     witness: bool,
     runners: &Runners,
 ) -> ReachOutcome {
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::{Arc, mpsc};
     let runners = *runners;
     if let Some(outcome) = no_obligation(file) {
@@ -1967,6 +2098,8 @@ fn decide_owned_only_using(
     }
     // N5.4 — where the carrying members leave their trace; read at return.
     let carried_store: Arc<Carried> = Arc::default();
+    // mununu#1142 — one AIG model for the two owned bit-level members.
+    let shared_aig: Arc<SharedAig> = Arc::default();
     // mununu#803 — a member's refusal (an `Err`, not an abstention) is kept here as the scoped
     // driver keeps it; the detached threads share the list through an `Arc`.
     let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
@@ -2007,7 +2140,10 @@ fn decide_owned_only_using(
     // is itself sound.
     let file = Arc::new(file.clone());
     let content = Arc::new(emit_btor2(&file));
-    let decided = Arc::new(AtomicBool::new(false));
+    // This driver has no watchdog: its flag is raised only by a member's verdict, so a member
+    // that stops on it is in no list (mununu#1043).
+    let stop = Arc::new(StopSignal::default());
+    let decided = stop.flag_arc();
     let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
     let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
     // The members this run starts, each sending its name once ([`owned_members`]); a member
@@ -2033,6 +2169,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("native", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#893 — `timeout_ms` is the member's NOMINAL per-check allowance (a resource
@@ -2043,12 +2180,12 @@ fn decide_owned_only_using(
                 &refused,
                 &abstained,
                 &undecided,
-                &NO_CLOCK_STOP,
+                &stop,
                 "native",
                 (runners.native)(&file, Some(&decided), t.native_query_ms, Some(deadline)),
             );
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("native", OwnedReport::Verdict(v)));
         });
@@ -2064,6 +2201,7 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("interp", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("interp", || {
@@ -2071,14 +2209,13 @@ fn decide_owned_only_using(
                     &refused,
                     &abstained,
                     &undecided,
-                    &decided,
-                    &NO_CLOCK_STOP,
+                    &stop,
                     (runners.interp_available)(),
                     || (runners.interp_search)(&file, &decided, t),
                 )
             });
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("interp", OwnedReport::Verdict(v)));
         });
@@ -2090,6 +2227,7 @@ fn decide_owned_only_using(
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("boolector", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("boolector", || {
@@ -2101,7 +2239,7 @@ fn decide_owned_only_using(
                 )
             });
             if v == Some(true) {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("boolector", OwnedReport::Verdict(v)));
         });
@@ -2117,16 +2255,17 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("cex", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#955 — a budget stop (the deadline, the resource limit) is an abstention with
             // its cause, an encoder refusal a refusal, as for the native member above.
             let hit = timed("cex", || {
                 let r = (runners.cex)(&file, deadline, &decided);
-                settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "cex", r).is_some()
+                settle_native(&refused, &abstained, &undecided, &stop, "cex", r).is_some()
             });
             if hit {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send((
                 "cex",
@@ -2148,20 +2287,21 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         let carried = witness.then(|| Arc::clone(&carried_store));
+        let aig = Arc::clone(&shared_aig);
         spawn_owned("sat-bmc", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = (runners.sat_bmc)(&file, deadline, Arc::clone(&decided), carried.as_deref());
-            let v = settle_native(
-                &refused,
-                &abstained,
-                &undecided,
-                &NO_CLOCK_STOP,
-                "sat-bmc",
-                r,
+            let r = (runners.sat_bmc)(
+                &file,
+                deadline,
+                Arc::clone(&decided),
+                carried.as_deref(),
+                &aig,
             );
+            let v = settle_native(&refused, &abstained, &undecided, &stop, "sat-bmc", r);
             if v == Some(true) {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("sat-bmc", OwnedReport::Verdict(v)));
         });
@@ -2179,33 +2319,31 @@ fn decide_owned_only_using(
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         let store = Arc::clone(&carried_store);
+        let aig = Arc::clone(&shared_aig);
         spawn_owned("ic3", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), &store, witness);
-            let v = settle_native(&refused, &abstained, &undecided, &NO_CLOCK_STOP, "ic3", r);
+            let r = (runners.ic3)(&file, deadline, Arc::clone(&decided), &store, witness, &aig);
+            let v = settle_native(&refused, &abstained, &undecided, &stop, "ic3", r);
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("ic3", OwnedReport::Verdict(v)));
         });
     }
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
     {
-        let (content, decided, tx, refused) = (
-            Arc::clone(&content),
-            Arc::clone(&decided),
-            tx.clone(),
-            Arc::clone(&refused),
-        );
+        let (content, tx, refused) = (Arc::clone(&content), tx.clone(), Arc::clone(&refused));
         let budget = budget.clone();
+        let stop = Arc::clone(&stop);
         spawn_owned("exact", tx.clone(), move || {
             let _g = crate::adapter::run_budget::enter(&budget);
             // mununu#873 — a refusal (over-cap cone, free init) is an abstention AND a recorded
             // reason, as in the scoped driver; it used to be dropped here.
             let v = settle(&refused, "exact", (runners.exact)(&content));
             if v.is_some() {
-                decided.store(true, Relaxed);
+                stop.raise(StopCause::PeerDecided);
             }
             let _ = tx.send(("exact", OwnedReport::Verdict(v)));
         });
@@ -2479,6 +2617,126 @@ mod tests {
     use crate::adapter::btor2::cex_value::CexValue;
     use crate::adapter::btor2::parser;
 
+    /// A stop flag already up for `cause`.
+    fn raised(cause: StopCause) -> StopSignal {
+        let stop = StopSignal::default();
+        stop.raise(cause);
+        stop
+    }
+
+    /// `member-stop-reason` — every cause, and where a member it stopped goes. The first match
+    /// is exhaustive, so a new [`StopCause`] does not compile until it has a row here.
+    #[test]
+    fn every_stop_cause_reports_a_stopped_member_where_its_kind_goes() {
+        fn all(any: StopCause) -> [(StopCause, bool); 4] {
+            match any {
+                StopCause::PeerDecided
+                | StopCause::CallerCancelled
+                | StopCause::Wall
+                | StopCause::RunBudget => [
+                    (StopCause::PeerDecided, false),
+                    (StopCause::CallerCancelled, false),
+                    (StopCause::Wall, true),
+                    (StopCause::RunBudget, true),
+                ],
+            }
+        }
+        let lists = || {
+            (
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+            )
+        };
+        let wall = std::time::Duration::from_millis(60_000);
+        for (cause, clock) in all(StopCause::PeerDecided) {
+            assert_eq!(StopCause::from_code(cause.code()), Some(cause));
+            assert_eq!(cause.is_clock(), clock, "{cause:?}");
+            assert_eq!(cause.sweep_cause(60_000).is_some(), clock, "{cause:?}");
+            let stop = raised(cause);
+            assert!(stop.is_raised());
+            assert_eq!(stop.cause(), Some(cause));
+            // An owned member stopped mid-search: a budget abstention with its progress under a
+            // clock, in no list otherwise.
+            let (refused, abstained, undecided) = lists();
+            let v: Option<bool> = settle_native(
+                &refused,
+                &abstained,
+                &undecided,
+                &stop,
+                "ic3",
+                Err(MemberStop::Cancelled("at frame 2".into())),
+            );
+            assert_eq!(v, None);
+            let want = if clock {
+                vec![("ic3", clock_stopped("at frame 2"))]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*abstained.lock().unwrap(), want, "{cause:?}");
+            assert!(refused.lock().unwrap().is_empty() && undecided.lock().unwrap().is_empty());
+            // The interpolation search, stopped the same way.
+            let (refused, abstained, undecided) = lists();
+            interp_member(&refused, &abstained, &undecided, &stop, Ok(()), || {
+                InterpSafetyVerdict::Undecided {
+                    reason: "no fixpoint".into(),
+                }
+            });
+            let want = if clock {
+                vec![("interp", clock_stopped("no fixpoint"))]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*abstained.lock().unwrap(), want, "{cause:?}");
+            assert!(refused.lock().unwrap().is_empty() && undecided.lock().unwrap().is_empty());
+            // A killed child: its budget note under a clock, nothing otherwise.
+            let (refused, abstained, _) = lists();
+            settle_subprocess(
+                &refused,
+                &abstained,
+                &stop,
+                "pono",
+                wall,
+                Ok(Some(McVerdict::Unknown)),
+            );
+            assert_eq!(
+                abstained.lock().unwrap().len(),
+                usize::from(clock),
+                "{cause:?}"
+            );
+        }
+        assert_eq!(StopCause::from_code(0), None);
+        assert_eq!(StopSignal::default().cause(), None);
+        assert_eq!(
+            StopCause::Wall.sweep_cause(60_000),
+            Some(clock_sweep_cause(true, 60_000))
+        );
+        assert_eq!(
+            StopCause::RunBudget.sweep_cause(60_000),
+            Some(clock_sweep_cause(false, 60_000))
+        );
+    }
+
+    /// Which cause stands when two raise the flag: a clock's replaces a peer's or the caller's
+    /// (the watchdog's clock check can follow a verdict it did not see), and nothing replaces a
+    /// clock's.
+    #[test]
+    fn a_clocks_cause_replaces_a_peers_and_is_never_replaced() {
+        for clock in [StopCause::Wall, StopCause::RunBudget] {
+            for other in [StopCause::PeerDecided, StopCause::CallerCancelled] {
+                let stop = raised(other);
+                stop.raise(clock);
+                assert_eq!(stop.cause(), Some(clock), "{other:?} then {clock:?}");
+                let stop = raised(clock);
+                stop.raise(other);
+                assert_eq!(stop.cause(), Some(clock), "{clock:?} then {other:?}");
+            }
+        }
+        let stop = raised(StopCause::CallerCancelled);
+        stop.raise(StopCause::PeerDecided);
+        assert_eq!(stop.cause(), Some(StopCause::CallerCancelled));
+    }
+
     /// A one-register design with no `bad` line: nothing to decide.
     const NO_BAD: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
                           5 input 1 d\n6 next 1 3 5\n";
@@ -2551,7 +2809,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &NO_CLOCK_STOP,
+            &StopSignal::default(),
             "native",
             Err(MemberStop::from(stop)),
         );
@@ -2572,7 +2830,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &NO_CLOCK_STOP,
+            &StopSignal::default(),
             "native",
             Err(MemberStop::from(native_bmc::BmcError::NoBadProperty)),
         );
@@ -3137,7 +3395,6 @@ mod tests {
     /// `undecided` unless a peer had decided.
     #[test]
     fn an_interp_member_that_could_not_run_is_a_refusal_not_an_undecided_search() {
-        use std::sync::atomic::AtomicBool;
         let (refused, abstained, undecided) = (
             std::sync::Mutex::new(Vec::new()),
             std::sync::Mutex::new(Vec::new()),
@@ -3148,8 +3405,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
-            &NO_CLOCK_STOP,
+            &raised(StopCause::PeerDecided),
             Err("cvc5 missing".to_string()),
             || {
                 ran.set(true);
@@ -3165,8 +3421,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(false),
-            &NO_CLOCK_STOP,
+            &StopSignal::default(),
             Ok(()),
             undecided_search,
         );
@@ -3174,8 +3429,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
-            &NO_CLOCK_STOP,
+            &raised(StopCause::PeerDecided),
             Ok(()),
             undecided_search,
         );
@@ -3197,8 +3451,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
-            &AtomicBool::new(true),
+            &raised(StopCause::Wall),
             Ok(()),
             undecided_search,
         );
@@ -3218,7 +3471,6 @@ mod tests {
     /// generic "no result was collected"). The subprocess members' settle takes the same flag.
     #[test]
     fn a_member_stopped_by_the_clock_keeps_its_progress_and_a_peer_stop_is_in_no_list() {
-        use std::sync::atomic::AtomicBool;
         let lists = || {
             (
                 std::sync::Mutex::new(Vec::new()),
@@ -3234,7 +3486,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(false),
+            &raised(StopCause::PeerDecided),
             "ic3",
             stop(),
         );
@@ -3249,7 +3501,7 @@ mod tests {
             &refused,
             &abstained,
             &undecided,
-            &AtomicBool::new(true),
+            &raised(StopCause::Wall),
             "ic3",
             stop(),
         );
@@ -3271,8 +3523,11 @@ mod tests {
             settle_subprocess(
                 &refused,
                 &abstained,
-                &AtomicBool::new(true),
-                &AtomicBool::new(clock),
+                &raised(if clock {
+                    StopCause::RunBudget
+                } else {
+                    StopCause::PeerDecided
+                }),
                 "btormc",
                 t,
                 Ok(Some(McVerdict::Unknown)),
@@ -3430,7 +3685,10 @@ mod tests {
         for witness in [false, true] {
             let store = Carried::default();
             let go = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            assert_eq!(run_ic3(&file, later, go, &store, witness), Ok(Some(true)));
+            assert_eq!(
+                run_ic3(&file, later, go, &store, witness, &SharedAig::new()),
+                Ok(Some(true))
+            );
             let (traces, failed) = store.take();
             assert!(
                 traces.is_empty(),
@@ -3444,6 +3702,161 @@ mod tests {
                 failed[0].1
             );
         }
+    }
+
+    /// mununu#1142 — the two owned bit-level members share one model: the first to arrive
+    /// builds it, the other reads it, and a build that stopped is the named abstention of BOTH
+    /// (the cap's text names the variable that raises it), never a refusal or a silent `None`.
+    #[test]
+    fn x1142_the_sat_members_share_one_aig_model_and_its_stop() {
+        use crate::adapter::btor2::aig::BuildStop;
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 sort bitvec 1\n9 constd 1 5\n\
+                               10 eq 8 3 9\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let go = || std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shared = SharedAig::new();
+        assert_eq!(
+            run_sat_bmc(&file, later(), go(), None, &shared),
+            Ok(Some(true))
+        );
+        assert!(
+            shared.get().is_some_and(Result::is_ok),
+            "built by the first member"
+        );
+        assert_eq!(
+            run_ic3(&file, later(), go(), &Carried::default(), false, &shared),
+            Ok(Some(true)),
+            "the second member reads the same model"
+        );
+        let stopped = SharedAig::new();
+        stopped
+            .set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }))
+            .expect("fresh cell");
+        for r in [
+            run_sat_bmc(&file, later(), go(), None, &stopped),
+            run_ic3(&file, later(), go(), &Carried::default(), false, &stopped),
+        ] {
+            match r {
+                Err(MemberStop::Abstained(why)) => {
+                    assert!(
+                        why.contains("node cap") && why.contains("MUNUNU_AIG_NODE_CAP"),
+                        "{why}"
+                    );
+                }
+                other => panic!("a stopped build is a named abstention: {other:?}"),
+            }
+        }
+        let cancelled = SharedAig::new();
+        cancelled
+            .set(Err(BuildStop::Cancelled { nodes: 7 }))
+            .expect("fresh cell");
+        let up = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(matches!(
+            run_ic3(&file, later(), up, &Carried::default(), false, &cancelled),
+            Err(MemberStop::Cancelled(why)) if why.starts_with("IC3 stopped at frame 0 (aig:") && why.contains("7 nodes")
+        ));
+        // A SAFE design shares the same way: the first member builds, the second proves on it.
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let safe = parser::parse(SAFE).expect("parse");
+        let shared = SharedAig::new();
+        assert!(matches!(
+            run_sat_bmc(&safe, later(), go(), None, &shared),
+            Err(MemberStop::Undecided(_))
+        ));
+        assert!(shared.get().is_some_and(Result::is_ok));
+        assert_eq!(
+            run_ic3(&safe, later(), go(), &Carried::default(), false, &shared),
+            Ok(Some(false)),
+            "the proof on the model the SAT member built"
+        );
+    }
+
+    /// mununu#1142 — a cap stop reaches the report as both members' `abstained` entries, in
+    /// both drivers: the runner table lets a non-capturing stub pre-set the shared cell with the
+    /// stop and call the real member, so the mapping from a stopped build to the lists is
+    /// exercised end to end without a design large enough to trip the cap.
+    #[test]
+    fn x1142_a_cap_stop_abstains_both_members_in_both_drivers() {
+        use crate::adapter::btor2::aig::BuildStop;
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 sort bitvec 1\n9 constd 1 5\n\
+                               10 eq 8 3 9\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let capped = Runners {
+            sat_bmc: |f, d, c, carried, aig| {
+                let _ = aig.set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }));
+                run_sat_bmc(f, d, c, carried, aig)
+            },
+            ic3: |f, d, c, store, witness, aig| {
+                let _ = aig.set(Err(BuildStop::NodeCap { nodes: 40, cap: 40 }));
+                run_ic3(f, d, c, store, witness, aig)
+            },
+            ..Runners::SHIPPED
+        };
+        let only_sat = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            sat_bmc: true,
+            ic3: true,
+            witness: false,
+            ..ReachMembers::ALL
+        };
+        let full = decide_with_members_using(
+            &file,
+            std::time::Duration::from_secs(30),
+            None,
+            only_sat,
+            &capped,
+        );
+        assert_eq!(full.verdict, ReachVerdict::Unknown, "{full:?}");
+        let abstained: Vec<&str> = full.abstained.iter().map(|(m, _)| *m).collect();
+        assert!(
+            abstained.contains(&"sat-bmc") && abstained.contains(&"ic3"),
+            "{full:?}"
+        );
+        assert!(
+            full.abstained
+                .iter()
+                .all(|(_, why)| why.contains("node cap") && why.contains("40 nodes")),
+            "{full:?}"
+        );
+        // The owned-only driver runs every owned member: on a design the others decide first
+        // the capped two are cancelled into no list (a peer decided), so the others are stubbed
+        // to find nothing and the design is SAFE (the real deep-CEX search finds no path).
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let safe = parser::parse(SAFE).expect("parse");
+        let owned_table = Runners {
+            exact: |_| Ok(None),
+            native: |_, _, _, _| Ok(None),
+            interp_available: || Err("not in this test".into()),
+            #[cfg(not(feature = "boolector"))]
+            cex: |_, _, _| Ok(None),
+            ..capped
+        };
+        let owned = decide_owned_only_using(&safe, 20_000, false, &owned_table);
+        assert_eq!(owned.verdict, ReachVerdict::Unknown, "{owned:?}");
+        let names: Vec<&str> = owned.abstained.iter().map(|(m, _)| *m).collect();
+        assert!(
+            names.contains(&"sat-bmc") && names.contains(&"ic3"),
+            "the owned-only driver names both too: {owned:?}"
+        );
+        assert!(
+            owned
+                .abstained
+                .iter()
+                .filter(|(m, _)| *m == "sat-bmc" || *m == "ic3")
+                .all(|(_, why)| why.contains("node cap")),
+            "{owned:?}"
+        );
     }
 
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:
@@ -3779,23 +4192,23 @@ mod tests {
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
         assert_eq!(
-            run_sat_bmc(&parse(COUNTER), later(), go(), None),
+            run_sat_bmc(&parse(COUNTER), later(), go(), None, &SharedAig::new()),
             Ok(Some(true))
         );
-        match run_sat_bmc(&parse(SAFE), later(), go(), None) {
+        match run_sat_bmc(&parse(SAFE), later(), go(), None, &SharedAig::new()) {
             Err(MemberStop::Undecided(p)) => assert!(p.contains("depth 1000"), "{p}"),
             other => panic!("a bounded search must not prove: {other:?}"),
         }
         assert!(
             matches!(
-                run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None),
+                run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None, &SharedAig::new()),
                 Err(MemberStop::Cancelled(p)) if p.starts_with("SAT BMC stopped")
             ),
             "a member stopped on the shared flag says how far it got (mununu#1043)"
         );
         assert!(
             matches!(
-                run_sat_bmc(&parse(ARRAY), later(), go(), None),
+                run_sat_bmc(&parse(ARRAY), later(), go(), None, &SharedAig::new()),
                 Err(MemberStop::Refused(why)) if why.starts_with("sat-bmc:")
             ),
             "an array design is refused by name"
@@ -3866,16 +4279,30 @@ mod tests {
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
         assert_eq!(
-            run_ic3(&parse(COUNTER), later(), go(), &Carried::default(), false),
+            run_ic3(
+                &parse(COUNTER),
+                later(),
+                go(),
+                &Carried::default(),
+                false,
+                &SharedAig::new()
+            ),
             Ok(Some(true))
         );
         assert_eq!(
-            run_ic3(&parse(SAFE), later(), go(), &Carried::default(), false),
+            run_ic3(
+                &parse(SAFE),
+                later(),
+                go(),
+                &Carried::default(),
+                false,
+                &SharedAig::new()
+            ),
             Ok(Some(false))
         );
         assert!(
             matches!(
-                run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), &Carried::default(), false),
+                run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), &Carried::default(), false, &SharedAig::new()),
                 Err(MemberStop::Cancelled(p)) if p.starts_with("IC3 stopped at frame")
             ),
             "a member stopped on the shared flag says how far it got (mununu#1043)"
@@ -3886,13 +4313,14 @@ mod tests {
             go(),
             &Carried::default(),
             false,
+            &SharedAig::new(),
         ) {
             Err(MemberStop::Abstained(cause)) => assert!(cause.contains("deadline"), "{cause}"),
             other => panic!("a run past its deadline abstains with the cause: {other:?}"),
         }
         assert!(
             matches!(
-                run_ic3(&parse(ARRAY), later(), go(), &Carried::default(), false),
+                run_ic3(&parse(ARRAY), later(), go(), &Carried::default(), false, &SharedAig::new()),
                 Err(MemberStop::Refused(why)) if why.starts_with("ic3:")
             ),
             "an array design is refused by name"
@@ -4235,6 +4663,7 @@ mod tests {
             _: Instant,
             stop: Arc<AtomicBool>,
             _: Option<&Carried>,
+            _: &SharedAig,
         ) -> Result<Option<bool>, MemberStop> {
             until_stopped(&stop);
             Err(MemberStop::Cancelled("stopped at frame 2".into()))
@@ -4246,8 +4675,9 @@ mod tests {
             stop: Arc<AtomicBool>,
             _: &Carried,
             _: bool,
+            aig: &SharedAig,
         ) -> Result<Option<bool>, MemberStop> {
-            owned_stopped(f, d, stop, None)
+            owned_stopped(f, d, stop, None, aig)
         }
 
         fn interp_stopped(
@@ -4325,21 +4755,21 @@ mod tests {
                 ),
                 (
                     Runners {
-                        sat_bmc: |_, _, _, _| Ok(Some(true)),
+                        sat_bmc: |_, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("sat-bmc"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _, _| Ok(Some(false)),
+                        ic3: |_, _, _, _, _, _| Ok(Some(false)),
                         ..ALL_RUNNING
                     },
                     safe("ic3"),
                 ),
                 (
                     Runners {
-                        ic3: |_, _, _, _, _| Ok(Some(true)),
+                        ic3: |_, _, _, _, _, _| Ok(Some(true)),
                         ..ALL_RUNNING
                     },
                     reach("ic3"),
@@ -4385,7 +4815,7 @@ mod tests {
         fn a_verdict_that_lands_after_the_first_is_credited_and_a_disagreement_is_the_alarm() {
             let agreeing = Runners {
                 native: |_, _, _, _| Ok(Some(true)),
-                ic3: |_, _, stop, _, _| {
+                ic3: |_, _, stop, _, _, _| {
                     until_stopped(&stop);
                     Ok(Some(true))
                 },
@@ -4420,8 +4850,8 @@ mod tests {
             let stops = Runners {
                 exact: |_| Err("exact: over the cap".into()),
                 native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
-                sat_bmc: |_, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
-                ic3: |_, _, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
+                sat_bmc: |_, _, _, _, _| Err(MemberStop::Abstained("conflict budget spent".into())),
+                ic3: |_, _, _, _, _, _| Err(MemberStop::Refused("ic3: arrays".into())),
                 interp_available: || Err("no cvc5".into()),
                 interp_search: |_, _, _| unreachable!("no search without cvc5"),
                 btormc: |_, _, _, _, _| Ok(Some(McVerdict::Unknown)),
@@ -4524,8 +4954,8 @@ mod tests {
         const ALL_DECIDE: Runners = Runners {
             exact: |_| Ok(Some(true)),
             native: |_, _, _, _| Ok(Some(true)),
-            sat_bmc: |_, _, _, _| Ok(Some(true)),
-            ic3: |_, _, _, _, _| Ok(Some(true)),
+            sat_bmc: |_, _, _, _, _| Ok(Some(true)),
+            ic3: |_, _, _, _, _, _| Ok(Some(true)),
             interp_available: || Ok(()),
             interp_search: |_, _, _| InterpSafetyVerdict::Unsafe { depth: 1 },
             btormc: |_, _, _, _, _| Ok(Some(McVerdict::Violated)),
@@ -4573,8 +5003,8 @@ mod tests {
             const ALL_STUCK: Runners = Runners {
                 exact: |_| stuck(),
                 native: |_, _, _, _| stuck(),
-                sat_bmc: |_, _, _, _| stuck(),
-                ic3: |_, _, _, _, _| stuck(),
+                sat_bmc: |_, _, _, _, _| stuck(),
+                ic3: |_, _, _, _, _, _| stuck(),
                 interp_search: |_, _, _| stuck(),
                 cex: |_, _, _| stuck(),
                 ..ALL_RUNNING
@@ -4630,7 +5060,7 @@ mod tests {
                     ),
                     (
                         Runners {
-                            sat_bmc: |_, _, _, _| Ok(Some(true)),
+                            sat_bmc: |_, _, _, _, _| Ok(Some(true)),
                             ..ALL_RUNNING
                         },
                         reach("sat-bmc"),
@@ -4639,7 +5069,7 @@ mod tests {
                 if ic3_starts() {
                     cases.push((
                         Runners {
-                            ic3: |_, _, _, _, _| Ok(Some(false)),
+                            ic3: |_, _, _, _, _, _| Ok(Some(false)),
                             ..ALL_RUNNING
                         },
                         safe("ic3"),
@@ -4657,8 +5087,8 @@ mod tests {
                 let stops = Runners {
                     exact: |_| Err("exact: over the cap".into()),
                     native: |_, _, _, _| Err(MemberStop::Undecided("searched to depth 40".into())),
-                    sat_bmc: |_, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
-                    ic3: |_, _, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
+                    sat_bmc: |_, _, _, _, _| Err(MemberStop::Refused("sat-bmc: arrays".into())),
+                    ic3: |_, _, _, _, _, _| Err(MemberStop::Abstained("frame budget spent".into())),
                     interp_available: || Err("no cvc5".into()),
                     cex: |_, _, _| Err(MemberStop::Abstained("query budget spent".into())),
                     ..ALL_RUNNING
