@@ -142,10 +142,9 @@ pub struct YosysOptions {
     pub params: Vec<(String, String)>,
     /// Optional original path of the primary SV source. Used only to
     /// rewrite the `source_file` field of any auto-emitted black-box
-    /// sidecar (Document B task B3) — yosys sees the SV through a
-    /// per-call tempdir, so without this hint the sidecars would point
-    /// at `/tmp/.../work.sv`. The user expects the path of the file
-    /// they actually invoked mununu on.
+    /// sidecar (Document B task B3) — yosys sees the SV as `work.sv` inside a per-call staging
+    /// directory (mununu#1138), so without this hint the sidecars would name `work.sv`. The user
+    /// expects the path of the file they actually invoked mununu on.
     pub primary_source_path: Option<String>,
     /// The RTL front end: [`SvFrontend::Slang`] (the default and the only product front
     /// end); [`SvFrontend::Verilog`] is the dev-only oracle of `test_support` builds.
@@ -636,6 +635,74 @@ fn cached_lift_of(a: &SvFlattenArtifacts) -> CachedLift {
 /// invocation). [`run_sv_flatten_btor2_concrete`] executes it against a real staging directory; the
 /// lift cache renders it against a placeholder one (N0.2, [`lift_manifest`]), so the cache key
 /// is exactly what runs and cannot drift from it.
+/// mununu#1138 — the names of the lift's outputs inside the staging directory, as the script
+/// writes them (relative: yosys runs there) and as the run reads them (`dir.join(..)`).
+const STAGED_BTOR: &str = "design.btor";
+const STAGED_HIER_JSON: &str = "hier.json";
+
+/// mununu#1138 — a path as a yosys-native command (`write_json`, `write_btor`, `read_verilog`)
+/// takes it: quoted as one token when it carries whitespace (measured: yosys's own commands
+/// strip the quotes; `read_slang` does not, so its paths are never quoted and never carry a
+/// space — the staged ones are relative, the caller's are refused at validation).
+fn yosys_path_arg(path: &Path) -> String {
+    let text = path.display().to_string();
+    if text.chars().any(char::is_whitespace) {
+        format!("\"{text}\"")
+    } else {
+        text
+    }
+}
+
+/// mununu#1138 — the caller's include directories as the staging directory will hold them:
+/// `(dir/inc<i>, the directory made absolute without resolving links)`. Empty where symbolic
+/// links are not available (then the absolute path is written, see [`script_include_dirs`]).
+fn plan_include_links(dir: &Path, include_dirs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    if !cfg!(unix) {
+        return Vec::new();
+    }
+    include_dirs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (dir.join(format!("inc{i}")), absolute_if_relative_path(d)))
+        .collect()
+}
+
+/// What the script writes for the caller's include directories: the links' names relative to
+/// the staging directory yosys runs in (`inc0`, `inc1`, …), or, without links, the directories
+/// made absolute without resolving them.
+fn script_include_dirs(dir: &Path, include_links: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
+    include_links
+        .iter()
+        .map(|(link, _)| {
+            link.strip_prefix(dir)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| link.clone())
+        })
+        .collect()
+}
+
+/// mununu#1138 — create the planned include links inside the staging directory.
+#[cfg(unix)]
+fn stage_include_links(include_links: &[(PathBuf, PathBuf)]) -> Result<(), AdapterError> {
+    for (link, target) in include_links {
+        std::os::unix::fs::symlink(target, link).map_err(|e| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/yosys: could not stage the include directory `{}` as `{}`: {e}",
+                target.display(),
+                link.display()
+            ),
+            location: None,
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stage_include_links(_include_links: &[(PathBuf, PathBuf)]) -> Result<(), AdapterError> {
+    Ok(())
+}
+
 struct LiftPlan {
     /// The staged primary, `<dir>/work.sv`.
     primary: PathBuf,
@@ -645,9 +712,15 @@ struct LiftPlan {
     /// The oracle's sv2v pass (`test_support` only; the product plans none).
     #[cfg(feature = "test_support")]
     sv2v: Option<Sv2vPlan>,
-    /// yosys runs inside the staging directory when it reads sv2v's output by its bare name
-    /// (mununu#806) — the names it mints depend on it. `None` on the product lift.
+    /// yosys runs inside the staging directory (mununu#1138 for every lift; the oracle did so
+    /// since mununu#806, when it reads sv2v's output by its bare name — the names it mints
+    /// depend on it). Always `Some`; the field stays an `Option` for the manifest's rule.
     yosys_cwd: Option<PathBuf>,
+    /// mununu#1138 — `(link under the staging directory, the caller's include directory, made
+    /// absolute without resolving links)`: the script names the link (`-Iinc0`), so no caller
+    /// path reaches `read_slang`, which takes a path as one unquoted token. On a platform
+    /// without symbolic links the absolute path is written instead (`include_links` is empty).
+    include_links: Vec<(PathBuf, PathBuf)>,
     /// The `-m` argument loading a slang plugin, when `MUNUNU_YOSYS_SLANG_PLUGIN` names one.
     plugin: Option<String>,
     script: String,
@@ -701,22 +774,41 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
     }
     let frontend_used = yopts.frontend;
     #[cfg(feature = "test_support")]
-    let (sv2v, yosys_cwd, sources) = plan_oracle_sv2v(sources, yopts, dir)?;
-    #[cfg(not(feature = "test_support"))]
-    let yosys_cwd: Option<PathBuf> = None;
+    let (sv2v, sources) = {
+        let (sv2v, _oracle_cwd, sources) = plan_oracle_sv2v(sources, yopts, dir)?;
+        (sv2v, sources)
+    };
+    // mununu#1138 — yosys runs INSIDE the staging directory and every staged path in the
+    // script is relative to it (`work.sv`, `-I.`, `hier.json`, `clocks.json`, `design.btor`).
+    // The staging directory lives under the system temp dir, whose path is the operator's (a
+    // `TMPDIR` with a space), and `read_slang` takes a path as one unquoted token — a quoted
+    // one reaches slang verbatim, quotes included (measured on the issue) — so no staged path
+    // may carry a space, whatever the temp dir is. The oracle's sv2v output was already read
+    // this way (mununu#806).
+    let yosys_cwd: Option<PathBuf> = Some(dir.to_path_buf());
+    let sources: Vec<PathBuf> = sources
+        .iter()
+        .map(|p| {
+            p.strip_prefix(dir)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| p.clone())
+        })
+        .collect();
 
-    let btor_path = dir.join("design.btor");
-    let hier_json_path = dir.join("hier.json");
-    // With yosys's cwd moved to the staging directory, a RELATIVE caller include dir would no
-    // longer resolve: hand the script absolute ones (mununu#806).
-    let script_include_dirs: Vec<PathBuf> = if yosys_cwd.is_some() {
+    let btor_path = dir.join(STAGED_BTOR);
+    let hier_json_path = dir.join(STAGED_HIER_JSON);
+    // mununu#1138 — a caller include directory is staged as a link inside the staging
+    // directory and the script names the link, so the caller's path (whatever it carries)
+    // never reaches `read_slang`; `plan_include_links` says what the script writes.
+    let include_links = plan_include_links(dir, &yopts.extra_include_dirs);
+    let script_include_dirs: Vec<PathBuf> = if include_links.is_empty() {
         yopts
             .extra_include_dirs
             .iter()
-            .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+            .map(|d| absolute_if_relative_path(d))
             .collect()
     } else {
-        yopts.extra_include_dirs.clone()
+        script_include_dirs(dir, &include_links)
     };
     let slang_read = || {
         (
@@ -744,8 +836,8 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
         &read_cmds,
         &chparam,
         yopts.top.as_deref(),
-        &btor_path,
-        &hier_json_path,
+        Path::new(STAGED_BTOR),
+        Path::new(STAGED_HIER_JSON),
         yopts.setundef_anyseq,
         yopts.setundef_anyconst,
         &yopts.init_policy_overrides,
@@ -757,6 +849,7 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
         #[cfg(feature = "test_support")]
         sv2v,
         yosys_cwd,
+        include_links,
         plugin: slang_plugin,
         script,
         frontend_used,
@@ -817,7 +910,7 @@ fn oracle_read_cmds(sources: &[PathBuf], extra_include_dirs: &[PathBuf]) -> Vec<
         .collect();
     sources
         .iter()
-        .map(|p| format!("read_verilog -formal -sv{extra_inc} {}", p.display()))
+        .map(|p| format!("read_verilog -formal -sv{extra_inc} {}", yosys_path_arg(p)))
         .collect()
 }
 
@@ -834,6 +927,7 @@ fn run_sv_flatten_btor2_concrete(
         }
         write_file(path, text)?;
     }
+    stage_include_links(&plan.include_links)?;
     #[cfg(feature = "test_support")]
     if let Some(s) = &plan.sv2v {
         run_sv2v(&s.bin, &s.sources, &s.include_dirs, &s.out)?;
@@ -961,7 +1055,12 @@ fn run_sv_flatten_btor2_concrete(
     Ok(SvFlattenArtifacts {
         btor2,
         hier_json,
-        staged_primary: plan.primary.to_string_lossy().into_owned(),
+        // mununu#1138 — the name yosys saw (relative to its working directory, the staging dir).
+        staged_primary: plan
+            .primary
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         frontend_used: plan.frontend_used,
         backend_retry,
         clock_domains,
@@ -1172,10 +1271,9 @@ pub fn translate_sv(
     // whole translation.
     if !hier_json.is_empty() {
         let mut blackboxes = parse_blackbox_modules(&hier_json);
-        // Rewrite the tempdir path back to the user's primary source
-        // path when known. Yosys saw the SV as `<tempdir>/work.sv`;
-        // the user expects to see the path they actually invoked
-        // mununu on.
+        // Rewrite the staged name back to the user's primary source path when known. Yosys
+        // saw the SV as `work.sv` inside the staging directory (mununu#1138); the user expects
+        // to see the path they actually invoked mununu on.
         if let Some(real_path) = yopts.primary_source_path.as_ref() {
             for bb in blackboxes.iter_mut() {
                 if let Some(ref src) = bb.source_file
@@ -1938,23 +2036,29 @@ fn translate_sv_per_module_impl(
     // to isolated single-module verification). No-op on sources without them.
     write_file(&primary, &strip_port_net_types(content))?;
 
-    let mut sources = vec![primary.clone()];
+    // mununu#1138 — the scripts name the staged files relative to the staging directory,
+    // which yosys runs inside of (see `plan_lift`).
+    let mut sources = vec![PathBuf::from("work.sv")];
     for (name, src) in &yopts.additional_sources {
         let p = crate::adapter::staged_path(tmp.path(), name)?;
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).map_err(io_err)?;
         }
         write_file(&p, &strip_port_net_types(src))?;
-        sources.push(p);
+        sources.push(
+            p.strip_prefix(tmp.path())
+                .map(Path::to_path_buf)
+                .unwrap_or(p),
+        );
     }
 
     // Pass 1 — discovery. Use `hierarchy -auto-top` when the caller did
     // not provide one (matches the legacy build_script).
-    let hier_json_path = tmp.path().join("hier.json");
+    let hier_json_path = tmp.path().join(STAGED_HIER_JSON);
     let discovery_script = build_discovery_script(
         &sources,
         yopts.top.as_deref(),
-        &hier_json_path,
+        Path::new(STAGED_HIER_JSON),
         &yopts.params,
     );
     run_yosys(
@@ -1963,6 +2067,7 @@ fn translate_sv_per_module_impl(
         PER_MODULE_YOSYS_TIMEOUT,
         plugin.as_deref(),
         &hier_json_path.with_file_name("yosys-discovery.log"),
+        tmp.path(),
     )?;
 
     let hier_body = std::fs::read_to_string(&hier_json_path).map_err(|e| AdapterError {
@@ -1999,11 +2104,15 @@ fn translate_sv_per_module_impl(
         Vec::new()
     };
 
-    // Choose output directory for the per-submodule BTOR2 files.
+    // Choose output directory for the per-submodule BTOR2 files. mununu#1138 — yosys runs
+    // inside the staging directory, so a caller's directory is made absolute first (a relative
+    // `--output-dir build/`, or the CLI's default — the source's parent, empty for a bare file
+    // name — used to resolve against mununu's working directory because yosys ran there).
     let out_dir = match &yopts.per_module_output_dir {
         Some(dir) => {
-            std::fs::create_dir_all(dir).map_err(io_err)?;
-            dir.clone()
+            let abs = per_module_output_dir(dir)?;
+            std::fs::create_dir_all(&abs).map_err(io_err)?;
+            abs
         }
         None => tmp.path().to_path_buf(),
     };
@@ -2026,10 +2135,18 @@ fn translate_sv_per_module_impl(
             ));
         }
         let btor_path = out_dir.join(format!("{module_name}.btor2"));
+        // mununu#1138 — a persisted output goes to the caller's directory by its absolute path
+        // (quoted by `write_btor` when it carries a space); a transient one is a name inside
+        // the staging directory yosys runs in.
+        let script_btor: PathBuf = if persist {
+            btor_path.clone()
+        } else {
+            PathBuf::from(format!("{module_name}.btor2"))
+        };
         let script = build_per_module_script(
             &sources,
             module_name,
-            &btor_path,
+            &script_btor,
             yopts.setundef_anyseq,
             yopts.setundef_anyconst,
             &yopts.init_policy_overrides,
@@ -2041,6 +2158,7 @@ fn translate_sv_per_module_impl(
             PER_MODULE_YOSYS_TIMEOUT,
             plugin.as_deref(),
             &btor_path.with_file_name(format!("{module_name}.yosys.log")),
+            tmp.path(),
         )?;
 
         let btor = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
@@ -2156,7 +2274,7 @@ fn build_discovery_script(
     };
     format!(
         "{read}; {hier}; proc; write_json {}",
-        hier_json_out.display()
+        yosys_path_arg(hier_json_out)
     )
 }
 
@@ -2194,7 +2312,7 @@ fn build_per_module_script(
         // so it does not drop dead registers (which would change memory-free lifts).
         // No-op when the design has no memories.
         "{read}; hierarchy -check -top {module}; {per_signal}proc; memory_collect; flatten; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
-        btor_out.display()
+        yosys_path_arg(btor_out)
     )
 }
 
@@ -2231,8 +2349,11 @@ fn run_yosys(
     timeout: Duration,
     plugin: Option<&str>,
     log: &Path,
+    cwd: &Path,
 ) -> Result<(), AdapterError> {
     let mut command = Command::new(yosys);
+    // mununu#1138 — inside the staging directory, so the script names its files relatively.
+    command.current_dir(cwd);
     if let Some(p) = plugin {
         command.arg("-m").arg(p);
     }
@@ -2841,7 +2962,7 @@ pub const YOSYS_MIN_VERSION: &str = "0.67";
 
 fn locate_yosys() -> Result<PathBuf, AdapterError> {
     if let Some(path) = crate::adapter::env_var::read("MUNUNU_YOSYS_PATH") {
-        return Ok(PathBuf::from(path));
+        return Ok(absolute_if_relative_path(Path::new(&path)));
     }
     let candidates = ["yosys"];
     for c in candidates {
@@ -2893,7 +3014,26 @@ fn locate_sv2v() -> Result<PathBuf, AdapterError> {
 /// `bad` nodes are needed here). Named registers and ports get `instance.signal` BTOR2 names,
 /// so cutpoints / `--pin` over named signals resolve by name.
 fn slang_plugin_arg() -> Option<String> {
-    crate::adapter::env_var::read("MUNUNU_YOSYS_SLANG_PLUGIN").filter(|p| !p.trim().is_empty())
+    crate::adapter::env_var::read("MUNUNU_YOSYS_SLANG_PLUGIN")
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| {
+            absolute_if_relative_path(Path::new(&p))
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+/// mununu#1138 — a tool path from the environment as yosys's process must see it: yosys runs
+/// inside the staging directory, so a relative path WITH a separator (`./oss-cad-suite/bin/yosys`,
+/// `tools/slang.so`) is joined onto mununu's working directory first; a bare name (`yosys`,
+/// `slang.so`) is left to `$PATH` / yosys's plugin search as before. Links are not resolved.
+fn absolute_if_relative_path(p: &Path) -> PathBuf {
+    if p.is_absolute() || p.components().count() < 2 {
+        return p.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(p))
+        .unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// The actionable tail of a yosys failure, read off its stderr and log: `read_slang` is not a
@@ -3315,25 +3455,67 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
             ));
         }
     }
-    // Include directories are written as `-I<dir>` unquoted: a path with whitespace, a
-    // quote or a `;` would split or end the command, so it is refused with the path quoted back
-    // rather than failing inside yosys with no reason.
+    // Include directories reach `read_slang` as one `-I<dir>` token, and slang takes the token
+    // verbatim — quotes included, so quoting cannot carry a space (mununu#1138, measured): a
+    // path with whitespace, a quote or a `;` would split or end the command, and is refused
+    // with the path quoted back rather than failing inside yosys with no reason. The staged
+    // paths never carry one: yosys runs inside the staging directory.
+    // mununu#1138 — an include directory reaches the script as a link's name (`inc0`), so its
+    // own path may carry anything (a missing one is slang's own warning, as before; the planner
+    // touches no file). Without symbolic links (not unix) the absolute path is written as one
+    // `-I` token, which slang takes verbatim, so there whitespace, quotes and `;` are refused as
+    // before (#1133).
     for dir in &yopts.extra_include_dirs {
-        let text = dir.display().to_string();
-        if text.is_empty()
-            || text
+        let abs = absolute_if_relative_path(dir);
+        let text = abs.display().to_string();
+        if text.is_empty() {
+            return Err(refuse_lift_input(
+                "the include directory",
+                &text,
+                "a directory path",
+                "check the path given to `--include-dir` on the `sv` verbs",
+            ));
+        }
+        if !cfg!(unix)
+            && text
                 .chars()
                 .any(|c| c.is_whitespace() || matches!(c, ';' | '"' | '\'' | '`'))
         {
             return Err(refuse_lift_input(
                 "the include directory",
                 &text,
-                "a path without whitespace, quotes or `;`",
-                "move or rename the directory (`-I` / `include_dirs`)",
+                "a path without whitespace, quotes or `;` on this platform (slang takes it as \
+                 one unquoted token and the lift stages no link here)",
+                "move or rename the directory given to `--include-dir` on the `sv` verbs",
             ));
         }
     }
     Ok(())
+}
+
+/// mununu#1138 — the per-module output directory as yosys must see it from inside the staging
+/// directory: absolute (a relative one resolves against mununu's working directory, an empty
+/// one — the CLI's default for a bare file name — is that directory), and refused for a `"` or
+/// a line break, which the quoted `write_btor` argument cannot carry. Pure: the caller creates it.
+fn per_module_output_dir(dir: &Path) -> Result<PathBuf, AdapterError> {
+    let cwd = || std::env::current_dir().map_err(io_err);
+    let abs = if dir.as_os_str().is_empty() {
+        cwd()?
+    } else if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        cwd()?.join(dir)
+    };
+    let text = abs.display().to_string();
+    if text.chars().any(|c| matches!(c, '"' | '\n' | '\r')) {
+        return Err(refuse_lift_input(
+            "the per-module output directory",
+            &text,
+            "a path without a `\"` or a line break",
+            "move or rename the directory (`--output-dir` on `sv emit-btor2-per-module`)",
+        ));
+    }
+    Ok(abs)
 }
 
 /// Emit the explicit control-slice cut-point pass: `cutpoint w:<sig> …; ` (empty
@@ -3392,11 +3574,18 @@ fn read_slang_cmd(
         .collect::<Vec<_>>()
         .join(" ");
     let top_arg = top.map(|t| format!(" --top {t}")).unwrap_or_default();
+    // mununu#1138 — a relative source (yosys runs inside the staging directory) has an empty
+    // parent: the staging directory is then `.`.
     let inc = sources
         .first()
         .and_then(|p| p.parent())
-        .filter(|d| !d.as_os_str().is_empty())
-        .map(|d| format!(" -I{}", d.display()))
+        .map(|d| {
+            if d.as_os_str().is_empty() {
+                " -I.".to_string()
+            } else {
+                format!(" -I{}", d.display())
+            }
+        })
         .unwrap_or_default();
     let extra_inc: String = extra_include_dirs
         .iter()
@@ -3498,9 +3687,9 @@ fn build_script(
         // black-box modules in the selection; with no such module the pass is a no-op.
         "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         read_cmds.join("; "),
-        hier_json_out.display(),
-        clock_json_path(btor_out).display(),
-        btor_out.display()
+        yosys_path_arg(hier_json_out),
+        yosys_path_arg(&clock_json_path(btor_out)),
+        yosys_path_arg(btor_out)
     )
 }
 
@@ -3560,7 +3749,19 @@ impl TempDir {
         let pid = std::process::id();
         let tid = format!("{:?}", std::thread::current().id());
         let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
-        let mut base = std::env::temp_dir();
+        // mununu#1138 — `MUNUNU_LIFT_STAGING_ROOT` moves the staging off the system temp dir
+        // (a small or `noexec` `/tmp`); the default is the system's.
+        let root = crate::adapter::env_var::read("MUNUNU_LIFT_STAGING_ROOT")
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        // Absolute, whatever the variable or `TMPDIR` said: yosys runs inside the staging
+        // directory and its `-l` log and the outputs are named by their absolute paths.
+        let mut base = if root.is_absolute() {
+            root
+        } else {
+            std::env::current_dir().map_err(io_err)?.join(root)
+        };
         base.push(format!("{prefix}-{pid}-{tid_digits}-{seq}-{nanos}"));
         std::fs::create_dir_all(&base).map_err(io_err)?;
         let keep = crate::adapter::env_var::read("MUNUNU_KEEP_YOSYS_TMP")
@@ -4627,8 +4828,8 @@ endmodule
                 "init-policy override's signal name",
             ),
             (
-                "include directory with a space",
-                &|o| o.extra_include_dirs = vec![PathBuf::from("inc dir")],
+                "an empty include directory",
+                &|o| o.extra_include_dirs = vec![PathBuf::new()],
                 "include directory",
             ),
         ];
@@ -4638,6 +4839,17 @@ endmodule
                 err.contains(field) && err.contains("is not accepted"),
                 "{what}: the refusal names the field: {err}"
             );
+        }
+        // mununu#1138 — an include directory with a space is staged as a link the script names,
+        // so it is no longer hostile where links exist; where they do not, the #1133 refusal
+        // stays.
+        let spaced =
+            plan(&|o: &mut YosysOptions| o.extra_include_dirs = vec![PathBuf::from("inc dir")]);
+        if cfg!(unix) {
+            spaced.expect("an include directory with a space is staged as a link");
+        } else {
+            let err = spaced.expect_err("no links: the include directory is refused");
+            assert!(err.contains("include directory"), "{err}");
         }
         // The plain forms pass this gate (the plan may still fail later for other reasons; the
         // message would then not be the input refusal).
@@ -5014,6 +5226,253 @@ endmodule
             ),
             "caller include dir not appended on the slang path: {script}"
         );
+        // mununu#1138 — a relative staged source (the lift's shape) searches `.`.
+        let script = slang_script(&[PathBuf::from("work.sv")], None, &[], &inc, &[]);
+        assert!(
+            script.contains(
+                "read_slang --ignore-assertions --ignore-timing --empty-blackboxes -I. -I/design/pkg work.sv"
+            ),
+            "{script}"
+        );
+    }
+
+    /// mununu#1138 — REPRODUCER: the lift's plan runs yosys inside the staging directory and
+    /// names every staged file relative to it, so a staging directory with a space (a `TMPDIR`
+    /// with one) never reaches the script. Fails on the parent: the script carried the
+    /// absolute staging paths and yosys ran where mununu did.
+    #[test]
+    fn x1138_the_lift_script_names_staged_files_relative_to_the_staging_directory() {
+        let dir = Path::new("/tmp/dir with space/mununu-yosys-1");
+        let src = "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; \
+                   endmodule\n";
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            additional_sources: vec![("peer.sv".into(), "module p; endmodule\n".into())],
+            ..Default::default()
+        };
+        let plan = plan_lift(src, &yopts, dir).expect("a plan needs no tool");
+        assert_eq!(
+            plan.yosys_cwd.as_deref(),
+            Some(dir),
+            "yosys runs in the staging dir"
+        );
+        assert!(
+            !plan.script.contains("dir with space"),
+            "no staged path in the script: {}",
+            plan.script
+        );
+        for needle in [
+            " -I. work.sv peer.sv",
+            "write_json hier.json",
+            "write_json clocks.json",
+            "write_btor design.btor",
+        ] {
+            assert!(
+                plan.script.contains(needle),
+                "{needle} not in {}",
+                plan.script
+            );
+        }
+        // The run reads the outputs where the script wrote them.
+        assert_eq!(plan.btor_path, dir.join("design.btor"));
+        assert_eq!(plan.hier_json_path, dir.join("hier.json"));
+        assert_eq!(plan.staged[0].0, dir.join("work.sv"));
+    }
+
+    /// mununu#1138 — the per-module output directory reaches `write_btor` absolute whatever the
+    /// caller gave (yosys runs inside the staging directory): a relative directory resolves
+    /// against mununu's working directory, the CLI's empty default is that directory, an
+    /// absolute one is kept, and a `"` is refused by name.
+    #[test]
+    fn x1138_a_relative_per_module_output_directory_is_made_absolute_for_the_script() {
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            per_module_output_dir(Path::new("build/sub")).expect("relative"),
+            cwd.join("build/sub")
+        );
+        assert_eq!(per_module_output_dir(Path::new("")).expect("empty"), cwd);
+        let abs = cwd.join("out dir");
+        assert_eq!(per_module_output_dir(&abs).expect("absolute"), abs);
+        let script = build_per_module_script(
+            &[PathBuf::from("work.sv")],
+            "m",
+            &per_module_output_dir(Path::new("build"))
+                .expect("relative")
+                .join("m.btor2"),
+            false,
+            false,
+            &Default::default(),
+            &[],
+        );
+        assert!(
+            script.contains(&format!(
+                "write_btor {}",
+                cwd.join("build").join("m.btor2").display()
+            )),
+            "{script}"
+        );
+        let err = per_module_output_dir(Path::new("a\"b")).expect_err("a quote");
+        assert!(
+            err.message.contains("per-module output directory"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("--output-dir"), "{}", err.message);
+    }
+
+    /// mununu#1138 — a caller include directory with a space in its path is staged as a link
+    /// and the script names the link, so nothing of the caller's path reaches `read_slang`; an
+    /// empty path is refused naming `--include-dir` (a missing one is slang's own warning).
+    #[test]
+    fn an_include_directory_is_staged_as_a_link_the_script_names() {
+        let root = std::env::temp_dir().join(format!("mununu inc {}", std::process::id()));
+        std::fs::create_dir_all(root.join("inc")).expect("mkdir");
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            extra_include_dirs: vec![root.join("inc"), PathBuf::from("rel/inc2")],
+            ..Default::default()
+        };
+        let dir = Path::new("/tmp/staging dir/mununu-yosys-9");
+        let plan = plan_lift(
+            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n",
+            &yopts,
+            dir,
+        )
+        .expect("a plan needs no tool");
+        if cfg!(unix) {
+            assert!(
+                plan.script.contains(" -I. -Iinc0 -Iinc1 work.sv"),
+                "{}",
+                plan.script
+            );
+            assert!(!plan.script.contains("mununu inc"), "{}", plan.script);
+            assert_eq!(plan.include_links[0], (dir.join("inc0"), root.join("inc")));
+            assert_eq!(
+                plan.include_links[1].1,
+                std::env::current_dir().expect("cwd").join("rel/inc2"),
+                "a relative directory is made absolute, links unresolved"
+            );
+        } else {
+            assert!(plan.include_links.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let empty = YosysOptions {
+            extra_include_dirs: vec![PathBuf::new()],
+            ..Default::default()
+        };
+        let err = validate_lift_inputs(&empty).expect_err("an empty path");
+        assert!(err.message.contains("--include-dir"), "{}", err.message);
+    }
+
+    /// mununu#1138 — a tool path from the environment with a separator is made absolute before
+    /// yosys moves into the staging directory; a bare name stays a `$PATH` lookup.
+    #[test]
+    fn a_relative_tool_path_with_a_separator_is_made_absolute() {
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            absolute_if_relative_path(Path::new("./oss-cad-suite/bin/yosys")),
+            cwd.join("./oss-cad-suite/bin/yosys")
+        );
+        assert_eq!(
+            absolute_if_relative_path(Path::new("tools/slang.so")),
+            cwd.join("tools/slang.so")
+        );
+        assert_eq!(
+            absolute_if_relative_path(Path::new("yosys")),
+            PathBuf::from("yosys")
+        );
+        assert_eq!(
+            absolute_if_relative_path(Path::new("/usr/bin/yosys")),
+            PathBuf::from("/usr/bin/yosys")
+        );
+        let _p = crate::adapter::env_var::override_for_test("MUNUNU_YOSYS_PATH", "tools/yosys");
+        assert_eq!(
+            locate_yosys().expect("the variable wins"),
+            cwd.join("tools/yosys")
+        );
+        let _m =
+            crate::adapter::env_var::override_for_test("MUNUNU_YOSYS_SLANG_PLUGIN", "./slang.so");
+        assert_eq!(
+            slang_plugin_arg().as_deref(),
+            Some(cwd.join("./slang.so").to_string_lossy().as_ref())
+        );
+    }
+
+    /// mununu#1138 — a relative staging root is made absolute before the per-call directory is
+    /// created, so the absolute `-l` log and output paths hold wherever yosys runs.
+    #[test]
+    fn a_relative_staging_root_is_made_absolute() {
+        let _r = crate::adapter::env_var::override_for_test(
+            "MUNUNU_LIFT_STAGING_ROOT",
+            "target/mununu-staging-test",
+        );
+        let tmp = TempDir::new("mununu-root-test").expect("tempdir");
+        assert!(tmp.path().is_absolute(), "{}", tmp.path().display());
+        assert!(
+            tmp.path().starts_with(
+                std::env::current_dir()
+                    .expect("cwd")
+                    .join("target/mununu-staging-test")
+            ),
+            "{}",
+            tmp.path().display()
+        );
+    }
+
+    /// mununu#1138 — a yosys-native command (`write_btor`, `write_json`, `read_verilog`) takes
+    /// a path with a space as one quoted token; a bare path stays bare (the scripts the tests
+    /// above assert on are unchanged).
+    #[test]
+    fn a_yosys_native_path_with_a_space_is_quoted_as_one_token() {
+        assert_eq!(
+            yosys_path_arg(Path::new("/out dir/m.btor2")),
+            "\"/out dir/m.btor2\""
+        );
+        assert_eq!(yosys_path_arg(Path::new("m.btor2")), "m.btor2");
+        let script = build_per_module_script(
+            &[PathBuf::from("work.sv")],
+            "m",
+            Path::new("/out dir/m.btor2"),
+            false,
+            false,
+            &Default::default(),
+            &[],
+        );
+        assert!(
+            script.ends_with("write_btor \"/out dir/m.btor2\""),
+            "{script}"
+        );
+    }
+
+    /// mununu#1138 — the lift under a staging root with a space in its path (the shape of a
+    /// `TMPDIR` with one): the design lifts, and the staging really happened there.
+    #[test]
+    #[ignore = "requires the mununu-sva image (yosys); run by the e2e sweep"]
+    fn e2e_the_lift_runs_under_a_staging_root_with_a_space() {
+        let root =
+            std::env::temp_dir().join(format!("mununu dir with space {}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("the spaced root");
+        let _root = crate::adapter::env_var::override_for_test("MUNUNU_LIFT_STAGING_ROOT", &root);
+        let _keep = crate::adapter::env_var::override_for_test("MUNUNU_KEEP_YOSYS_TMP", "1");
+        let src = "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; \
+                   endmodule\n";
+        let out = sv_to_btor2_with_blackboxes(
+            src,
+            &YosysOptions {
+                top: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .expect("the design lifts under a staging root with a space");
+        assert!(out.btor2.contains("next"), "{}", out.btor2);
+        let staged: Vec<_> = std::fs::read_dir(&root)
+            .expect("the root is readable")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("mununu-yosys-"))
+            .collect();
+        assert!(!staged.is_empty(), "the lift staged under the spaced root");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // (b) end-to-end — an include-only fragment (a mid-`always` statement, NOT a
@@ -5916,18 +6375,20 @@ mod lift_cache_tests {
         assert_eq!(m.format, LIFT_CACHE_FORMAT);
         assert_eq!(m.staged, vec![("work.sv".to_string(), src.to_string())]);
         assert_eq!(m.attempt.frontend, "slang");
-        assert!(!m.attempt.cwd_in_staging_dir);
+        // mununu#1138 — yosys runs inside the staging directory and the script names the
+        // staged files relative to it, so the placeholder directory is not in the script.
+        assert!(m.attempt.cwd_in_staging_dir);
         assert!(m.attempt.plugin.is_none() && m.attempt.sv2v.is_none());
-        // The staged file is rendered with the host's separator (`staging\work.sv` on Windows,
-        // which yosys there accepts): the manifest renders the plan the run executes on THIS
-        // host, so the expectation is built the same way, not spelled with `/`.
-        let work = Path::new("/mununu-lift-cache/staging").join("work.sv");
         assert!(
-            m.attempt.script.contains(&format!(
+            m.attempt.script.contains(
                 "read_slang --ignore-assertions --ignore-timing --empty-blackboxes --top m \
-                 -I/mununu-lift-cache/staging {}",
-                work.display()
-            )),
+                 -I. work.sv"
+            ),
+            "{}",
+            m.attempt.script
+        );
+        assert!(
+            !m.attempt.script.contains("/mununu-lift-cache/staging"),
             "{}",
             m.attempt.script
         );
