@@ -3345,11 +3345,34 @@ mod tests {
                 .all(|(_, why)| why.contains("node cap") && why.contains("40 nodes")),
             "{full:?}"
         );
-        let owned = decide_owned_only_using(&file, 30_000, false, &capped);
+        // The owned-only driver runs every owned member: on a design the others decide first
+        // the capped two are cancelled into no list (a peer decided), so the others are stubbed
+        // to find nothing and the design is SAFE (the real deep-CEX search finds no path).
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let safe = parser::parse(SAFE).expect("parse");
+        let owned_table = Runners {
+            exact: |_| Ok(None),
+            native: |_, _, _, _| Ok(None),
+            interp_available: || Err("not in this test".into()),
+            #[cfg(not(feature = "boolector"))]
+            cex: |_, _, _| Ok(None),
+            ..capped
+        };
+        let owned = decide_owned_only_using(&safe, 20_000, false, &owned_table);
+        assert_eq!(owned.verdict, ReachVerdict::Unknown, "{owned:?}");
         let names: Vec<&str> = owned.abstained.iter().map(|(m, _)| *m).collect();
         assert!(
             names.contains(&"sat-bmc") && names.contains(&"ic3"),
             "the owned-only driver names both too: {owned:?}"
+        );
+        assert!(
+            owned
+                .abstained
+                .iter()
+                .filter(|(m, _)| *m == "sat-bmc" || *m == "ic3")
+                .all(|(_, why)| why.contains("node cap")),
+            "{owned:?}"
         );
     }
 
