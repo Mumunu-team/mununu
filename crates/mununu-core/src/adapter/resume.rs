@@ -303,9 +303,6 @@ pub fn run_fingerprint(
         per_module_output_dir: _,
         cutpoint_signals,
         merge_clock_domains,
-        // mununu#1148 — set by the verb itself (verify-auto reports the clock roots), not a
-        // caller's input; it decides a refusal, never a verdict.
-        report_clock_roots: _,
     } = yosys;
     let _ = writeln!(t, "top {top:?}");
     for (name, content) in additional_sources {

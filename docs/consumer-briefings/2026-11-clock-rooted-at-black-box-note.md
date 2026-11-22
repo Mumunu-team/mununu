@@ -36,5 +36,5 @@
 
 ## Not covered here
 
-- The verbs other than `sv verify-auto` share the refusal and the diagnostics string; they take `--merge-clock-domains` too, and under it a derived or multi-clock design lifts there with nothing in the report (mununu#1181); a free-source clock does not (refused).
+- The verbs other than `sv verify-auto` share the refusal and the diagnostics string; they take `--merge-clock-domains` too, and when this was written a derived or multi-clock design lifted there under it with nothing in the report, and a free-source clock did not (refused). Fixed by mununu#1181: every verb reports the merge in `lift_notes` and lifts a free-source clock under the flag — see [its briefing](2026-11-merged-clock-domains-on-every-sv-verb.md).
 - A constant clock bit, a net between two stubs, an `inout` port of a black box and a bit with two drivers were open rows of the `clock-net-driver` class when this was written; mununu#1180 closed them — see [the follow-up briefing](2026-11-clock-roots-constant-port-several-drivers.md).

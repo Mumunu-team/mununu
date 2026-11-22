@@ -791,6 +791,8 @@ The CEGAR fields (`formula`, `predicates`, `controllable`, `predicate_source`, `
 
 Identical to [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar) (`Btor2CegarResponse`).
 
+One field is filled only here: `lift_notes`, an array of typed notes (`kind`, `level`, `summary`, `detail`, `items`) saying what the lift did to the design's clocks — the `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` merged clock domains, and one note per clock with no driver in the lifted design. It is absent when the lift has nothing to say (a design on one input clock). Every `sv` route's response carries it, except `sv/verify-auto` (the same notes are in its `notes`) and `sv/cdc-lint` (`domains` and `notes`).
+
 ### Example
 
 ```bash

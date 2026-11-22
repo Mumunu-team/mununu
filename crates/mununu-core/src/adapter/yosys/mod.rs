@@ -273,19 +273,17 @@ pub struct YosysOptions {
     /// HOLDS does not transfer. Roadmap B2: it also lets through a design whose one domain is a
     /// DERIVED clock (gated, divided, muxed — [`ClockDomain::derived_from`]), which the model then
     /// ticks on every step; for a divided clock neither verdict transfers. Default `false`: such a
-    /// design is refused at lift time ([`clock_domains_with_hierarchy`]). verify-auto reports the merged domains
-    /// as a soundness caveat.
+    /// design is refused at lift time ([`clock_domains_with_hierarchy`]). It also lets through a clock the
+    /// lifted design holds no driver for (mununu#1148, mununu#1180).
+    ///
+    /// mununu#1181 — every verb that takes the opt-in reports what it merged: the lift result
+    /// carries the domains ([`SvLiftResult::clock_domains`]) and the caller turns them into the
+    /// `clock-domains-merged` caveat and the clock-root notes
+    /// ([`lift_clock_notes`](crate::adapter::slang::verify_auto::lift_clock_notes)). The entry
+    /// that returns the model alone ([`sv_to_btor2`]) has nowhere to carry them and refuses the
+    /// opt-in. The policy test `every_lift_that_can_merge_clock_domains_reports_them` lists the
+    /// callers of the entry that can merge.
     pub merge_clock_domains: bool,
-    /// mununu#1148 — set by a verb that reads [`SvLiftResult::clock_domains`] and reports every
-    /// free-source root (a black box, a cut net, no driver) to the reader: `sv verify-auto`
-    /// (`lift_sv`), whose report carries the `clock-rooted-at-black-box` / `clock-undriven`
-    /// notes, and `sv cdc-lint` (`sv_cdc_lint`), whose notes name the root. The setters are
-    /// listed by the policy test `report_clock_roots_is_set_only_where_the_roots_are_reported`. Under [`Self::merge_clock_domains`] such a clock lifts only when this is set; a
-    /// verb that drops the domains is refused instead, so no verb ships a lockstep verdict on a
-    /// driverless clock with nothing in its report ([`refuse_merged_clock_domains`]). A derived
-    /// clock and a multi-domain design are not gated by it (they lift under the opt-in on every
-    /// verb, reported by verify-auto alone — a mununu limitation, mununu#1181).
-    pub report_clock_roots: bool,
 }
 
 /// SV-via-Yosys adapter — wraps the BTOR2 path with a Yosys subprocess.
@@ -1128,27 +1126,8 @@ pub(crate) fn refuse_merged_clock_domains(
     yopts: &YosysOptions,
 ) -> Result<(), AdapterError> {
     if yopts.merge_clock_domains {
-        // mununu#1148 — the opt-in lifts a clock the design holds no driver for only where the
-        // caller reports the root ([`YosysOptions::report_clock_roots`]: `sv verify-auto`). The
-        // flag is on every `sv` verb and API route; the others drop the clock domains, and a
-        // lockstep verdict on such a clock with nothing in the report would be silent.
-        if !yopts.report_clock_roots
-            && let Some(d) = domains.iter().find(|d| d.is_free_source())
-        {
-            let (what, _, _) = free_source_wording(d);
-            return Err(AdapterError {
-                kind: AdapterErrorKind::UnsupportedConstruct,
-                message: format!(
-                    "adapter/yosys: {} is {what}; `--merge-clock-domains` lifts such a clock \
-                     only on `sv verify-auto` and `sv cdc-lint`, whose reports name the root in \
-                     a note — this verb drops the clock domains, so the lockstep model would \
-                     ship with nothing said about it (a mununu limitation). Clock domains: {}.",
-                    d.subject(),
-                    describe_clock_domains(domains)
-                ),
-                location: None,
-            });
-        }
+        // mununu#1181 — the opt-in accepts every shape below, on every verb that takes it: the
+        // caller holds the domains ([`SvLiftResult::clock_domains`]) and reports them.
         return Ok(());
     }
     // Roadmap B2 — one domain on a DERIVED clock: the census of 2026-11-11 found gated, divided
@@ -1164,9 +1143,8 @@ pub(crate) fn refuse_merged_clock_domains(
                  every step, so lifting it would ignore the logic that gates or divides the \
                  clock and every verdict could be wrong. Clock domains: {}. Model the gating as \
                  a clock enable (`if (en) q <= d;` on the root clock); `--merge-clock-domains` \
-                 on the `sv` verbs accepts the lockstep model explicitly — `sv verify-auto` then \
-                 reports it (`clock-domains-merged`), the other verbs report nothing (a mununu \
-                 limitation).",
+                 on the `sv` verbs accepts the lockstep model explicitly, and the report then \
+                 says so in a `clock-domains-merged` note.",
                 d.net,
                 d.derived_from().unwrap_or("logic"),
                 describe_clock_domains(domains)
@@ -1177,7 +1155,7 @@ pub(crate) fn refuse_merged_clock_domains(
     // mununu#1148 — a clock the lifted design holds no driver for (a black box's output, a cut
     // net, no driver at all) is refused the same way: whether ticking it on every step is right
     // (an independent source) or hides gating, division or a clock that never runs is not in
-    // the model. `--merge-clock-domains` accepts the lockstep reading, and `sv verify-auto`
+    // the model. `--merge-clock-domains` accepts the lockstep reading, and the verb's report
     // then names the root in a note (`clock-rooted-at-black-box`, `clock-undriven`,
     // `clock-constant`, `clock-multi-driven`). Before this the cut shape was refused as
     // "derived from logic" and the stub shape lifted silently; mununu#1180 added the constant,
@@ -1189,10 +1167,8 @@ pub(crate) fn refuse_merged_clock_domains(
             message: format!(
                 "adapter/yosys: {} is {what}; {why}, so no verdict on the {} storage cell(s) it \
                  clocks would transfer on its own. Clock domains: {}. {remedy}; \
-                 `--merge-clock-domains` on `sv verify-auto` \
-                 accepts the lockstep model explicitly and names the root in a note — on the \
-                 other `sv` verbs the flag does not lift such a clock, since they drop the roots \
-                 (a mununu limitation).",
+                 `--merge-clock-domains` on the `sv` verbs accepts the lockstep model \
+                 explicitly, and the report then names the root in a note.",
                 d.subject(),
                 d.cells,
                 describe_clock_domains(domains)
@@ -1208,8 +1184,8 @@ pub(crate) fn refuse_merged_clock_domains(
                  clock, so lifting it would step every domain together and hide every crossing \
                  defect. Run `mununu sv cdc-lint` to classify the crossings, or verify each \
                  domain on its own; `--merge-clock-domains` on the `sv` verbs accepts that \
-                 under-approximation explicitly — `sv verify-auto` then reports it \
-                 (`clock-domains-merged`), the other verbs report nothing (a mununu limitation).",
+                 under-approximation explicitly, and the report then says so in a \
+                 `clock-domains-merged` note.",
                 domains.len(),
                 describe_clock_domains(domains)
             ),
@@ -1220,9 +1196,8 @@ pub(crate) fn refuse_merged_clock_domains(
 }
 
 /// mununu#1148 / mununu#1180 — what a free-source clock root is, and what the user can do about
-/// it, in the words of both refusals (the default one and the opt-in on a verb that drops the
-/// roots). One exhaustive match: a new root kind is a compile error here, not an "undriven" by
-/// default. Starts lower-case, the remedy has no final stop.
+/// it, in the words of the refusal. One exhaustive match: a new root kind is a compile error
+/// here, not an "undriven" by default. Starts lower-case, the remedy has no final stop.
 fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) {
     // Why the lockstep model says nothing about the cells on such a clock.
     const FREE: &str = "the model has one implicit clock that ticks on every step, which is \
@@ -1333,6 +1308,7 @@ pub fn sv_discover_state_cells(
     yopts: &YosysOptions,
 ) -> Result<Vec<SvStateCell>, AdapterError> {
     use super::btor2::ast::Node;
+    refuse_merge_without_domains(yopts)?;
     let artifacts = run_sv_flatten_btor2(content, yopts)?;
     let file = super::btor2::parser::parse(&artifacts.btor2).map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
@@ -1362,6 +1338,7 @@ pub fn translate_sv(
     options: &AdapterOptions,
     yopts: &YosysOptions,
 ) -> Result<AdapterOutput, AdapterError> {
+    refuse_merge_without_domains(yopts)?;
     let SvFlattenArtifacts {
         btor2: btor,
         hier_json,
@@ -1471,8 +1448,32 @@ pub fn translate_sv(
 /// right input for the cube). Thin wrapper over [`run_sv_flatten_btor2`];
 /// for multi-module *composition* (not single-system CEGAR) use
 /// [`translate_sv_per_module`] instead.
+///
+/// mununu#1181 — this entry returns the model and nothing about the lift, so it cannot say that
+/// clock domains were merged: it refuses [`YosysOptions::merge_clock_domains`]. A verb that
+/// takes the opt-in lifts with [`sv_to_btor2_with_blackboxes`] and reports the domains.
 pub fn sv_to_btor2(content: &str, yopts: &YosysOptions) -> Result<String, AdapterError> {
+    refuse_merge_without_domains(yopts)?;
     run_sv_flatten_btor2(content, yopts).map(|a| a.btor2)
+}
+
+/// mununu#1181 — the refusal of every lift entry that returns a model and not its clock domains
+/// ([`sv_to_btor2`], [`sv_discover_state_cells`], [`translate_sv`]): asked to merge clock
+/// domains, it would lift an under-approximation nobody downstream can report, so it refuses
+/// before any tool runs. No surface passes the opt-in to one of them today; a caller that starts
+/// to is a defect of mununu, and this is where it stops.
+fn refuse_merge_without_domains(yopts: &YosysOptions) -> Result<(), AdapterError> {
+    if !yopts.merge_clock_domains {
+        return Ok(());
+    }
+    Err(AdapterError {
+        kind: AdapterErrorKind::IrConsistencyError,
+        message: crate::adapter::owner::mununu_defect(
+            "adapter/yosys: a lift that returns the model alone was asked to merge clock \
+             domains; it has no report to say so in, so it does not lift",
+        ),
+        location: None,
+    })
 }
 
 /// Like [`sv_to_btor2`] but additionally returns the names of modules the lift
@@ -1543,7 +1544,8 @@ pub struct ClockDomain {
     /// mununu#1148 — what drives the net, from one walk ([`ClockRoot`]). A derived clock and a
     /// free-source root (a black box, a cut net, no driver) are both refused like a second
     /// domain unless `--merge-clock-domains` ([`refuse_merged_clock_domains`]); the description
-    /// and, under the opt-in, a `sv verify-auto` note name the root.
+    /// and, under the opt-in, a note in the verb's report name the root (mununu#1181: every
+    /// verb that takes the opt-in).
     pub root: ClockRoot,
 }
 
@@ -4545,38 +4547,15 @@ endmodule
                 "{name}: {}",
                 err.message
             );
-            let opt_in_only = sv_to_btor2_with_blackboxes(
-                src,
-                &YosysOptions {
-                    merge_clock_domains: true,
-                    ..Default::default()
-                },
-            )
-            .err()
-            .unwrap_or_else(|| {
-                panic!("{name}: the opt-in alone (a verb that drops the roots) is refused")
-            });
-            assert!(
-                opt_in_only
-                    .message
-                    .contains("only on `sv verify-auto` and `sv cdc-lint`, whose reports name"),
-                "{name}: {}",
-                opt_in_only.message
-            );
+            // mununu#1181 — the opt-in lifts it on every verb: the result carries the root.
             let merged = sv_to_btor2_with_blackboxes(
                 src,
                 &YosysOptions {
                     merge_clock_domains: true,
-                    report_clock_roots: true,
                     ..Default::default()
                 },
             )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{name}: the opt-in where the root is reported lifts it: {}",
-                    e.message
-                )
-            });
+            .unwrap_or_else(|e| panic!("{name}: the opt-in lifts it: {}", e.message));
             let gclk = merged
                 .clock_domains
                 .iter()
@@ -4769,26 +4748,48 @@ endmodule
                 "{}",
                 err.message
             );
-            // The opt-in alone is a verb that drops the roots: refused, naming where it works.
+            // mununu#1181 — the opt-in accepts the lockstep model on every verb; the lift
+            // result carries the root and the verb reports it.
             let merged = YosysOptions {
                 merge_clock_domains: true,
                 ..Default::default()
             };
-            let err = refuse_merged_clock_domains(&only_gated, &merged)
-                .expect_err("the opt-in on a verb that drops the roots is refused");
+            refuse_merged_clock_domains(&only_gated, &merged)
+                .expect("the opt-in accepts the lockstep model");
+        }
+    }
+
+    /// mununu#1181 — the entry that returns the model alone has nowhere to say that clock
+    /// domains were merged, so it refuses the opt-in before any tool runs; the entry that
+    /// returns the domains is the one a verb with the opt-in lifts through.
+    #[test]
+    fn x1181_every_model_only_lift_refuses_the_merge_opt_in() {
+        const SV: &str = "module m(input clk, input d, output reg q);\n  always @(posedge clk) q <= d;\nendmodule\n";
+        let merged = YosysOptions {
+            merge_clock_domains: true,
+            ..Default::default()
+        };
+        // One row per entry that calls the flatten lift and returns no `clock_domains`; the
+        // fourth caller, `sv_to_btor2_with_blackboxes`, returns them and is the one that merges.
+        let refusals = [
+            ("sv_to_btor2", sv_to_btor2(SV, &merged).err()),
+            (
+                "sv_discover_state_cells",
+                sv_discover_state_cells(SV, &merged).err(),
+            ),
+            (
+                "translate_sv",
+                translate_sv(SV, &AdapterOptions::default(), &merged).err(),
+            ),
+        ];
+        for (entry, err) in refusals {
+            let err = err.unwrap_or_else(|| panic!("{entry} lifted under the merge opt-in"));
             assert!(
-                err.message.contains("`gclk`")
-                    && err.message.contains("only on `sv verify-auto`")
-                    && err.message.contains("drops the clock domains"),
-                "{}",
+                err.message.contains("returns the model alone")
+                    && err.message.contains("a mununu defect"),
+                "{entry}: {}",
                 err.message
             );
-            let reported = YosysOptions {
-                report_clock_roots: true,
-                ..merged
-            };
-            refuse_merged_clock_domains(&only_gated, &reported)
-                .expect("the opt-in where the root is reported accepts the lockstep model");
         }
     }
 
@@ -5158,7 +5159,6 @@ endmodule
         };
         let reported = YosysOptions {
             merge_clock_domains: true,
-            report_clock_roots: true,
             ..Default::default()
         };
         let root_on_a_hit = |hier: &str| {
@@ -5245,10 +5245,9 @@ endmodule
     }
 
     /// mununu#1180 — each new root is a free source: refused by default in its own words with a
-    /// remedy, refused under the opt-in on a verb that drops the roots, lifted under the opt-in
-    /// where the root is reported.
+    /// remedy, lifted under the opt-in (mununu#1181: on every verb, each of which reports it).
     #[test]
-    fn x1180_each_new_root_is_refused_in_its_own_words_unless_merged_and_reported() {
+    fn x1180_each_new_root_is_refused_in_its_own_words_unless_merged() {
         let cases: [(ClockRoot, &str, &[&str]); 3] = [
             (
                 tied("0", "q"),
@@ -5292,7 +5291,7 @@ endmodule
             }
             assert!(
                 err.message
-                    .contains("`--merge-clock-domains` on `sv verify-auto`"),
+                    .contains("`--merge-clock-domains` on the `sv` verbs accepts the lockstep"),
                 "{}",
                 err.message
             );
@@ -5300,20 +5299,8 @@ endmodule
                 merge_clock_domains: true,
                 ..Default::default()
             };
-            let err = refuse_merged_clock_domains(&domains, &merged)
-                .expect_err("the opt-in on a verb that drops the roots is refused");
-            assert!(
-                err.message.contains(needles[0])
-                    && err.message.contains("only on `sv verify-auto`"),
-                "{}",
-                err.message
-            );
-            let reported = YosysOptions {
-                report_clock_roots: true,
-                ..merged
-            };
-            refuse_merged_clock_domains(&domains, &reported)
-                .expect("the opt-in where the root is reported accepts the lockstep model");
+            refuse_merged_clock_domains(&domains, &merged)
+                .expect("the opt-in accepts the lockstep model");
         }
     }
 
@@ -5469,7 +5456,6 @@ endmodule
                 &src,
                 &YosysOptions {
                     merge_clock_domains: true,
-                    report_clock_roots: true,
                     ..Default::default()
                 },
             )

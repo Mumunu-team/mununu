@@ -1,5 +1,50 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "VerificationNoteView": {
+      "description": "One provenance note (mirrors [`crate::adapter::slang::verify_auto::VerificationNote`]).",
+      "properties": {
+        "detail": {
+          "description": "Longer explanation (the why + the soundness/scope implication).",
+          "type": "string"
+        },
+        "items": {
+          "description": "Structured operands (e.g. `[\"cfg_detect_timer_i=7\"]`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "Machine-stable kebab category (e.g. `\"config-concretization\"`).",
+          "type": "string"
+        },
+        "level": {
+          "description": "`\"info\"` | `\"scope-caveat\"` | `\"soundness-caveat\"`.",
+          "type": "string"
+        },
+        "property": {
+          "description": "mununu#548 O-2 — the property this note is ABOUT, when it is about one.\n\nAbsent for a model-level note (reset-gating, control-slice, parameter overrides): those describe the lift, not a property.\n\n**Group notes by this, not by parsing `summary`.** The name used to appear only as a `\"<name>: \"` prefix inside the prose, so a consumer joining on it inherited two bugs: a property whose name prefixes another's (`sva_1` vs `sva_10`) matched the wrong note, and any rewording of the note's opening silently broke the join.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "description": "One-line human summary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "items",
+        "kind",
+        "level",
+        "summary"
+      ],
+      "type": "object"
+    }
+  },
   "description": "mununu#541 — the `sv verify-liveness` CLI report, schema-pinned. See [`SvVerifyRecoverabilityReport`] for why these are types.",
   "properties": {
     "decided_by": {
@@ -12,6 +57,13 @@
     "file": {
       "description": "The design file as given on the command line.",
       "type": "string"
+    },
+    "lift_notes": {
+      "description": "What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged` soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several clock domains, a derived clock or a clock the design holds no driver for on the model's one clock, and one note per such clock. The result is one on that model. Empty — and omitted — for a design on one input clock.",
+      "items": {
+        "$ref": "#/definitions/VerificationNoteView"
+      },
+      "type": "array"
     },
     "notes": {
       "description": "Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget abstention (`\"<member> refused: …\"` / `\"<member>: …\"`), and the k-liveness fallback's note. Empty — and omitted — on a decided row.",

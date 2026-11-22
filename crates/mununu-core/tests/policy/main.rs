@@ -6,7 +6,6 @@
 //! The issue-numbered reproducers stay separate binaries: `make verify-repro` builds a parent
 //! commit by target name, and a parent has no `policy` target.
 
-mod clock_roots_reported_1148;
 mod consumer_neutral_output_g5;
 mod docs_references_resolve_d2;
 mod env_reads_go_through_env_var_974;
@@ -14,6 +13,7 @@ mod env_vars_documented_d1;
 mod hook_features_match_the_cli_1165;
 mod ignored_tests_have_a_runner;
 mod licence_never_reaches_a_verdict_h1;
+mod merged_clock_domains_reported_1181;
 mod no_links_into_untracked_paths_g4;
 mod one_yosys_minimum_version_1121;
 mod remedies_name_real_flags_1106;

@@ -41,6 +41,10 @@ pub struct MutateReport {
     pub flipped: usize,
     /// Number the mutation did NOT flip (the adequacy finding).
     pub unflipped: usize,
+    /// mununu#1181 — what the lift of the design says about its clocks (clock domains merged
+    /// under `--merge-clock-domains`, a clock with a free-source root): both runs verify that
+    /// lift, so every verdict compared here is one on the merged model.
+    pub lift_notes: Vec<VerificationNote>,
 }
 
 impl MutateReport {
@@ -107,6 +111,8 @@ pub fn mutate_and_compare(
         properties,
         flipped,
         unflipped,
+        // The mutation is applied to the lifted model, so the mutant's lift has the same clocks.
+        lift_notes: clock_notes_of_report(&baseline),
     })
 }
 
@@ -187,6 +193,9 @@ pub struct PlanReport {
     pub unsupported: Vec<(String, String)>,
     /// The lift's wall, milliseconds — paid once per run, not per property.
     pub lift_ms: u64,
+    /// mununu#1181 — what the lift says about its clocks, as the run's `notes` would: the plan
+    /// is a plan for the merged model. Empty when no property translated (nothing is lifted).
+    pub lift_notes: Vec<VerificationNote>,
 }
 
 /// [`PlanReport`] for these inputs: `prepare_model` (the same lift the run does) and
@@ -265,6 +274,7 @@ pub fn plan_auto(
                     .collect(),
                 unsupported: m.report.unsupported.clone(),
                 lift_ms,
+                lift_notes: clock_notes_of_report(&m.report),
             }
         }
     })

@@ -2809,6 +2809,104 @@ pub(crate) fn clock_root_notes(
         .collect()
 }
 
+/// The clock domains a lift merged onto the model's one clock, one description each
+/// (`clk_b (posedge, 1 cell, derived: driven by `$and`)`); empty when the design has one domain
+/// on a clock the model can follow. More than one domain, a lone derived clock (roadmap B2) and
+/// a lone clock with no driver in the lifted design (mununu#1148) are all merged: the lift lets
+/// each through only under `--merge-clock-domains`, so a non-empty answer means the opt-in was
+/// used. Pure over the domains.
+pub(crate) fn merged_clock_domain_descriptions(
+    domains: &[crate::adapter::yosys::ClockDomain],
+) -> Vec<String> {
+    if domains.len() > 1
+        || domains
+            .iter()
+            .any(|d| d.derived_from().is_some() || d.is_free_source())
+    {
+        domains
+            .iter()
+            .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The `clock-domains-merged` caveat over [`merged_clock_domain_descriptions`]; `None` when
+/// nothing was merged. SOUNDNESS: the merge is an UNDER-approximation of the interleavings, so a
+/// HOLDS does not transfer — the note is a soundness caveat on every verb's report, not only on
+/// `sv verify-auto`'s (mununu#1181).
+pub(crate) fn merged_clock_domains_note(merged: &[String]) -> Option<VerificationNote> {
+    let first = merged.first()?;
+    Some(VerificationNote {
+        kind: "clock-domains-merged".into(),
+        level: NoteLevel::SoundnessCaveat,
+        summary: if merged.len() > 1 {
+            format!(
+                "lift: {} clock domains merged onto one clock — every verdict assumes they \
+                 tick together.",
+                merged.len()
+            )
+        } else if first.contains(", derived") {
+            // Roadmap B2 — one domain, on a derived clock.
+            "lift: a derived clock merged onto the model's clock — every verdict assumes it \
+             ticks on every step."
+                .to_string()
+        } else {
+            // mununu#1148 — one domain, on a clock the design holds no driver for; the
+            // `clock-rooted-at-black-box` / `clock-undriven` note beside this one names it.
+            "lift: a clock with no driver in the lifted design merged onto the model's \
+             clock — every verdict assumes it ticks on every step."
+                .to_string()
+        },
+        detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
+                 implicit clock. That is an UNDER-approximation of the real interleavings: a \
+                 crossing defect that needs one domain to tick while another does not (a \
+                 lost pulse, an incoherent multi-bit bus) cannot occur in this model, so a \
+                 HOLDS does not transfer to the design. A VIOLATED is a run of the design in \
+                 which the domains happen to tick together. A domain marked `derived` (a \
+                 gated, divided or muxed clock) ticks here on every step: for a gated clock \
+                 that is the run where the enable stays high; a divided clock cannot tick \
+                 every step, so neither verdict transfers."
+            .to_string(),
+        items: merged.to_vec(),
+        property: None,
+    })
+}
+
+/// mununu#1181 — everything a report must say about the clocks of a lift that went through:
+/// the `clock-domains-merged` caveat, then one note per clock the lifted design holds no driver
+/// for ([`clock_root_notes`]). Empty for a design with one domain on a clock the model can
+/// follow. Every verb that can lift under `--merge-clock-domains` puts these in its report:
+/// `sv verify-auto` in `notes` (the caveat through `diagnostics.merged_clock_domains`), the
+/// other verbs in `lift_notes`. The policy test
+/// `every_lift_that_can_merge_clock_domains_reports_them` lists the callers.
+pub(crate) fn lift_clock_notes(
+    domains: &[crate::adapter::yosys::ClockDomain],
+) -> Vec<VerificationNote> {
+    merged_clock_domains_note(&merged_clock_domain_descriptions(domains))
+        .into_iter()
+        .chain(clock_root_notes(domains))
+        .collect()
+}
+
+/// mununu#1181 — [`lift_clock_notes`] read back from a `sv verify-auto` report or its skeleton,
+/// for a verb whose own report is built from one (`sv plan`, `sv mutate`): the caveat from
+/// `diagnostics.merged_clock_domains` (a skeleton holds the list before its notes are built),
+/// then the root notes the report carries.
+pub(crate) fn clock_notes_of_report(report: &AutoVerifyReport) -> Vec<VerificationNote> {
+    merged_clock_domains_note(&report.diagnostics.merged_clock_domains)
+        .into_iter()
+        .chain(
+            report
+                .notes
+                .iter()
+                .filter(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
+                .cloned(),
+        )
+        .collect()
+}
+
 fn build_notes(
     report: &AutoVerifyReport,
     must_edge_posture: &str,
@@ -2824,45 +2922,10 @@ fn build_notes(
     // Coverage summary (Info) — the honest at-a-glance tally.
     notes.push(coverage_summary_note(report));
 
+    notes.extend(merged_clock_domains_note(&d.merged_clock_domains));
     // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
     // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
     // the model is the same design, and a reader diffing two runs wants to know the script moved.
-    if !d.merged_clock_domains.is_empty() {
-        notes.push(VerificationNote {
-            kind: "clock-domains-merged".into(),
-            level: NoteLevel::SoundnessCaveat,
-            summary: if d.merged_clock_domains.len() > 1 {
-                format!(
-                    "lift: {} clock domains merged onto one clock — every verdict assumes they \
-                     tick together.",
-                    d.merged_clock_domains.len()
-                )
-            } else if d.merged_clock_domains[0].contains(", derived") {
-                // Roadmap B2 — one domain, on a derived clock.
-                "lift: a derived clock merged onto the model's clock — every verdict assumes it \
-                 ticks on every step."
-                    .to_string()
-            } else {
-                // mununu#1148 — one domain, on a clock the design holds no driver for; the
-                // `clock-rooted-at-black-box` / `clock-undriven` note beside this one names it.
-                "lift: a clock with no driver in the lifted design merged onto the model's \
-                 clock — every verdict assumes it ticks on every step."
-                    .to_string()
-            },
-            detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
-                     implicit clock. That is an UNDER-approximation of the real interleavings: a \
-                     crossing defect that needs one domain to tick while another does not (a \
-                     lost pulse, an incoherent multi-bit bus) cannot occur in this model, so a \
-                     HOLDS does not transfer to the design. A VIOLATED is a run of the design in \
-                     which the domains happen to tick together. A domain marked `derived` (a \
-                     gated, divided or muxed clock) ticks here on every step: for a gated clock \
-                     that is the run where the enable stays high; a divided clock cannot tick \
-                     every step, so neither verdict transfers."
-                .to_string(),
-            items: d.merged_clock_domains.clone(),
-            property: None,
-        });
-    }
     if let Some(reason) = &d.lift_retry {
         notes.push(VerificationNote {
             kind: "lift-retry".into(),
@@ -5744,16 +5807,6 @@ fn slice_seeds(formula: &str) -> Vec<String> {
     out
 }
 
-/// mununu#1148 — the lift options of a verb that reports the clock roots: `sv verify-auto` is
-/// the one caller, and the only place [`YosysOptions::report_clock_roots`] is set. Every other
-/// field is the caller's.
-pub(crate) fn lift_options_reporting_roots(yosys_opts: &YosysOptions) -> YosysOptions {
-    YosysOptions {
-        report_clock_roots: true,
-        ..yosys_opts.clone()
-    }
-}
-
 pub(crate) fn lift_sv(
     sources: &[(String, String)],
     yosys_opts: &YosysOptions,
@@ -5767,10 +5820,6 @@ pub(crate) fn lift_sv(
         message: "adapter/slang/verify_auto: no SV sources provided".to_string(),
         location: None,
     })?;
-    // mununu#1148 — this verb reads the lifted clock domains and reports every free-source root
-    // (`clock_root_notes`), so the lift may accept such a clock under `--merge-clock-domains`.
-    let reporting = lift_options_reporting_roots(yosys_opts);
-    let yosys_opts = &reporting;
     let overridden;
     let (primary_content, yosys_opts) = if opts.lift_overrides.is_empty() {
         (primary_content, yosys_opts)
@@ -6322,17 +6371,10 @@ pub(crate) fn prepare_model(
     fill_declarations(&mut trace_names, &declarations);
     report.diagnostics.trace_names = trace_names;
     // Roadmap B2 — a lone DERIVED domain (a gated or divided clock) that `--merge-clock-domains`
-    // let through is merged onto the model's clock as surely as a second domain is.
-    if clock_domains.len() > 1
-        || clock_domains
-            .iter()
-            .any(|d| d.derived_from().is_some() || d.is_free_source())
-    {
-        report.diagnostics.merged_clock_domains = clock_domains
-            .iter()
-            .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
-            .collect();
-    }
+    // let through is merged onto the model's clock as surely as a second domain is. The notes
+    // rebuild turns the list into the `clock-domains-merged` caveat (`merged_clock_domains_note`,
+    // the builder the other verbs' `lift_clock_notes` uses).
+    report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(&clock_domains);
     // mununu#1148 — a clock the model ticks every step without a driver it can read (a black
     // box, a cut net, no driver) is a note the reader sees; the rebuild below keeps it (a kind
     // it does not regenerate).
@@ -10968,6 +11010,7 @@ mod tests {
                 unflipped: props.len() - flipped,
                 properties: props,
                 flipped,
+                lift_notes: Vec::new(),
             }
         };
         assert_eq!(report(vec![flip(false), flip(true)]).outcome(), "holds");
@@ -25067,28 +25110,39 @@ mod clock_root_note_tests {
         }
     }
 
-    /// The verb that reports the roots is the one that may lift a free-source clock under the
-    /// opt-in: `lift_sv` sets `report_clock_roots` and nothing else; the lift refuses the
-    /// opt-in without it and accepts it with it (the verbs dimension of `clock-net-driver`).
+    /// mununu#1181 — what every verb's report says about the clocks of a lift, at its seam:
+    /// each shape the lift accepts only under the opt-in gives the `clock-domains-merged`
+    /// caveat, a free-source root gives its own note beside it, and one domain on an input
+    /// clock gives nothing. One row per `ClockRoot` kind, plus the two-domain shape.
     #[test]
-    fn x1148_only_the_reporting_verb_lifts_a_free_source_clock_under_the_opt_in() {
-        use crate::adapter::yosys::{YosysOptions, refuse_merged_clock_domains};
-        let caller = YosysOptions {
-            top: Some("top".into()),
-            merge_clock_domains: true,
-            ..Default::default()
-        };
-        let reporting = lift_options_reporting_roots(&caller);
-        assert!(reporting.report_clock_roots);
-        assert_eq!(reporting.top, caller.top);
-        assert!(reporting.merge_clock_domains);
+    fn x1181_every_merged_shape_has_the_caveat_and_every_free_root_its_note() {
+        fn kinds(domains: &[ClockDomain]) -> Vec<String> {
+            lift_clock_notes(domains)
+                .into_iter()
+                .map(|n| {
+                    assert_eq!(n.level, NoteLevel::SoundnessCaveat, "{}", n.kind);
+                    n.kind
+                })
+                .collect()
+        }
         assert!(
-            !YosysOptions::default().report_clock_roots,
-            "every other verb builds its options without the flag"
+            kinds(&[domain("clk", ClockRoot::Input)]).is_empty(),
+            "one domain on an input clock: nothing was merged"
         );
-        // The lift's decision at its seam, for each free-source root: the plain opt-in (any
-        // other verb) is refused naming where it works; the reporting verb's options lift it.
+        // Exhaustive over the enum: a new root kind fails to compile in `expected_root_note`.
+        fn expected_root_note(root: &ClockRoot) -> Option<&'static str> {
+            match root {
+                ClockRoot::Input | ClockRoot::Derived(_) => None,
+                ClockRoot::BlackBox(_) | ClockRoot::BlackBoxPort(_) | ClockRoot::Cut => {
+                    Some("clock-rooted-at-black-box")
+                }
+                ClockRoot::Undriven => Some("clock-undriven"),
+                ClockRoot::Constant { .. } => Some("clock-constant"),
+                ClockRoot::MultiDriven(_) => Some("clock-multi-driven"),
+            }
+        }
         for root in [
+            ClockRoot::Derived("$and".into()),
             ClockRoot::BlackBox("prim_clock_gating".into()),
             ClockRoot::BlackBoxPort(vec!["pad".into()]),
             ClockRoot::MultiDriven(vec!["osc".into(), "pll".into()]),
@@ -25099,16 +25153,61 @@ mod clock_root_note_tests {
             ClockRoot::Cut,
             ClockRoot::Undriven,
         ] {
-            let domains = [domain("gclk", root)];
-            let err = refuse_merged_clock_domains(&domains, &caller)
-                .expect_err("the opt-in on a verb that drops the roots is refused");
-            assert!(
-                err.message.contains("only on `sv verify-auto`"),
-                "{}",
-                err.message
+            let mut expected = vec!["clock-domains-merged".to_string()];
+            expected.extend(expected_root_note(&root).map(str::to_string));
+            // Alone: a lone domain the lift takes only under the opt-in.
+            assert_eq!(kinds(&[domain("gclk", root.clone())]), expected, "{root:?}");
+            // Beside the design's clock: two domains, the same notes.
+            assert_eq!(
+                kinds(&[
+                    domain("clk", ClockRoot::Input),
+                    domain("gclk", root.clone())
+                ]),
+                expected,
+                "{root:?} beside an input clock"
             );
-            refuse_merged_clock_domains(&domains, &reporting).expect("the reporting verb lifts it");
         }
+        // Two input clocks: the caveat alone, its items the two domains.
+        let two = lift_clock_notes(&[
+            domain("clk_a", ClockRoot::Input),
+            domain("clk_b", ClockRoot::Input),
+        ]);
+        assert_eq!(two.len(), 1, "{two:?}");
+        assert_eq!(two[0].kind, "clock-domains-merged");
+        assert_eq!(
+            two[0].items,
+            vec![
+                "clk_a (posedge, 3 cells)".to_string(),
+                "clk_b (posedge, 3 cells)".to_string()
+            ]
+        );
+        assert!(
+            two[0].summary.contains("2 clock domains merged"),
+            "{}",
+            two[0].summary
+        );
+    }
+
+    /// mununu#1181 — `sv verify-auto` builds its caveat from the same function the other verbs
+    /// use: the note the rebuild makes from `diagnostics.merged_clock_domains` equals the first
+    /// note of `lift_clock_notes`.
+    #[test]
+    fn x1181_verify_auto_and_the_other_verbs_word_the_merge_the_same() {
+        let domains = [
+            domain("clk", ClockRoot::Input),
+            domain("gated", ClockRoot::Derived("$and".into())),
+        ];
+        let mut report = AutoVerifyReport::default();
+        report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(&domains);
+        let rebuilt = build_notes(&report, "", &[], &[], &[], &[], &NotePosture::Exact);
+        let from_auto = rebuilt
+            .iter()
+            .find(|n| n.kind == "clock-domains-merged")
+            .expect("the rebuild emits the caveat");
+        let shared = lift_clock_notes(&domains);
+        assert_eq!(from_auto.summary, shared[0].summary);
+        assert_eq!(from_auto.detail, shared[0].detail);
+        assert_eq!(from_auto.items, shared[0].items);
     }
 
     /// One note per free-source root, none for an input or a derived clock; the kind, the
