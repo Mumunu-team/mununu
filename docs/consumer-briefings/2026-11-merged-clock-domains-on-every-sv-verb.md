@@ -1,6 +1,6 @@
 # Consumer briefing: every `sv` verb reports the clock domains it merged (2026-11)
 
-> Source of truth: `lift_clock_notes` in [`adapter/slang/verify_auto.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) and `Lifted` in [`adapter/sv_verify.rs`](../../crates/mununu-core/src/adapter/sv_verify.rs) — surface: CLI+API — `sv verify-liveness`, `sv verify-liveness-all`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`, `sv verify-auto --plan-only` and their `POST /api/v1/sv/…` routes, `POST /api/v1/sv/plan`, `POST /api/v1/sv/cegar`
+> Source of truth: `lift_clock_notes` in [`adapter/slang/verify_auto_text.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs) and `Lifted` in [`adapter/sv_verify.rs`](../../crates/mununu-core/src/adapter/sv_verify.rs) — surface: CLI+API — `sv verify-liveness`, `sv verify-liveness-all`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`, `sv verify-auto --plan-only` and their `POST /api/v1/sv/…` routes, `POST /api/v1/sv/plan`, `POST /api/v1/sv/cegar`
 
 **Audience:** anyone who passes `--merge-clock-domains` (API `lift.merge_clock_domains`) to an `sv` verb other than `sv verify-auto`, or who reads those verbs' reports. It follows the briefings of [mununu#1148](2026-11-clock-rooted-at-black-box-note.md) and [mununu#1180](2026-11-clock-roots-constant-port-several-drivers.md) and closes the case both left open.
 
