@@ -593,7 +593,7 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 
 ### Which engines decided a row, and which refused: `portfolio` (mununu#873)
 
-> Source of truth: [`PortfolioAttributionView`](../crates/mununu-core/src/api/models.rs#L3529) — surface: (CLI+API)
+> Source of truth: [`PortfolioAttributionView`](../crates/mununu-core/src/api/models.rs#L3531) — surface: (CLI+API)
 
 When a ⊥ row goes to the reachability portfolio (the safety, liveness, fair-cycle and
 reachability rescues), the row carries `portfolio`: the members that answered (`decided_by`) and
@@ -683,7 +683,7 @@ of that second search that PROVES `bad` unreachable is a contradiction, not a no
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
 
-> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L135) — surface: (CLI+API)
+> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L213) — surface: (CLI+API)
 
 `--emit-testbench DIR` writes, for every property that carries a counterexample, a Verilator
 testbench under `DIR/<property>/` (`tb.cpp` and a `Makefile`). The testbench is built from the RTL
@@ -695,7 +695,12 @@ cycle from the trace, compares every design register the trace names against its
 `--assert`, fires on the violating state. Internal registers are read through `--public-flat-rw`;
 synthetic cells (`__past` shadows, inputs-in-the-state cells, monitor latches) have no RTL
 counterpart and are listed as skipped. The clock is the first port named `clk`, `clk_i`, `clock`,
-`i_clk`, `aclk` or `clk_sys`; `--tb-clock PORT` names another.
+`i_clk`, `aclk` or `clk_sys`; `--tb-clock PORT` names another. The testbench writes names as they
+are, so each is held to what it can write: a clock (or pinned reset) that is not a port name — a
+letter or `_`, then letters, digits and `_` — means no testbench, and the row says why
+(`replay testbench: not written — …`, `trace.replay.not_generated`); an input port outside that, or
+a register whose flat name is not such names joined by `.` with element indices at the end
+(`u_sub.cnt`, `mem[3]`), is left out of the replay and listed as skipped.
 
 ```bash
 mununu sv verify-auto rod.sv --source rod_sva.sv --top rod --emit-testbench tb

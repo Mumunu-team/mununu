@@ -18,6 +18,13 @@
 //! port `p` at cycle `i` from the sampled cell when the state carries it, else from `inputs[i]`.
 //! Cells the RTL does not have — `$past` shadows, the assumption and fault monitors, slices — are
 //! not compared, and a value wider than 64 bits is skipped (reported in the testbench header).
+//!
+//! **Names are written, never quoted.** Every name of the design that reaches `tb.cpp`,
+//! the Makefile or `replay.gtkw` is first held to a grammar the reader of that file takes as one
+//! token: the top module and the sources ([`bench_refusal`], a Makefile word), the clock and the
+//! reset (the same refusal — a C++ member of the model), an input port ([`plain_name`]) and a
+//! register ([`readable_register`]). A design-wide name outside its grammar means no bench, with
+//! the reason; a single port or register outside it is left out and listed in `skipped`.
 
 use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::slang::verify_auto::ExactCounterexample;
@@ -60,6 +67,32 @@ fn accessor(top: &str, name: &str, ports: &std::collections::BTreeSet<String>) -
     }
 }
 
+/// A name the bench writes as one member of the Verilated model (`dut->NAME`): a letter or `_`,
+/// then letters, digits and `_`. The clock, the reset and every driven input port are held to
+/// it; an escaped identifier (`\a-b `) is legal SystemVerilog and is outside it on purpose.
+fn plain_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A register's flat name the bench can read back and print: [`plain_name`]s joined by `.`
+/// (`u_sub.cnt`), with element indices at the end (`mem[3]`, as Verilator indexes an unpacked
+/// array). It is written twice — inside a C string literal and as an expression — so nothing
+/// outside this grammar reaches either.
+fn readable_register(name: &str) -> bool {
+    let mut path = name;
+    while let Some((head, index)) = path.strip_suffix(']').and_then(|s| s.rsplit_once('[')) {
+        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        path = head;
+    }
+    path.split('.').all(plain_name)
+}
+
 /// Why no replay bench can be generated for a design, whatever the counterexample
 /// ([`bench_refusal`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,13 +101,30 @@ pub enum BenchRefusal {
     Top(String),
     /// These source paths are outside what the Makefile takes.
     Sources(Vec<String>),
+    /// The clock's name is not a port name the bench can drive ([`plain_name`]). The caller
+    /// named it, so the caller can name another.
+    Clock(String),
+    /// The pinned reset's name is not a port name the bench can drive. It comes from the lift,
+    /// so there is nothing to pass instead.
+    Reset(String),
+}
+
+/// What the caller's surface offers for the refusals that have a remedy: the CLI's sources are
+/// files and its clock a flag, the API's are names and a field of the request.
+#[derive(Debug, Clone, Copy)]
+pub struct BenchRemedies<'a> {
+    /// For [`BenchRefusal::Sources`].
+    pub sources: &'a str,
+    /// For [`BenchRefusal::Clock`].
+    pub clock: &'a str,
 }
 
 impl BenchRefusal {
-    /// The reason, in the user's names. A source path has a remedy and it differs per surface
-    /// (the CLI's sources are files, the API's are names in the request), so the caller gives
-    /// its own as `source_remedy`; a top name has none and says whose limit it is.
-    pub fn message(&self, source_remedy: &str) -> String {
+    /// The reason, in the user's names. A source path and a clock name have a remedy and it
+    /// differs per surface, so the caller gives its own in `remedies`; a top or reset name has
+    /// none and says whose limit it is.
+    pub fn message(&self, remedies: &BenchRemedies<'_>) -> String {
+        let source_remedy = remedies.sources;
         match self {
             BenchRefusal::Top(top) => format!(
                 "the top module name `{top}` cannot be written into the bench's Makefile (it \
@@ -94,6 +144,16 @@ impl BenchRefusal {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            BenchRefusal::Clock(clock) => format!(
+                "the clock `{clock}` is not a port name the bench can drive (a letter or `_`, \
+                 then letters, digits and `_`) — {}",
+                remedies.clock
+            ),
+            BenchRefusal::Reset(reset) => format!(
+                "the reset `{reset}` is not a port name the bench can drive (a letter or `_`, \
+                 then letters, digits and `_`) — a mununu limitation; nothing to change in the \
+                 design"
+            ),
         }
     }
 }
@@ -101,7 +161,9 @@ impl BenchRefusal {
 /// Why no replay bench can be generated for `design`, whatever the counterexample — `None` when
 /// one can. `top` and the source names are written into a Makefile that `make` runs, so both
 /// stay inside a grammar `make` reads as one word (`$` is make syntax, so a `$` the module-name
-/// grammar allows is refused here too).
+/// grammar allows is refused here too). The clock and the reset are written into `tb.cpp` as
+/// members of the model, so each is one [`plain_name`]: the clock is the caller's to name
+/// (`--tb-clock`, `tb_clock`) and a bench that could not drive it would replay nothing.
 ///
 /// This is a property of the design's names, not of a trace, so a caller asks it ONCE, before
 /// the properties, and reports the answer where it would have reported the bench
@@ -120,8 +182,24 @@ pub fn bench_refusal(design: &ReplayDesign<'_>) -> Option<BenchRefusal> {
         .filter(|s| !crate::adapter::yosys::is_valid_source_name(s))
         .cloned()
         .collect();
-    (!bad.is_empty()).then_some(BenchRefusal::Sources(bad))
+    if !bad.is_empty() {
+        return Some(BenchRefusal::Sources(bad));
+    }
+    if !plain_name(design.clock) {
+        return Some(BenchRefusal::Clock(design.clock.to_string()));
+    }
+    match design.reset {
+        Some((reset, _)) if !plain_name(reset) => Some(BenchRefusal::Reset(reset.to_string())),
+        _ => None,
+    }
 }
+
+/// Why an input the trace drives is left undriven (the `skipped` entry after the name).
+const UNWRITABLE_INPUT: &str = "an input the testbench cannot drive (its name is not letters, \
+     digits and `_`) — a mununu limitation";
+/// Why a register the trace names is not compared (the `skipped` entry after the name).
+const UNREADABLE_REGISTER: &str = "a register the testbench cannot read (its name is not \
+     letters, digits, `_`, `.` and a final `[N]`) — a mununu limitation";
 
 /// Whether `cex` carries a path a bench could replay (an unreachable-target witness has none).
 pub fn has_path(cex: &ExactCounterexample) -> bool {
@@ -146,7 +224,9 @@ pub fn counterexample_testbench(
         return None;
     }
     let top = design.top;
-    // Input ports: every input name the trace drives, with `$next` stripped.
+    let mut skipped: Vec<String> = Vec::new();
+    // Input ports: every input name the trace drives, with `$next` stripped. One the bench
+    // cannot write as a member of the model is left undriven and said so.
     let mut ports: std::collections::BTreeSet<String> = cex
         .inputs
         .iter()
@@ -154,11 +234,17 @@ pub fn counterexample_testbench(
         .map(|(n, _)| n.trim_end_matches("$next").to_string())
         .filter(|n| !n.starts_with("mununu_") && !n.contains("__"))
         .collect();
+    ports.retain(|n| {
+        let writable = plain_name(n);
+        if !writable {
+            skipped.push(format!("{n}: {UNWRITABLE_INPUT}"));
+        }
+        writable
+    });
     ports.remove(design.clock);
     if let Some((r, _)) = design.reset {
         ports.remove(r);
     }
-    let mut skipped: Vec<String> = Vec::new();
     let value = |v: &CexValue, what: &str, skipped: &mut Vec<String>| -> Option<u64> {
         let out = v.as_u64();
         if out.is_none() && !skipped.iter().any(|s| s.starts_with(what)) {
@@ -252,6 +338,10 @@ pub fn counterexample_testbench(
                 }
                 continue;
             }
+            if !readable_register(name) {
+                skipped.push(format!("{name}: {UNREADABLE_REGISTER}"));
+                continue;
+            }
             if let Some(x) = value(v, name, skipped) {
                 tb.push_str(&format!(
                     "    check({cyc}, \"{name}\", (uint64_t){}, {x}ull);\n",
@@ -281,9 +371,15 @@ pub fn counterexample_testbench(
     skipped.sort();
     skipped.dedup();
     if !skipped.is_empty() {
+        // One comment line per entry, whatever the name holds.
         let header: String = skipped
             .iter()
-            .map(|s| format!("// not compared: {s}\n"))
+            .map(|s| {
+                format!(
+                    "// not compared: {}\n",
+                    s.replace(|c: char| c.is_control(), "?")
+                )
+            })
             .collect();
         tb = header + &tb;
     }
@@ -471,6 +567,10 @@ mod tests {
             "/abs/caf\u{e9}/pkg.sv".to_string(),
         ][..];
         let plain = &["/abs/rod.sv".to_string()][..];
+        let remedies = BenchRemedies {
+            sources: "copy them",
+            clock: "name another",
+        };
 
         let r = bench_refusal(&design("rod", spaced)).expect("a spaced source path");
         assert_eq!(
@@ -480,7 +580,7 @@ mod tests {
                 "/abs/caf\u{e9}/pkg.sv".to_string()
             ])
         );
-        let line = r.message("copy them");
+        let line = r.message(&remedies);
         assert!(line.contains("`/abs/my project/rod_sva.sv`"), "{line}");
         assert!(line.contains("these are not"), "{line}");
         assert!(line.ends_with("— copy them"), "{line}");
@@ -488,7 +588,7 @@ mod tests {
 
         let r = bench_refusal(&design("rod$1", plain)).expect("a `$` in the top name");
         assert_eq!(r, BenchRefusal::Top("rod$1".to_string()));
-        let line = r.message("copy them");
+        let line = r.message(&remedies);
         assert!(line.contains("a mununu limitation"), "{line}");
         assert!(
             !line.contains("copy them"),
@@ -508,6 +608,156 @@ mod tests {
             inputs: vec![],
             unreachable_target: vec!["state_q == 5".into()],
         }));
+    }
+
+    /// The bench drives the clock as a member of the Verilated model, so a clock name that is
+    /// not a port name yields no bench at all (it used to be written into `tb.cpp` as given).
+    #[test]
+    fn a_clock_name_that_is_not_a_port_name_yields_no_bench() {
+        let sources = vec!["/abs/rod.sv".to_string()];
+        for clock in OUTSIDE_NAMES {
+            let bench = counterexample_testbench(
+                &ReplayDesign {
+                    top: "rod",
+                    clock,
+                    reset: None,
+                    sources: &sources,
+                },
+                &one_step(),
+            );
+            assert!(bench.is_none(), "clock {clock:?} was written into a bench");
+        }
+    }
+
+    /// Names no bench file may carry: each has a character that ends the token the name is
+    /// written as — a C++ member, a C string literal, a line of the save file.
+    const OUTSIDE_NAMES: [&str; 10] = [
+        "",
+        "1clk",
+        "clk x",
+        "clk;",
+        "clk=0",
+        "a\"b",
+        "a\\",
+        "a\nb",
+        "a(0)",
+        "caf\u{e9}",
+    ];
+
+    /// Every name of the design that reaches a generated file, by where it comes from, with
+    /// what happens to one outside its grammar: the top and a source (mununu#1176), the clock
+    /// and the reset (no bench, with the reason — the clock's names the caller's own remedy,
+    /// the reset's says whose limit it is), an input port and a register (left out, listed in
+    /// `skipped`, the rest of the bench intact), and the same names in `replay.gtkw`. A new
+    /// place a name is written adds its row here.
+    #[test]
+    fn every_name_the_bench_writes_is_held_to_its_grammar() {
+        let sources = vec!["/abs/rod.sv".to_string()];
+        let remedies = BenchRemedies {
+            sources: "copy them",
+            clock: "name another",
+        };
+        let design = |clock: &'static str, reset: Option<(&'static str, u64)>| ReplayDesign {
+            top: "rod",
+            clock,
+            reset,
+            sources: &sources,
+        };
+        // A name of that list appears in the `// not compared:` header (one comment line each, no
+        // control character) and nowhere else in a generated file.
+        let clean = |text: &str, outside: &str, what: &str| {
+            if outside.is_empty() {
+                return;
+            }
+            let body: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.starts_with("// not compared: "))
+                .collect();
+            assert!(
+                !body.join("\n").contains(outside),
+                "{what} {outside:?} reached the generated text:\n{text}"
+            );
+            if outside.chars().any(char::is_control) {
+                assert!(
+                    !text.contains(outside),
+                    "{what} {outside:?} is written with its control character:\n{text}"
+                );
+            }
+        };
+        for bad in OUTSIDE_NAMES {
+            // The clock: refused, and the reason ends in the caller's remedy.
+            let d = design(bad, None);
+            let r = bench_refusal(&d).expect("a clock outside the grammar");
+            assert_eq!(r, BenchRefusal::Clock(bad.to_string()));
+            assert!(r.message(&remedies).ends_with("— name another"));
+            assert_eq!(gtkwave_save(&d, &one_step()), "");
+
+            // The reset: refused, with no remedy offered.
+            let d = design("clk", Some((bad, 0)));
+            let r = bench_refusal(&d).expect("a reset outside the grammar");
+            assert_eq!(r, BenchRefusal::Reset(bad.to_string()));
+            let line = r.message(&remedies);
+            assert!(line.contains("a mununu limitation"), "{line}");
+            assert!(!line.contains("name another"), "{line}");
+            assert!(counterexample_testbench(&d, &one_step()).is_none());
+
+            // An input port and a register: the bench is written without them and says so.
+            let cex = ExactCounterexample {
+                prefix: vec![
+                    vec![("state_q".into(), v(0, 3)), (bad.to_string(), v(1, 1))],
+                    vec![("state_q".into(), v(1, 3)), (bad.to_string(), v(0, 1))],
+                ],
+                cycle: vec![],
+                inputs: vec![vec![
+                    ("go$next".into(), v(1, 1)),
+                    (format!("{bad}$next"), v(1, 1)),
+                    (bad.to_string(), v(1, 1)),
+                ]],
+                unreachable_target: vec![],
+            };
+            let d = design("clk", Some(("rst_n", 0)));
+            let b = counterexample_testbench(&d, &cex).expect("the rest of the bench");
+            clean(&b.tb_cpp, bad, "a trace name");
+            assert_eq!(b.checks, 2, "state_q at both cycles, nothing else");
+            assert!(
+                b.skipped.iter().any(|s| s.starts_with(&format!("{bad}: "))),
+                "{bad:?} is listed: {:?}",
+                b.skipped
+            );
+            assert_eq!(
+                b.tb_cpp
+                    .lines()
+                    .filter(|l| l.starts_with("// not compared: "))
+                    .count(),
+                b.skipped.len(),
+                "one comment line per skipped entry, whatever the name holds"
+            );
+            clean(&gtkwave_save(&d, &cex), bad, "a trace name");
+        }
+
+        // The grammar's own edges: what a register name may be, and what a port name may be.
+        for (name, register, port) in [
+            ("clk", true, true),
+            ("_q0", true, true),
+            ("u_sub.cnt", true, false),
+            ("mem[3]", true, false),
+            ("u.mem[3][10]", true, false),
+            ("gen[0].q", false, false),
+            ("mem[]", false, false),
+            ("mem[1:0]", false, false),
+            ("mem[i]", false, false),
+            ("a..b", false, false),
+            (".a", false, false),
+            ("a]", false, false),
+        ] {
+            assert_eq!(readable_register(name), register, "register {name:?}");
+            assert_eq!(plain_name(name), port, "port {name:?}");
+        }
+
+        // A design inside every grammar is not refused, and its save file is written.
+        let d = design("clk", Some(("rst_n", 0)));
+        assert_eq!(bench_refusal(&d), None);
+        assert!(gtkwave_save(&d, &one_step()).contains("TOP.rod.clk"));
     }
 
     /// mununu#1176 — the Verilator binary is one shell word in both recipes, so a
@@ -705,18 +955,29 @@ pub fn run_replay(dir: &std::path::Path, with_trace: bool) -> Result<ReplayRun, 
 /// in trace order, under `TOP.<top>.` as Verilator dumps them (`--public-flat-rw` puts every design
 /// signal there; a hierarchical name keeps its dots). Vectors show in decimal, as the report prints
 /// them. Open with `gtkwave replay.vcd replay.gtkw` from the bench's directory.
+///
+/// It is written beside a bench, so it lists what the bench could name: a signal outside
+/// [`readable_register`] is left out (each signal is one line of the file), and a design
+/// [`bench_refusal`] refuses has no save file (the empty string).
 pub fn gtkwave_save(design: &ReplayDesign<'_>, cex: &ExactCounterexample) -> String {
+    if bench_refusal(design).is_some() {
+        return String::new();
+    }
     let mut seen = std::collections::BTreeSet::new();
     let mut inputs: Vec<(String, u32)> = Vec::new();
     for (name, v) in cex.inputs.first().into_iter().flatten() {
-        if name == design.clock || synthetic(name) || !seen.insert(name.clone()) {
+        if name == design.clock
+            || synthetic(name)
+            || !readable_register(name)
+            || !seen.insert(name.clone())
+        {
             continue;
         }
         inputs.push((name.clone(), v.bits()));
     }
     let mut regs: Vec<(String, u32)> = Vec::new();
     for (name, v) in cex.prefix.first().into_iter().flatten() {
-        if synthetic(name) || !seen.insert(name.clone()) {
+        if synthetic(name) || !readable_register(name) || !seen.insert(name.clone()) {
             continue;
         }
         regs.push((name.clone(), v.bits()));

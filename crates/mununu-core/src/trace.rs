@@ -504,9 +504,9 @@ pub struct TraceReplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<ReplayResultView>,
     /// Why no testbench was generated although one was asked for and the row has a path to
-    /// replay (mununu#1176): a source path or the top module's name the bench's Makefile does
-    /// not take. `testbench` and `gtkw` are then absent; absent itself when the bench was
-    /// generated.
+    /// replay (mununu#1176): a source path, the top module's name, or the clock's or the
+    /// reset's name is outside what the bench can write. `testbench` and `gtkw` are then
+    /// absent; absent itself when the bench was generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_generated: Option<String>,
 }
