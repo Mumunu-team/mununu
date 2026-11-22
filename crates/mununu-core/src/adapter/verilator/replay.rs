@@ -60,33 +60,89 @@ fn accessor(top: &str, name: &str, ports: &std::collections::BTreeSet<String>) -
     }
 }
 
+/// Why no replay bench can be generated for a design, whatever the counterexample
+/// ([`bench_refusal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BenchRefusal {
+    /// The top module's name is outside what the Makefile takes. Nothing in the design to change.
+    Top(String),
+    /// These source paths are outside what the Makefile takes.
+    Sources(Vec<String>),
+}
+
+impl BenchRefusal {
+    /// The reason, in the user's names. A source path has a remedy and it differs per surface
+    /// (the CLI's sources are files, the API's are names in the request), so the caller gives
+    /// its own as `source_remedy`; a top name has none and says whose limit it is.
+    pub fn message(&self, source_remedy: &str) -> String {
+        match self {
+            BenchRefusal::Top(top) => format!(
+                "the top module name `{top}` cannot be written into the bench's Makefile (it \
+                 takes letters, digits and `_`) — a mununu limitation; nothing to change in the \
+                 design"
+            ),
+            BenchRefusal::Sources(bad) => format!(
+                "the bench's Makefile takes a source path made of ASCII letters, digits and \
+                 `_` `-` `.` `/` only, and {} not: {} — {source_remedy}",
+                if bad.len() == 1 {
+                    "this one is"
+                } else {
+                    "these are"
+                },
+                bad.iter()
+                    .map(|s| format!("`{s}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// Why no replay bench can be generated for `design`, whatever the counterexample — `None` when
+/// one can. `top` and the source names are written into a Makefile that `make` runs, so both
+/// stay inside a grammar `make` reads as one word (`$` is make syntax, so a `$` the module-name
+/// grammar allows is refused here too).
+///
+/// This is a property of the design's names, not of a trace, so a caller asks it ONCE, before
+/// the properties, and reports the answer where it would have reported the bench
+/// (`trace.replay.not_generated`; the CLI's `replay testbench: not written — …`). The source
+/// case is reachable: the lift stages its sources under names of its own, so a design under
+/// `my project/` lifts and yields a counterexample, while the bench has to name the files where
+/// they are (mununu#1176 — it used to end in a log line and a report that said there was no
+/// counterexample with a path).
+pub fn bench_refusal(design: &ReplayDesign<'_>) -> Option<BenchRefusal> {
+    if !crate::adapter::yosys::is_valid_module_name(design.top) || design.top.contains('$') {
+        return Some(BenchRefusal::Top(design.top.to_string()));
+    }
+    let bad: Vec<String> = design
+        .sources
+        .iter()
+        .filter(|s| !crate::adapter::yosys::is_valid_source_name(s))
+        .cloned()
+        .collect();
+    (!bad.is_empty()).then_some(BenchRefusal::Sources(bad))
+}
+
+/// Whether `cex` carries a path a bench could replay (an unreachable-target witness has none).
+pub fn has_path(cex: &ExactCounterexample) -> bool {
+    !(cex.prefix.is_empty() && cex.cycle.is_empty())
+}
+
 /// Generate the replay testbench for `cex` (see the module doc). `None` when the counterexample
-/// carries no path (an unreachable-target witness has nothing to replay).
+/// carries no path (an unreachable-target witness has nothing to replay), and when
+/// [`bench_refusal`] refuses the design — a caller that reports "nothing to replay" asks
+/// `bench_refusal` first, so the two cases are never told as one.
 pub fn counterexample_testbench(
     design: &ReplayDesign<'_>,
     cex: &ExactCounterexample,
 ) -> Option<ReplayBench> {
     let states: Vec<&Vec<(String, CexValue)>> = cex.prefix.iter().chain(cex.cycle.iter()).collect();
-    if states.is_empty() {
+    if !has_path(cex) {
         return None;
     }
-    // Security gate: `top` and the source names are written into a Makefile that `make` runs
-    // (`$` is make syntax, so a `$` the module-name grammar allows is refused here too). The
-    // lift refused anything outside its grammar before a counterexample could exist
-    // (`validate_lift_inputs`), so this branch is unreachable from the verbs today and no
-    // report field carries it; it keeps the generator safe on its own, and the log says why.
-    if !crate::adapter::yosys::is_valid_module_name(design.top)
-        || design.top.contains('$')
-        || !design
-            .sources
-            .iter()
-            .all(|s| crate::adapter::yosys::is_valid_source_name(s))
-    {
-        tracing::warn!(
-            top = design.top,
-            "replay bench not generated: the top module or a source name is outside the \
-             grammar the Makefile takes (it would have been refused at the lift)"
-        );
+    // Security gate: the generator stays safe on its own. The reason reaches the report through
+    // `bench_refusal`, which every caller asks before the first property.
+    if bench_refusal(design).is_some() {
         return None;
     }
     let top = design.top;
@@ -238,12 +294,12 @@ pub fn counterexample_testbench(
          SOURCES = {srcs}\n\n\
          run: obj_dir/V{top}\n\t./obj_dir/V{top}\n\n\
          obj_dir/V{top}: tb.cpp $(SOURCES)\n\
-         \t$(VERILATOR) --cc --exe --build --assert --public-flat-rw -Wno-fatal \\\n\
+         \t\"$(VERILATOR)\" --cc --exe --build --assert --public-flat-rw -Wno-fatal \\\n\
          \t  --top-module {top} $(SOURCES) tb.cpp -o V{top}\n\n\
          # The same replay, writing replay.vcd for GTKWave (gtkwave replay.vcd).\n\
          trace: obj_dir_trace/V{top}\n\t./obj_dir_trace/V{top}; test -s replay.vcd && echo \"wrote replay.vcd\"\n\n\
          obj_dir_trace/V{top}: tb.cpp $(SOURCES)\n\
-         \t$(VERILATOR) --cc --exe --build --assert --public-flat-rw -Wno-fatal --trace \\\n\
+         \t\"$(VERILATOR)\" --cc --exe --build --assert --public-flat-rw -Wno-fatal --trace \\\n\
          \t  -CFLAGS -DMUNUNU_TRACE --Mdir obj_dir_trace \\\n\
          \t  --top-module {top} $(SOURCES) tb.cpp -o V{top}\n\n\
          clean:\n\trm -rf obj_dir obj_dir_trace replay.vcd\n\n.PHONY: run trace clean\n",
@@ -381,6 +437,108 @@ mod tests {
             .is_none()
         );
     }
+
+    fn one_step() -> ExactCounterexample {
+        ExactCounterexample {
+            prefix: vec![
+                vec![("state_q".into(), v(0, 3))],
+                vec![("state_q".into(), v(1, 3))],
+            ],
+            cycle: vec![],
+            inputs: vec![vec![("go$next".into(), v(1, 1))]],
+            unreachable_target: vec![],
+        }
+    }
+
+    /// mununu#1176 — the cases of "no bench for this design", each with its reason: a source
+    /// path the Makefile cannot name carries the path and the caller's own remedy; a top name it
+    /// cannot write says whose limit it is; a design it can write is not refused. The generator
+    /// refuses what `bench_refusal` refuses, and a caller tells "no path" from "refused" with
+    /// `has_path`.
+    #[test]
+    fn x1176_a_design_the_makefile_cannot_name_is_refused_with_its_reason() {
+        fn design<'a>(top: &'a str, sources: &'a [String]) -> ReplayDesign<'a> {
+            ReplayDesign {
+                top,
+                clock: "clk",
+                reset: None,
+                sources,
+            }
+        }
+        let spaced = &[
+            "/abs/rod.sv".to_string(),
+            "/abs/my project/rod_sva.sv".to_string(),
+            "/abs/caf\u{e9}/pkg.sv".to_string(),
+        ][..];
+        let plain = &["/abs/rod.sv".to_string()][..];
+
+        let r = bench_refusal(&design("rod", spaced)).expect("a spaced source path");
+        assert_eq!(
+            r,
+            BenchRefusal::Sources(vec![
+                "/abs/my project/rod_sva.sv".to_string(),
+                "/abs/caf\u{e9}/pkg.sv".to_string()
+            ])
+        );
+        let line = r.message("copy them");
+        assert!(line.contains("`/abs/my project/rod_sva.sv`"), "{line}");
+        assert!(line.contains("these are not"), "{line}");
+        assert!(line.ends_with("— copy them"), "{line}");
+        assert!(!line.contains("/abs/rod.sv`"), "only the paths at fault");
+
+        let r = bench_refusal(&design("rod$1", plain)).expect("a `$` in the top name");
+        assert_eq!(r, BenchRefusal::Top("rod$1".to_string()));
+        let line = r.message("copy them");
+        assert!(line.contains("a mununu limitation"), "{line}");
+        assert!(
+            !line.contains("copy them"),
+            "no remedy exists for a top name"
+        );
+
+        assert_eq!(bench_refusal(&design("rod", plain)), None);
+
+        let cex = one_step();
+        assert!(has_path(&cex));
+        assert!(counterexample_testbench(&design("rod", spaced), &cex).is_none());
+        assert!(counterexample_testbench(&design("rod$1", plain), &cex).is_none());
+        assert!(counterexample_testbench(&design("rod", plain), &cex).is_some());
+        assert!(!has_path(&ExactCounterexample {
+            prefix: vec![],
+            cycle: vec![],
+            inputs: vec![],
+            unreachable_target: vec!["state_q == 5".into()],
+        }));
+    }
+
+    /// mununu#1176 — the Verilator binary is one shell word in both recipes, so a
+    /// `MUNUNU_VERILATOR_PATH` under a directory with a space runs (it used to split at the
+    /// space and the row said the bench did not reach its verdict).
+    #[test]
+    fn x1176_the_makefile_runs_the_verilator_binary_as_one_word() {
+        let sources = vec!["/abs/rod.sv".to_string()];
+        let b = counterexample_testbench(
+            &ReplayDesign {
+                top: "rod",
+                clock: "clk",
+                reset: None,
+                sources: &sources,
+            },
+            &one_step(),
+        )
+        .expect("a bench");
+        assert_eq!(
+            b.makefile.matches("\t\"$(VERILATOR)\" --cc ").count(),
+            2,
+            "{}",
+            b.makefile
+        );
+        assert_eq!(
+            b.makefile.matches("$(VERILATOR)").count(),
+            2,
+            "no unquoted use is left: {}",
+            b.makefile
+        );
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -464,7 +622,16 @@ pub struct ReplayRun {
 /// stopped it — Verilator or `make` missing, a compile error — so the report says
 /// `replay: unavailable — …` rather than nothing. An explicit `MUNUNU_VERILATOR_PATH` reaches the
 /// Makefile as `VERILATOR=`.
+///
+/// A `dir` whose path has whitespace is refused before `make` starts
+/// ([`crate::adapter::verilator::build_dir_refusal`], mununu#1176): Verilator's own build refuses
+/// it, and its message names a `make` variable, not anything the user passed. The caller that
+/// chose the directory names the remedy (the CLI's `--emit-testbench`, the server's
+/// `MUNUNU_LIFT_STAGING_ROOT`); this is the backstop for one that did not ask first.
 pub fn run_replay(dir: &std::path::Path, with_trace: bool) -> Result<ReplayRun, String> {
+    if let Some(why) = crate::adapter::verilator::build_dir_refusal(dir) {
+        return Err(why);
+    }
     let verilator = crate::adapter::verilator::locate_verilator().map_err(|e| e.message)?;
     let run = |target: Option<&str>| -> Result<String, String> {
         let mut cmd = std::process::Command::new("make");
@@ -589,6 +756,18 @@ pub fn gtkwave_save(design: &ReplayDesign<'_>, cex: &ExactCounterexample) -> Str
 #[cfg(test)]
 mod run_tests {
     use super::*;
+
+    /// mununu#1176 — a build directory whose path has whitespace is refused before `make` (or
+    /// the search for Verilator) starts, with Verilator's limit named instead of the tail of its
+    /// `make` output.
+    #[test]
+    fn x1176_a_replay_in_a_directory_with_whitespace_is_refused_before_make_starts() {
+        let dir = std::env::temp_dir().join("mununu x1176 replay");
+        let err = run_replay(&dir, true).expect_err("refused");
+        assert!(err.contains("whitespace"), "{err}");
+        assert!(err.contains("a limit of Verilator's build"), "{err}");
+        assert!(!dir.exists(), "nothing was created");
+    }
 
     /// The lines the bench prints are the lines the report reads: MATCH, MISMATCH with its first
     /// cycle line, Verilator's assertion line, the VCD line.

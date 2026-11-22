@@ -779,6 +779,13 @@
             "null"
           ]
         },
+        "not_generated": {
+          "description": "Why no testbench was generated although one was asked for and the row has a path to replay (mununu#1176): a source path or the top module's name the bench's Makefile does not take. `testbench` and `gtkw` are then absent; absent itself when the bench was generated.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "result": {
           "anyOf": [
             {

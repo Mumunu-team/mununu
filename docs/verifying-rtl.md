@@ -443,7 +443,7 @@ hand-written sidecar and no supplied formula**. End to end:
 The HTTP request is just the source plus options — there is no `sidecar` or `formula`
 field:
 
-> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2335) — surface: API
+> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2319) — surface: API
 
 ```bash
 mununu sv verify-auto my_module.sv
@@ -636,7 +636,7 @@ of that second search that PROVES `bad` unreachable is a contradiction, not a no
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
 
-> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L69) — surface: (CLI+API)
+> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L135) — surface: (CLI+API)
 
 `--emit-testbench DIR` writes, for every property that carries a counterexample, a Verilator
 testbench under `DIR/<property>/` (`tb.cpp` and a `Makefile`). The testbench is built from the RTL
@@ -692,6 +692,20 @@ carries the same object under `trace.replay.result` (`outcome`, `reason`, `check
 `first_mismatch`, `assertions`, `vcd_bytes`, `verilator`, `log`), beside `trace.replay.testbench`,
 `trace.replay.dir` and `trace.replay.gtkw`; over HTTP, `replay: true` with `emit_testbench: true`
 runs the bench in a scratch directory on the server and returns the same `result` (no `dir`).
+
+**Where the bench can be built (mununu#1176).** Verilator builds through `make`, and its makefile
+refuses a directory whose full path has whitespace; a `Makefile` word cannot carry whitespace
+either. mununu says so in its own words instead of leaving `make`'s:
+
+| what has the whitespace | what the report says | what to do |
+|---|---|---|
+| the `--emit-testbench` directory (its full path, after links are resolved) | the files are written; under `--replay` the row says `replay: unavailable — Verilator's make build does not run in a directory whose path has whitespace (…)`; without `--replay`, a line on stderr says `make` will not build there | pass `--emit-testbench` a directory whose full path has none |
+| a source path (the CLI writes the resolved path; the API writes `source_name` and `additional_sources[].name`), or any character outside ASCII letters, digits and `_` `-` `.` `/` | no bench for that run: the text row says `replay testbench: not written — <why>`, and `trace.replay.not_generated` carries the reason (with `--replay` / `replay: true`, `trace.replay.result` is `unavailable` with the same reason) | CLI: copy the sources under a path with only those characters (a link is not enough: the path is resolved before it is written). API: name the sources with only those characters |
+| the server's scratch root (`MUNUNU_LIFT_STAGING_ROOT`, else the system temporary directory) on `replay: true` | `trace.replay.result` is `unavailable`, naming the variable | set `MUNUNU_LIFT_STAGING_ROOT` to a directory whose path has none |
+| a top module name with a character a Makefile word cannot carry (an escaped identifier) | `not written`, as a mununu limitation — nothing to change in the design | none |
+
+The verdict and the trace are unaffected in every row; only the Verilator cross-check is missing,
+and the report says which one and why.
 
 **`replay.gtkw` — the scene, ready to open.** `--emit-testbench` also writes a GTKWave save file
 beside the testbench: the clock, the trace's inputs and the registers it names, in trace order,

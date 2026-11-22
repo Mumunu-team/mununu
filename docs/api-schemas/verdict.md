@@ -176,7 +176,8 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
       "vcd_bytes": 2037,            // replay.vcd, when `make trace` wrote it
       "verilator": "5.0xx",
       "log": "MATCH\nwrote replay.vcd"
-    }
+    },
+    "not_generated": "…"            // instead of `testbench`: why no bench could be written for this design
   }
 }
 ```
@@ -207,7 +208,9 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
 - `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
   `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /
   `--replay`, `result` — the simulator's verdict, with `outcome: "unavailable"` and a `reason` when
-  the bench could not run (2026-10-29).
+  the bench could not run (2026-10-29). When no bench could be written for the design at all — a
+  source path or a top module name the bench's `Makefile` cannot name — `testbench`, `gtkw` and
+  `dir` are absent and `not_generated` carries the reason (2026-11-22, mununu#1176).
 
 - `finite` — reset → the failing step (a safety violation). `lasso` — a prefix and a cycle repeated forever (a liveness stall). `trap` — reset → a closed trap the target is never reached from again (a refuted `AG EF` decided by the trap certificate). `unreachable` — no steps; `unreachable_target` lists the atoms. `attack` — one step per cycle with the fault injections on `steps[].faults` (`{site, value, hex}`); the adversary records injections, not states.
 - `state` / `inputs` are register cells: `value` when it fits 64 bits (else `null`), `hex` and `bits` always. A CTXDSL step names its state in `state_name` and the transition's labels in `labels`.

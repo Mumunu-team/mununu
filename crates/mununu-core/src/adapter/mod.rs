@@ -1542,11 +1542,22 @@ pub(crate) fn subprocess_failure_reason(stderr: &str, stdout: &str) -> String {
     }
 }
 
-/// mununu#980 — the no-verdict line of a solver member, with a signal death named as a crash. A
-/// tool killed by a signal (`signal: 6` = SIGABRT: an internal assertion or error) did not refuse
-/// the design — it crashed on it, and the portfolio note must let a reader tell the two apart: a
-/// refusal is a construct the member does not carry, an abort is a defect to reproduce. On a
-/// non-Unix host, or for an ordinary exit code, the line is the plain "exited with status" form.
+/// The directory mununu creates its per-call working directories under (the lift's staging
+/// directory, a Verilator build): `MUNUNU_LIFT_STAGING_ROOT` when set, else the system temp
+/// directory — absolute either way, since the tools run inside the directories made here and
+/// name their outputs by absolute path (mununu#1138, mununu#1176).
+pub(crate) fn staging_root() -> std::io::Result<std::path::PathBuf> {
+    let root = env_var::read("MUNUNU_LIFT_STAGING_ROOT")
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    if root.is_absolute() {
+        Ok(root)
+    } else {
+        Ok(std::env::current_dir()?.join(root))
+    }
+}
+
 /// A source a caller NAMED, staged under `dir`: `dir/<name>`, or a refusal when the name would
 /// leave `dir`.
 ///
@@ -1577,6 +1588,11 @@ pub(crate) fn staged_path(
     Ok(dir.join(p))
 }
 
+/// mununu#980 — the no-verdict line of a solver member, with a signal death named as a crash. A
+/// tool killed by a signal (`signal: 6` = SIGABRT: an internal assertion or error) did not refuse
+/// the design — it crashed on it, and the portfolio note must let a reader tell the two apart: a
+/// refusal is a construct the member does not carry, an abort is a defect to reproduce. On a
+/// non-Unix host, or for an ordinary exit code, the line is the plain "exited with status" form.
 pub(crate) fn no_verdict_line(
     tool: &std::path::Path,
     status: std::process::ExitStatus,
