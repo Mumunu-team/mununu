@@ -701,7 +701,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1754) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1318) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1756) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1318) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -998,7 +998,7 @@ verdict is scoped to the traces those assumptions admit.
 
 ### Real assertion macros, synthesis macros for the lift: `--lift-override`
 
-> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3114) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5883) — surface: (CLI+API)
+> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3355) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5883) — surface: (CLI+API)
 
 `sv verify-auto` reads the sources twice: slang extracts the SVA, and yosys (`read_slang`) lifts the RTL to
 BTOR2. Some assertion macro sets do not survive the lift — OpenTitan's real `prim_assert.sv` expands
@@ -1027,7 +1027,7 @@ with its assertion code compiled out, which is what the shim is for.
 
 ### One clock per model: multi-clock designs are refused, `--merge-clock-domains` (mununu#758)
 
-> Source of truth: [`clock_domains`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify-liveness*`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`); API `merge_clock_domains`
+> Source of truth: [`clock_domains_with_hierarchy`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify-liveness*`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`); API `merge_clock_domains`
 
 The BTOR2 model has one implicit clock: every register steps on it. After `flatten` the lift writes
 a netlist snapshot and counts the clock domains — every distinct (clock net, edge) that a flop or
@@ -1057,14 +1057,17 @@ lifted design holds no one driver the model can read. There are six:
 | the declared `output` of a **black box the netlist still holds under its own type** (a `(* mununu_missing_module *)` stub, deleted after the hierarchy snapshot its port directions are read from) | ``rooted at black box `<cell>` `` |
 | a net on a **port whose direction the lifted design does not give** — the `inout` of such a stub, or a cell of a module nothing declares — with no other driver | ``on a port of black box `<cell>`, which may drive it`` |
 | a net with **no driver** (a stub that only reads the net is not one) | `undriven` |
-| a clock pin **tied to a constant** — no edge, so the cells on it never update in the design | ``tied to constant <0, 1, x or z>: never ticks; clocks `<register>` `` |
+| a clock pin **tied to a constant** — no edge, so the cells on it never update on a clock edge in the design | ``tied to constant <0, 1, x or z>: never ticks; clocks `<register>` `` |
 | a net **more than one cell drives** (two stub outputs; logic and a stub output) | ``driven by more than one cell: `<cell>`, `<cell>` `` |
 
 A known driver or a top-level input wins over a port of unknown direction on the same net: the
-design gives a root, and the port is read as a reader. Each free source is refused by default,
+design gives a root, and the port is read as a reader. That is a decision, not a measurement of
+the missing module: a stub whose `inout` does drive a top-level clock input lifts by default as
+an input clock, and no report names the stub (give the port a direction in the stub to settle
+it). Each free source is refused by default,
 naming the clock, the root and the remedy: ticking it on every step is right for an independent
 clock and neither an over- nor an under-approximation of a clock that is gated, divided or never
-runs (for a constant: of cells that keep their value). `--merge-clock-domains` accepts
+runs (for a constant: of cells that never update on a clock edge). `--merge-clock-domains` accepts
 the lockstep model on `sv verify-auto` and `sv cdc-lint` — the two verbs that read the domains and
 name the root in their report (the lint merges with or without the flag); on the other `sv` verbs,
 which take the flag but drop the domains, it does not lift such a clock, though a derived or
@@ -1198,7 +1201,7 @@ trial-and-error.
 
 ### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
 
-> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3114) + [`scripts/vendor_opentitan_ip.py`](../scripts/vendor_opentitan_ip.py) — surface: (CLI+API) — `sv verify-auto … --lift-override` / `POST /api/v1/sv/verify-auto` with `additional_sources`; the vendoring script is a developer tool
+> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3355) + [`scripts/vendor_opentitan_ip.py`](../scripts/vendor_opentitan_ip.py) — surface: (CLI+API) — `sv verify-auto … --lift-override` / `POST /api/v1/sv/verify-auto` with `additional_sources`; the vendoring script is a developer tool
 
 Everything above was measured on **extracted blocks** — one module and the primitives it needs. A full
 IP is the top with its TL-UL register block and every sub-block: `edn` (lowRISC/opentitan 558921c) is
@@ -1491,7 +1494,7 @@ Two properties of this path are worth knowing:
 
 **Bounded response chains (2026-10-18).** Every translator shape with MORE than one box — `$rose(x) |-> ##[0:k] y` (a disjunct at every level), `a |=> ##n c`, `throughout` chains, a `$stable(bus)` leaf (`bus == bus__past`) — reduces too ([`reach_rescue::reduce_bounded_chain`](../crates/mununu-core/src/adapter/reach_rescue.rs)): the body compiles to the one-path monitor the counterexample extractor always used (a block at box depth `k` is delayed `D − k` cycles through shared 1-bit latches; `bad` fires when the attempt that started `D` cycles ago fails), and on these shapes the one-path reading is EXACT — every `||` has at most one box-bearing side, so `p ∨ []q` negates to `¬p ∧ ∃succ. ¬q`, a single path — which makes the same monitor a decider: `bad` reachable ⇔ a violation. The body may end in ONE weak-until block `nu Z. (e && (b || [] Z))` — the lowering of `e throughout b[->1]` — at its deepest level: the compiler reads the bounded part twice (the block as `false` and as `true`), and a pending latch carries the block's obligation from every attempt that reaches it until `b` (`bad` when `active ∧ ¬e`); its negation is again one existential path, so the reading stays exact. Before this they were declined in 0 ms and never reached an engine: on the full OpenTitan `edn` IP, 21 of the 54 non-trivial rows.
 
-**The re-plan runs once per run (2026-10-18).** Under a portfolio every member used to re-plan its own ⊥ rows, so a row the next engine's main pass decides in a second first paid a full rescue slice, and a row no engine decides paid one slice per member. The members now leave their ⊥ rows alone ([`VerifyAutoOptions::replan_defer`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3043), set by the planner) and the planner re-plans the MERGED report once ([`replan_merged`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5434)) — exactly the rows no engine decided; the rescue's provenance notes land on the merged report, and a `portfolio-replan` note says how many rows were re-planned and how many decided. A single-engine run (`--engine …`) re-plans its own rows as before. And a later member does not re-run a row an earlier one decided (2026-10-19, mununu#733): the merge keeps the first definite verdict, so that work could never change it — the member records the row `unknown` / `not-attempted` and spends nothing; a `portfolio-skip` note counts them. The cost it removes: the census design `keymgr_ctrl` went 256 s → 1 092 s once the cube's SMT image ran on four rows the exact engine had decided. The trade-off, stated: the merge's contradiction alarm cannot fire in sequential mode on a skipped row; `--portfolio parallel` and the census stay the differential check.
+**The re-plan runs once per run (2026-10-18).** Under a portfolio every member used to re-plan its own ⊥ rows, so a row the next engine's main pass decides in a second first paid a full rescue slice, and a row no engine decides paid one slice per member. The members now leave their ⊥ rows alone ([`VerifyAutoOptions::replan_defer`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3284), set by the planner) and the planner re-plans the MERGED report once ([`replan_merged`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5434)) — exactly the rows no engine decided; the rescue's provenance notes land on the merged report, and a `portfolio-replan` note says how many rows were re-planned and how many decided. A single-engine run (`--engine …`) re-plans its own rows as before. And a later member does not re-run a row an earlier one decided (2026-10-19, mununu#733): the merge keeps the first definite verdict, so that work could never change it — the member records the row `unknown` / `not-attempted` and spends nothing; a `portfolio-skip` note counts them. The cost it removes: the census design `keymgr_ctrl` went 256 s → 1 092 s once the cube's SMT image ran on four rows the exact engine had decided. The trade-off, stated: the merge's contradiction alarm cannot fire in sequential mode on a skipped row; `--portfolio parallel` and the census stay the differential check.
 
 **What still declines.** `[] a || [] b` — two box-bearing disjuncts, false at a state with one `¬a` and one `¬b` successor although every single path satisfies the reading; a negated modality; a chain deeper than 64 boxes (the translator's own unroll cap); a `CmpReg` leaf whose sides differ in width; two weak-until blocks, or one with a deeper box beside it; any other fixpoint inside the body. Each declines as `safety-shape-not-reducible` rather than being mis-compiled.
 
@@ -2071,7 +2074,7 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3364) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3476) — surface: (CLI+API+UI)
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3381) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3493) — surface: (CLI+API+UI)
 
 `sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
 yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
@@ -2155,7 +2158,7 @@ cells, so the verdicts are over the same design — and reports it as the `lift-
 `diagnostics.lift_retry`. Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L771) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3417) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L771) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3434) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L92) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions

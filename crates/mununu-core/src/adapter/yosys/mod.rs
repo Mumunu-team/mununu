@@ -273,7 +273,7 @@ pub struct YosysOptions {
     /// HOLDS does not transfer. Roadmap B2: it also lets through a design whose one domain is a
     /// DERIVED clock (gated, divided, muxed — [`ClockDomain::derived_from`]), which the model then
     /// ticks on every step; for a divided clock neither verdict transfers. Default `false`: such a
-    /// design is refused at lift time ([`clock_domains`]). verify-auto reports the merged domains
+    /// design is refused at lift time ([`clock_domains_with_hierarchy`]). verify-auto reports the merged domains
     /// as a soundness caveat.
     pub merge_clock_domains: bool,
     /// mununu#1148 — set by a verb that reads [`SvLiftResult::clock_domains`] and reports every
@@ -322,7 +322,7 @@ struct SvFlattenArtifacts {
     /// topological loop and the script succeeded on a second run with `opt_clean`
     /// before `write_btor` (see [`backend_loop_retry_script`]).
     backend_retry: Option<String>,
-    /// The clock domains of the flattened design ([`clock_domains`]); more than one only when
+    /// The clock domains of the flattened design ([`clock_domains_with_hierarchy`]); more than one only when
     /// [`YosysOptions::merge_clock_domains`] let the lift through.
     clock_domains: Vec<ClockDomain>,
     /// The flattened, `opt_clean`ed netlist the clock-domain scan read (yosys `write_json`).
@@ -1230,7 +1230,8 @@ fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) 
                         under-approximation of a clock that is gated, divided or never runs";
     const NEVER_TICKS: &str = "the model has one implicit clock that ticks on every step and \
                                would update them on every one, which is neither an over- nor an \
-                               under-approximation of cells that keep their value";
+                               under-approximation of cells that never update on a clock \
+                               edge";
     match &d.root {
         ClockRoot::BlackBox(t) => (
             format!("the output of black box `{t}`, whose body is not in the lifted design"),
@@ -1246,8 +1247,9 @@ fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) 
                 quoted_list(types)
             ),
             FREE,
-            "provide the source of the cell that drives the clock, or connect the clock in the \
-             RTL",
+            "give the port a direction in the black box's declaration (`output` if it drives \
+             the clock, `input` if it reads it), provide the source of the cell that drives the \
+             clock, or connect the clock in the RTL",
         ),
         ClockRoot::MultiDriven(types) => (
             format!(
@@ -1261,7 +1263,7 @@ fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) 
         ClockRoot::Constant { value, .. } => (
             format!(
                 "tied to constant {value}, which has no edge: the storage cells on it never \
-                 update in the design"
+                 update on a clock edge in the design"
             ),
             NEVER_TICKS,
             "connect the clock in the RTL",
@@ -1909,13 +1911,15 @@ pub fn name_staged_primary(sources: &mut [crate::trace::CellSource], primary: &s
 /// with nothing said). Sorted by net, then edge.
 ///
 /// This form has no hierarchy snapshot, so a black box of unknown type has no port directions:
-/// a net on its ports is [`ClockRoot::BlackBoxPort`]. The lift calls
-/// [`clock_domains_with_hierarchy`].
-pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
+/// a net on its ports is [`ClockRoot::BlackBoxPort`]. Tests only: a product caller would get
+/// the classification without the stubs' declarations (what `sv cdc-lint` did before
+/// mununu#1180), so the lift and the lint call [`clock_domains_with_hierarchy`].
+#[cfg(test)]
+pub(crate) fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
     clock_domains_with_hierarchy(flat_json, "")
 }
 
-/// [`clock_domains`] with the lift's hierarchy snapshot (`write_json` before `delete
+/// The clock domains of a flattened netlist, read with the lift's hierarchy snapshot (`write_json` before `delete
 /// =A:mununu_missing_module`): a deleted stub's declared port directions are read from it, so
 /// the stub whose `output` the clock net is on is the driver and one that only reads the net is
 /// not (mununu#1180; measured 2026-11-22 — the snapshot keeps the stub module with its ports,
@@ -2022,6 +2026,8 @@ pub fn clock_domains_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<Clo
                     _ => n.clone(),
                 })
                 .unwrap_or_else(|| cell_name.clone());
+            // A flop with no `CLK_POLARITY` is read as posedge. yosys writes the parameter
+            // on every flop, so the default is reached only by a hand-made netlist.
             let edge = param_bit(cell, "CLK_POLARITY", 0).unwrap_or(true);
             fires_on(bit, edge, &register);
         }
@@ -2084,7 +2090,7 @@ struct ClockDrivers {
 }
 
 /// Single-input cells whose output ticks exactly when their input does: an inverted or buffered
-/// clock is the same clock (its edge flips, which [`clock_domains`] reads from the cell's
+/// clock is the same clock (its edge flips, which [`clock_domains_with_hierarchy`] reads from the cell's
 /// polarity, not from the net).
 const CLOCK_PASS_THROUGH: &[&str] = &["$not", "$buf", "$pos", "$_NOT_", "$_BUF_"];
 
@@ -2185,7 +2191,16 @@ impl ClockDrivers {
     /// an over- nor an under-approximation of the real design — the scan names the kind and
     /// the report says so (no transfer is claimed for the flops on it). A `Constant` clock (the
     /// scan's, not this walk's: a constant is no net) is the same decision: the model updates
-    /// on every step cells that keep their value in the design.
+    /// on every step cells that never update on a clock edge in the design.
+    ///
+    /// SOUNDNESS: a top-level input, or one known driver, wins over a port of unknown direction
+    /// on the same bit (an `inout` of a stub, a port of a module nothing declares): the port is
+    /// read as a reader — a pad on the clock is the common shape — and the driver it may be is
+    /// dropped. For an input the lockstep reading is the input posture every model has; with a
+    /// known driver the root is that driver's, itself refused or noted (`Derived`, `BlackBox`,
+    /// `Cut`). Not measured against the missing module's real direction: a stub whose `inout`
+    /// does drive a top-level clock input lifts by default as an input clock, and no report
+    /// names the stub. Pinned by `x1180_an_input_wins_over_a_port_of_unknown_direction`.
     fn root_of(&self, bit: i64) -> ClockRoot {
         let mut at = bit;
         // A pass-through chain longer than the design has cells is a combinational loop; the
@@ -2194,6 +2209,8 @@ impl ClockDrivers {
             let drivers = self.driver.get(&at).map(Vec::as_slice).unwrap_or(&[]);
             match drivers {
                 [] => {
+                    // SOUNDNESS: the input is tested before the candidate ports, and the
+                    // single-driver arms below never read them — the precedence stated above.
                     return if self.inputs.contains(&at) {
                         ClockRoot::Input
                     } else if let Some(types) = self.candidate.get(&at) {
@@ -5094,6 +5111,78 @@ endmodule
         }
     }
 
+    /// mununu#1180 — the precedence `root_of` states: a top-level input wins over a port of
+    /// unknown direction on the same net, with the snapshot or without it. The fixture is the
+    /// captured inout-stub netlist with the pad and the flop moved from `pclk` onto `clk`. The
+    /// design lifts by default as one input clock and nothing names `pad`: a decision, pinned
+    /// so that a change to it is seen. (One known driver beside such a port is the "logic and
+    /// a stub output" row of the table above, with no snapshot.)
+    #[test]
+    fn x1180_an_input_wins_over_a_port_of_unknown_direction() {
+        let flat = STUB_INOUT_NETLIST
+            .replace(
+                r#""connections":{"CLK":[7],"#,
+                r#""connections":{"CLK":[2],"#,
+            )
+            .replace(r#""io":[7]"#, r#""io":[2]"#);
+        assert_ne!(flat, STUB_INOUT_NETLIST, "the fixture has the two sites");
+        for (what, domains) in [
+            (
+                "in the lift",
+                clock_domains_with_hierarchy(&flat, STUB_INOUT_HIERARCHY),
+            ),
+            ("with no snapshot", clock_domains(&flat)),
+        ] {
+            let text = describe_clock_domains(&domains);
+            assert_eq!(domains.len(), 1, "{what}: {text}");
+            assert_eq!(domains[0].root, ClockRoot::Input, "{what}: {text}");
+            assert_eq!(domains[0].cells, 2, "{what}: {text}");
+            refuse_merged_clock_domains(&domains, &YosysOptions::default())
+                .unwrap_or_else(|e| panic!("{what}: an input clock lifts: {}", e.message));
+        }
+    }
+
+    /// mununu#1180 — a cache hit classifies the clock roots from the snapshot it stored, as a
+    /// fresh lift does from the one it wrote: the stub's declared `output` is the root. With the
+    /// stored snapshot left out the same net is only "on a port", which is how this test would
+    /// see a hit that forgot it. The default refusal applies to a hit as to a miss.
+    #[test]
+    fn x1180_a_cache_hit_classifies_the_roots_from_its_stored_snapshot() {
+        let hit = |hier: &str| lift_cache::CachedLift {
+            btor2: String::new(),
+            hier_json: hier.to_string(),
+            flat_netlist_json: PARAMETRISED_STUB_NETLIST.to_string(),
+            staged_primary: String::new(),
+            frontend_used: lift_cache::frontend_tag(SvFrontend::Slang).to_string(),
+            backend_retry: None,
+        };
+        let reported = YosysOptions {
+            merge_clock_domains: true,
+            report_clock_roots: true,
+            ..Default::default()
+        };
+        let root_on_a_hit = |hier: &str| {
+            let artifacts = artifacts_from_cached(hit(hier), &reported)
+                .unwrap_or_else(|e| panic!("the opt-in lifts a hit: {}", e.message));
+            assert_eq!(artifacts.cache, LiftCacheOutcome::Hit);
+            artifacts
+                .clock_domains
+                .iter()
+                .find(|d| d.net == "pclk")
+                .map(|d| d.root.clone())
+        };
+        assert_eq!(
+            root_on_a_hit(PARAMETRISED_STUB_HIERARCHY),
+            Some(ClockRoot::BlackBox("pll".into()))
+        );
+        assert_eq!(root_on_a_hit(""), Some(port_of(&["pll"])));
+        assert!(
+            artifacts_from_cached(hit(PARAMETRISED_STUB_HIERARCHY), &YosysOptions::default())
+                .is_err(),
+            "a hit is refused by default as a fresh lift is"
+        );
+    }
+
     /// mununu#1180 — which stub the scan names never follows the order of the cells: the same
     /// two-stub netlist with the instances renamed so the reader sorts last still names the
     /// driver (the parent kept the last cell read on the bit).
@@ -5338,7 +5427,35 @@ endmodule
                 several(&["$and", "osc"]),
                 "is driven by more than one cell (`$and`, `osc`)",
             ),
+            (
+                "a parametrised stub",
+                format!(
+                    "{stub}\nmodule pll #(parameter DIV = 2)(input ref_i, output clk_o);\n\
+                     endmodule\n{}",
+                    top(
+                        "",
+                        "  wire pclk;\n  pll #(.DIV(4)) u_pll(.ref_i(clk), .clk_o(pclk));\n"
+                    )
+                ),
+                "pclk",
+                ClockRoot::BlackBox("pll".into()),
+                "`pclk`",
+            ),
         ];
+        // The precedence `root_of` states, through the real lift: a stub's `inout` on the
+        // top-level clock input. The input wins, so the design lifts by default on one clock.
+        let pad_on_the_input = format!(
+            "{stub}\nmodule pad(inout io, input oe);\nendmodule\n{}",
+            top(
+                ", input oe",
+                "  wire pclk;\n  assign pclk = clk;\n  pad u_pad(.io(clk), .oe(oe));\n"
+            )
+        );
+        let lifted = sv_to_btor2_with_blackboxes(&pad_on_the_input, &YosysOptions::default())
+            .unwrap_or_else(|e| panic!("a stub's inout on an input clock lifts: {}", e.message));
+        let text = describe_clock_domains(&lifted.clock_domains);
+        assert_eq!(lifted.clock_domains.len(), 1, "{text}");
+        assert_eq!(lifted.clock_domains[0].root, ClockRoot::Input, "{text}");
         for (case, src, net, root, phrase) in cases {
             let err = sv_to_btor2_with_blackboxes(&src, &YosysOptions::default())
                 .err()

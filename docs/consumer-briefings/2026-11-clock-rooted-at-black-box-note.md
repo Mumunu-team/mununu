@@ -1,6 +1,6 @@
 # Consumer briefing: a clock rooted at a black-box output is named (2026-11)
 
-> Source of truth: [`clock_domains`](../../crates/mununu-core/src/adapter/yosys/mod.rs) and the `clock-rooted-at-black-box` note in [`adapter/slang/verify_auto.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API — `sv verify-auto`, `POST /api/v1/sv/verify-auto`
+> Source of truth: [`clock_domains_with_hierarchy`](../../crates/mununu-core/src/adapter/yosys/mod.rs) and the `clock-rooted-at-black-box` note in [`adapter/slang/verify_auto.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API — `sv verify-auto`, `POST /api/v1/sv/verify-auto`
 
 **Audience:** anyone who reads `notes[]` or `diagnostics.merged_clock_domains` from `sv verify-auto`, or gates on note kinds.
 

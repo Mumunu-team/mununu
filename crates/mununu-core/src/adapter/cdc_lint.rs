@@ -126,8 +126,8 @@ impl CdcReport {
 /// mununu#1148 — one note per domain whose clock the lifted design holds no driver for: the lint
 /// classifies its crossings as from an independent clock, which is right for a PLL and wrong for
 /// a black-boxed clock gate or divider (then the two "domains" are one clock, gated). A clock
-/// tied to a constant (mununu#1180) is no domain of the lint at all — its cells never update and
-/// the walk reads their outputs as unclocked — and the note says that instead. Exhaustive over
+/// tied to a constant (mununu#1180) is no domain of the lint at all — its cells never update on
+/// a clock edge and the walk reads their outputs as unclocked — and the note says that instead. Exhaustive over
 /// `ClockRoot`, so a new root kind is a compile error here.
 pub(crate) fn clock_root_notes(domains: &[ClockDomain]) -> Vec<String> {
     use crate::adapter::yosys::{ClockRoot, quoted_list};
@@ -139,7 +139,7 @@ pub(crate) fn clock_root_notes(domains: &[ClockDomain]) -> Vec<String> {
                 ClockRoot::Constant { value, register } => {
                     return Some(format!(
                         "the clock of `{register}` is tied to constant {value} ({} storage \
-                         cell(s) on it): a constant has no edge, so they never update; the lint \
+                         cell(s) on it): a constant has no edge, so they never update on a clock edge; the lint \
                          reads their outputs as unclocked and reports no crossing from or to \
                          them (connect the clock in the RTL)",
                         d.cells

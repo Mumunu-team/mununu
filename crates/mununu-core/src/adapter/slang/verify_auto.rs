@@ -2711,10 +2711,10 @@ pub(crate) fn clock_root_notes(
         that gates or divides its input, or from a net nothing drives (the flops never tick). \
         In the last two cases the model is neither an over- nor an under-approximation of the \
         design, and no verdict on the flops this clock drives transfers on its own";
-    const NO_EDGE: &str = "A constant has no edge, so the storage cells on it keep their value \
-        in the design, while the model updates them on every step: that is neither an over- \
-        nor an under-approximation of the design, and no verdict on those cells transfers on \
-        its own";
+    const NO_EDGE: &str = "A constant has no edge, so the storage cells on it never update on \
+        a clock edge in the design (an asynchronous set or reset still changes one that has \
+        it), while the model updates them on every step: that is neither an over- nor an \
+        under-approximation of the design, and no verdict on those cells transfers on its own";
     const SEVERAL_DRIVERS: &str = "The lifted netlist has more than one driver on this net and \
         does not say which the design resolves to, so the scan cannot tell an independent \
         clock (the lockstep model is right) from a gated or divided one, or from a conflict. \
@@ -2965,7 +2965,7 @@ fn build_notes(
         } else {
             format!(
                 " ⚠ This does NOT extend to the storage cells clocked on {}: a clock with no \
-                 driver in the lifted design — a cut clock net is one — is not freed, the model \
+                 driver the model can follow — a cut clock net is one — is not freed, the model \
                  ticks it on every step, which is neither an over- nor an under-approximation; \
                  no verdict on those cells transfers on its own.",
                 driverless_clocks.join(", ")
@@ -25208,7 +25208,6 @@ mod clock_root_note_tests {
             notes[1]
                 .summary
                 .starts_with("the clock of `q` is tied to constant 0 and clocks 3 storage cell(s)")
-                && notes[1].detail.contains("keep their value in the design")
                 && notes[1].detail.ends_with("Connect the clock in the RTL."),
             "{} / {}",
             notes[1].summary,

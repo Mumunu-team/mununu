@@ -2,7 +2,7 @@
 
 > **Audience:** maintainers of the repositories that read a `violated` verdict's counterexample from `mununu btor2 verify --witness`, the HTTP route behind it, or `mununu sv verify-auto`'s slice and `--localize` (rosf, monono, mununu-ui). Not a release note.
 >
-> Source of truth: [`CarriedTrace`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L137) · [`SatBmcOutcome`](../../crates/mununu-core/src/adapter/btor2/sat_bmc.rs#L84) · [`Btor2VerifyResponse::trace_shortest`](../../crates/mununu-core/src/api/models.rs#L1159) · [`shortest_path_for`](../../crates/mununu-core/src/adapter/btor2/witness.rs#L569) — surface: CLI+API
+> Source of truth: [`CarriedTrace`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L137) · [`SatBmcOutcome`](../../crates/mununu-core/src/adapter/btor2/sat_bmc.rs#L84) · [`Btor2VerifyResponse::trace_shortest`](../../crates/mununu-core/src/api/models.rs#L1166) · [`shortest_path_for`](../../crates/mununu-core/src/adapter/btor2/witness.rs#L569) — surface: CLI+API
 
 ## TL;DR
 
