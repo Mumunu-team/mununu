@@ -2574,11 +2574,11 @@ struct SvLiftArgs {
     top: Option<String>,
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
-    /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
-    /// caveat on `sv verify-auto`; the other verbs report nothing). Also lets through a design
-    /// clocked only by a derived (gated, divided, muxed) clock, which then ticks on every step;
-    /// a clock with no driver in the design (a black box, a cut net, undriven) lifts under it
-    /// only on `sv verify-auto` and `sv cdc-lint`, whose reports name the root.
+    /// occur and a HOLDS does not transfer. Every verb's report says so: the
+    /// `clock-domains-merged` soundness caveat, in `notes` on `sv verify-auto` and in
+    /// `lift_notes` on the other verbs. Also lets through a design clocked only by a derived
+    /// (gated, divided, muxed) clock, which then ticks on every step, and a clock with no
+    /// driver in the design (a black box, a cut net, undriven), whose root the same notes name.
     #[arg(long = "merge-clock-domains")]
     merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves
@@ -5188,6 +5188,22 @@ fn render_plan_text(view: &mununu_core::api::models::SvPlanResponse) {
     for u in &view.unsupported {
         println!("  unsupported: {}: {}", u.name, u.reason);
     }
+    for line in lift_note_lines(&view.lift_notes) {
+        println!("{line}");
+    }
+}
+
+/// mununu#1181 — what the lift did to the design's clocks, as text: one line per note with its
+/// level, kind and summary, and its operands on the next.
+fn lift_note_lines(notes: &[mununu_core::api::models::VerificationNoteView]) -> Vec<String> {
+    notes
+        .iter()
+        .flat_map(|n| {
+            let head = format!("  note [{}] {}: {}", n.level, n.kind, n.summary);
+            let items = (!n.items.is_empty()).then(|| format!("        · {}", n.items.join(", ")));
+            std::iter::once(head).chain(items)
+        })
+        .collect()
 }
 
 /// mununu#537 — the human-readable expectation verdict, printed after the report.
@@ -7507,7 +7523,10 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
         );
     };
     let lift = read_sv_lift(&args.lift)?;
-    let (verdict, outcome) = if args.fairness.is_empty() {
+    let mununu_core::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: (verdict, outcome),
+    } = if args.fairness.is_empty() {
         core_sv_verify_liveness(&lift, request, grant)?
     } else {
         mununu_core::adapter::sv_verify::sv_verify_liveness_under_fairness(
@@ -7534,6 +7553,7 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
             .map(|e| e.to_string())
             .collect(),
         notes: mununu_core::adapter::liveness_rescue::member_notes(&outcome),
+        lift_notes: mununu_core::api::models::lift_note_views(&lift_notes),
     };
     print_typed_report(&report)?;
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
@@ -7564,13 +7584,16 @@ fn sv_verify_liveness_all_impl(args: SvVerifyLivenessAllArgs) -> Result<(), Stri
     use mununu_core::verdict::PropertyVerdict;
 
     let file = args.lift.primary_display();
-    let (verdict, outcomes) =
-        core_sv_verify_liveness_all(&read_sv_lift(&args.lift)?, &args.responses)?;
+    let mununu_core::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: (verdict, outcomes),
+    } = core_sv_verify_liveness_all(&read_sv_lift(&args.lift)?, &args.responses)?;
     let report = mununu_core::api::models::SvVerifyLivenessAllReport {
         file,
         property: response_conjunction_property(&args.responses),
         outcome: PropertyVerdict::from(verdict).as_str().to_string(),
         responses: per_response_decided_by(&args.responses, &outcomes),
+        lift_notes: mununu_core::api::models::lift_note_views(&lift_notes),
     };
     print_typed_report(&report)?;
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
@@ -7623,28 +7646,35 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
         engine: None,
         exact_abstention: None,
         trace: None,
+        lift_notes: Vec::new(),
     };
     let (verdict, attribution) =
         if args.refine || !config_specs.is_empty() || args.discover_assumptions {
-            let (verdict, refinement, attribution, applied) =
-                sv_verify_recoverability_refined_explained(
-                    &lift,
-                    &args.target,
-                    &extra,
-                    &config_specs,
-                    args.discover_assumptions,
-                    &pins,
-                )?;
+            let mununu_core::adapter::sv_verify::Lifted {
+                lift_notes,
+                result: (verdict, refinement, attribution, applied),
+            } = sv_verify_recoverability_refined_explained(
+                &lift,
+                &args.target,
+                &extra,
+                &config_specs,
+                args.discover_assumptions,
+                &pins,
+            )?;
             report.refinement = Some(
                 serde_json::to_value(&refinement)
                     .map_err(|e| format!("serialize refinement: {e}"))?,
             );
             report.pins = applied;
+            report.lift_notes = mununu_core::api::models::lift_note_views(&lift_notes);
             (verdict, attribution)
         } else {
-            let (verdict, attribution, applied) =
-                sv_verify_recoverability_explained(&lift, &args.target, &extra, &pins)?;
+            let mununu_core::adapter::sv_verify::Lifted {
+                lift_notes,
+                result: (verdict, attribution, applied),
+            } = sv_verify_recoverability_explained(&lift, &args.target, &extra, &pins)?;
             report.pins = applied;
+            report.lift_notes = mununu_core::api::models::lift_note_views(&lift_notes);
             (verdict, Some(attribution))
         };
     report.outcome = verdict.as_str().to_string();
@@ -7666,7 +7696,11 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
     use mununu_core::verdict::PropertyVerdict;
 
     let file = args.lift.primary_display();
-    let findings = core_sv_check_fsm(&read_sv_lift(&args.lift)?, args.max_width)?;
+    // One lift's notes speak for both: `--liveness` below lifts the same sources again.
+    let mununu_core::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: findings,
+    } = core_sv_check_fsm(&read_sv_lift(&args.lift)?, args.max_width)?;
 
     let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
@@ -7681,9 +7715,11 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
             &read_sv_lift(&args.lift)?,
             args.max_width,
             &terminal,
-        )?;
+        )?
+        .result;
         summary["liveness"] = liveness_json(&inv);
     }
+    attach_lift_notes(&mut summary, &lift_notes)?;
     print_json_summary(&summary)?;
 
     let worst = worst_verdict(findings.iter().map(|f| PropertyVerdict::as_str(f.verdict)));
@@ -7699,7 +7735,10 @@ fn sv_lint(args: SvLintArgs) -> Result<(), String> {
     use mununu_core::adapter::sv_verify::sv_lint_registers;
 
     let file = args.lift.primary_display();
-    let findings = sv_lint_registers(&read_sv_lift(&args.lift)?)?;
+    let mununu_core::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: findings,
+    } = sv_lint_registers(&read_sv_lift(&args.lift)?)?;
 
     let signals: Vec<serde_json::Value> = findings
         .iter()
@@ -7719,12 +7758,13 @@ fn sv_lint(args: SvLintArgs) -> Result<(), String> {
         .iter()
         .filter(|f| f.kind == mununu_core::adapter::sv_verify::SvLintSignalKind::Register)
         .count();
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "file": file,
         "signals_flagged": findings.len(),
         "registers_flagged": registers_flagged,
         "findings": signals,
     });
+    attach_lift_notes(&mut summary, &lift_notes)?;
     print_json_summary(&summary)?;
 
     // A finding is the lint's `violated`; a clean run is `holds`. Reuses the shared
@@ -7768,7 +7808,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
     use mununu_core::adapter::btor2::mutate::{Mutation, list_targets};
     use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions};
-    use mununu_core::adapter::yosys::{YosysOptions, sv_to_btor2};
+    use mununu_core::adapter::yosys::YosysOptions;
     use mununu_core::planner::mutate_and_compare;
 
     let file = args.lift.primary_display();
@@ -7789,13 +7829,14 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     // lift honours `--lift-override` too (mununu#725): it does not go through `verify_auto`, and
     // the real OpenTitan `prim_assert.sv` dies in yosys (a topological loop) without the shim.
     if args.list {
-        let (primary, yopts) = lift
-            .staged()
+        let mununu_core::adapter::sv_verify::Lifted {
+            lift_notes,
+            result: btor2,
+        } = lift
+            .lift_with_notes()
             .map_err(|e| format!("sv mutate --list: {e}"))?;
-        let btor2 = sv_to_btor2(&primary, &yopts)
-            .map_err(|e| format!("sv mutate --list: {}", e.message))?;
         let t = list_targets(&btor2)?;
-        let summary = serde_json::json!({
+        let mut summary = serde_json::json!({
             "file": file,
             "targets": {
                 "stick": t.stick,
@@ -7804,6 +7845,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
                 "invert_cond": t.invert_cond,
             },
         });
+        attach_lift_notes(&mut summary, &lift_notes)?;
         print_json_summary(&summary)?;
         return Ok(());
     }
@@ -7861,7 +7903,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
             })
         })
         .collect();
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "file": file,
         "mutation": report.mutation,
         "outcome": report.outcome(),
@@ -7869,6 +7911,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
         "unflipped": report.unflipped,
         "properties": properties,
     });
+    attach_lift_notes(&mut summary, &report.lift_notes)?;
     print_json_summary(&summary)?;
 
     // A mutation caught by at least one property (some flip) is `holds`; a mutation
@@ -7888,6 +7931,21 @@ fn print_typed_report<T: serde::Serialize>(report: &T) -> Result<(), String> {
         "{}",
         serde_json::to_string_pretty(report).map_err(|e| format!("serialize report: {e}"))?
     );
+    Ok(())
+}
+
+/// mununu#1181 — put the lift's notes in a hand-built report, as the typed reports carry them:
+/// `lift_notes`, absent when the lift has nothing to say (a design on one input clock).
+fn attach_lift_notes(
+    summary: &mut serde_json::Value,
+    lift_notes: &[mununu_core::adapter::slang::verify_auto::VerificationNote],
+) -> Result<(), String> {
+    if lift_notes.is_empty() {
+        return Ok(());
+    }
+    summary["lift_notes"] =
+        serde_json::to_value(mununu_core::api::models::lift_note_views(lift_notes))
+            .map_err(|e| format!("serialize lift notes: {e}"))?;
     Ok(())
 }
 
@@ -11518,6 +11576,61 @@ mod sv_mutate_lift_flag_tests {
                 &["BAD=a == 1".into()]
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod lift_notes_tests {
+    //! mununu#1181 — the two places the CLI writes a lift's notes by hand: the `json!` reports
+    //! (`sv check-fsm`, `sv lint`, `sv mutate`) and the plan's text.
+
+    use super::{attach_lift_notes, lift_note_lines};
+    use mununu_core::adapter::slang::verify_auto::{NoteLevel, VerificationNote};
+    use serde_json::json;
+
+    fn merged() -> VerificationNote {
+        VerificationNote {
+            kind: "clock-domains-merged".to_string(),
+            level: NoteLevel::SoundnessCaveat,
+            summary: "2 clock domains lifted onto one clock".to_string(),
+            detail: "the domains only ever tick together".to_string(),
+            items: vec!["clk_a (posedge, 1 cell)".to_string()],
+            property: None,
+        }
+    }
+
+    /// A hand-built report carries the notes under `lift_notes` with the level a consumer keys
+    /// on, and has no such key when the lift has nothing to say — as the typed reports do.
+    #[test]
+    fn x1181_a_hand_built_report_carries_the_lift_notes_and_omits_an_empty_list() {
+        let mut report = json!({ "signals_flagged": 0 });
+        attach_lift_notes(&mut report, &[]).expect("nothing to serialise");
+        assert_eq!(report, json!({ "signals_flagged": 0 }));
+
+        attach_lift_notes(&mut report, &[merged()]).expect("a note serialises");
+        assert_eq!(report["signals_flagged"], 0, "the report's own fields stay");
+        assert_eq!(report["lift_notes"][0]["kind"], "clock-domains-merged");
+        assert_eq!(report["lift_notes"][0]["level"], "soundness-caveat");
+        assert_eq!(
+            report["lift_notes"][0]["items"][0],
+            "clk_a (posedge, 1 cell)"
+        );
+    }
+
+    /// The plan's text names each note's level and kind, then its operands.
+    #[test]
+    fn x1181_the_plan_text_prints_each_lift_note_with_its_level() {
+        assert!(lift_note_lines(&[]).is_empty());
+        let views = mununu_core::api::models::lift_note_views(&[merged()]);
+        assert_eq!(
+            lift_note_lines(&views),
+            vec![
+                "  note [soundness-caveat] clock-domains-merged: 2 clock domains lifted onto \
+                 one clock"
+                    .to_string(),
+                "        · clk_a (posedge, 1 cell)".to_string(),
+            ]
         );
     }
 }

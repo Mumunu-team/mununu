@@ -526,6 +526,83 @@ fn every_flag_a_message_names_is_on_the_verb_that_produced_it() {
     }
 }
 
+/// The verbs each scoped mention of `--<flag>` names after "on", one set per mention, with the
+/// line of its literal. A bare mention (no scope) is not listed.
+fn verbs_named_after(
+    flag: &str,
+    code: &str,
+    verbs: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<(usize, BTreeSet<String>)> {
+    let mut out = Vec::new();
+    for (line, lit) in prose_literals(code) {
+        for (named, _, tail) in flag_mentions(&lit) {
+            let scope = scope_of(&tail, verbs);
+            if named == flag && !scope.is_empty() {
+                out.push((line, scope.into_iter().collect()));
+            }
+        }
+    }
+    out
+}
+
+/// mununu#1181 — a clock refusal names the verbs on which `--merge-clock-domains` accepts the
+/// merged model. The test above proves each verb it names takes the flag; this one proves none
+/// is left out, so a verb that gains the flag fails here until the sentence names it. The
+/// sentence is read on surfaces without the flag too (`sv discover`, `sv cegar`, `verify`), where
+/// the list is the whole remedy. `sv cdc-lint` takes the flag and is not named: the lint reads
+/// the clock domains with or without it, so it never refuses.
+#[test]
+fn the_clock_refusal_names_every_verb_that_takes_the_merge_flag() {
+    const FLAG: &str = "merge-clock-domains";
+    const NEVER_REFUSES: &str = "sv cdc-lint";
+    let root = repo_root();
+    let verbs = verb_flags(&root);
+    assert!(
+        verbs.get(NEVER_REFUSES).is_some_and(|f| f.contains(FLAG)),
+        "`{NEVER_REFUSES}` takes --{FLAG} (the premise of leaving it out)"
+    );
+    let expected: BTreeSet<String> = verbs
+        .iter()
+        .filter(|(verb, flags)| flags.contains(FLAG) && verb.as_str() != NEVER_REFUSES)
+        .map(|(verb, _)| verb.clone())
+        .collect();
+    assert!(
+        expected.contains("sv verify-auto") && expected.contains("sv lint"),
+        "the verb scan lost the flag: {expected:?}"
+    );
+
+    let suffix = "src/adapter/yosys/mod.rs";
+    let src = std::fs::read_to_string(root.join("crates/mununu-core").join(suffix))
+        .unwrap_or_else(|_| panic!("{suffix} exists"));
+    let named = verbs_named_after(FLAG, &without_test_modules(&src), &verbs);
+    assert!(
+        !named.is_empty(),
+        "{suffix}: no message names the verbs --{FLAG} is on — the clock refusal moved or the \
+         scan lost it"
+    );
+    for (line, scope) in &named {
+        assert_eq!(
+            scope, &expected,
+            "{suffix}:{line}: left, the verbs the message names after `--{FLAG}`; right, the \
+             verbs that take the flag (`{NEVER_REFUSES}` aside)"
+        );
+    }
+
+    // Negative control: a sentence that leaves verbs out is seen as naming fewer.
+    let short = "fn f() { m(\"the flag `--merge-clock-domains` on `sv verify-auto` / `sv lint` \
+                 accepts the lockstep model explicitly\"); }\n";
+    let found = verbs_named_after(FLAG, short, &verbs);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found[0].1,
+        ["sv lint", "sv verify-auto"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+    );
+    assert_ne!(found[0].1, expected);
+}
+
 /// The scan reaches past a mid-file test module (the sibling test stops at the first one).
 #[test]
 fn the_scan_skips_every_test_module_and_keeps_the_code_between_them() {

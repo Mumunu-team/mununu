@@ -1324,6 +1324,13 @@ pub struct Btor2VerifyLivenessResponse {
     /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
+    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
+    /// domains, a derived clock or a clock the design holds no driver for on the model's one
+    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
+    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// Request for the conjunctive response-liveness endpoint
@@ -1436,6 +1443,13 @@ pub struct Btor2VerifyRecoverabilityResponse {
     /// unreachable → the cycle the run stays in (`kind: "lasso"`, `loop_start` marks the cycle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
+    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
+    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
+    /// domains, a derived clock or a clock the design holds no driver for on the model's one
+    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
+    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// Request for the auto FSM illegal-encoding scan
@@ -1500,6 +1514,13 @@ pub struct Btor2CheckFsmResponse {
     /// The liveness inventory, when `liveness` was requested.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub liveness: Vec<FsmLivenessView>,
+    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
+    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
+    /// domains, a derived clock or a clock the design holds no driver for on the model's one
+    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
+    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// One register's liveness inventory (`check-fsm --liveness`): out of reset, resets pinned
@@ -1816,9 +1837,9 @@ pub struct SvLiftRequest {
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
     /// Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which
-    /// then ticks on every step. Only `sv/verify-auto` reports the merged domains; a clock with
-    /// no driver in the design (a black box, a cut net, undriven) lifts under it only on
-    /// `sv/verify-auto` and `sv/cdc-lint`, whose reports name the root.
+    /// then ticks on every step, and a clock with no driver in the lifted design (a black box, a
+    /// cut net, a constant, undriven). Every route reports what was merged: `sv/verify-auto` in
+    /// `notes`, `sv/cdc-lint` in `domains` and `notes`, the others in `lift_notes`.
     #[serde(default)]
     pub merge_clock_domains: bool,
 }
@@ -1980,6 +2001,13 @@ pub struct SvLintResponse {
     pub registers_flagged: usize,
     /// Per-signal findings (sorted by rule, then by name).
     pub findings: Vec<SvLintFinding>,
+    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
+    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
+    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
+    /// one clock, and one note per such clock. The result is one on that model. Empty — and
+    /// omitted — for a design on one input clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// Request for `POST /api/v1/sv/mutate` (#468) — apply a NAMED structural mutation
@@ -2082,6 +2110,13 @@ pub struct SvMutateResponse {
     pub flipped: usize,
     /// Count the mutation did NOT flip — the property-adequacy finding.
     pub unflipped: usize,
+    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
+    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
+    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
+    /// one clock, and one note per such clock. The result is one on that model. Empty — and
+    /// omitted — for a design on one input clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// cegar-extraction Stage 2 (2026-06-22) — request for the SV-direct
@@ -2208,6 +2243,13 @@ pub struct SvPlanResponse {
     pub lift_ms: u64,
     /// How many properties carry an estimate, per band — the run's shape at a glance.
     pub bands: std::collections::BTreeMap<String, usize>,
+    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
+    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
+    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
+    /// one clock, and one note per such clock. The result is one on that model. Empty — and
+    /// omitted — for a design on one input clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// Roadmap J2 — one property of a plan.
@@ -2282,6 +2324,7 @@ impl From<&crate::planner::PlanReport> for SvPlanResponse {
                 .collect(),
             lift_ms: plan.lift_ms,
             bands,
+            lift_notes: lift_note_views(&plan.lift_notes),
         }
     }
 }
@@ -2659,7 +2702,7 @@ impl From<&crate::adapter::slang::expectations::ExpectationResult> for Expectati
 impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAutoResponse {
     fn from(report: &crate::adapter::slang::verify_auto::AutoVerifyReport) -> Self {
         use crate::adapter::slang::translate::SvaKind;
-        use crate::adapter::slang::verify_auto::{NoteLevel, VerifyOutcome};
+        use crate::adapter::slang::verify_auto::VerifyOutcome;
 
         let properties = report
             .properties
@@ -2910,19 +2953,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
             notes: report
                 .notes
                 .iter()
-                .map(|n| VerificationNoteView {
-                    kind: n.kind.clone(),
-                    level: match n.level {
-                        NoteLevel::Info => "info",
-                        NoteLevel::ScopeCaveat => "scope-caveat",
-                        NoteLevel::SoundnessCaveat => "soundness-caveat",
-                    }
-                    .to_string(),
-                    summary: n.summary.clone(),
-                    detail: n.detail.clone(),
-                    items: n.items.clone(),
-                    property: n.property.clone(),
-                })
+                .map(VerificationNoteView::from)
                 .collect(),
         }
     }
@@ -2969,6 +3000,13 @@ pub struct SvVerifyRecoverabilityReport {
     /// unreachable → the cycle the run stays in (`kind: "lasso"`, `loop_start` marks the cycle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
+    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
+    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
+    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
+    /// one clock, and one note per such clock. The result is one on that model. Empty — and
+    /// omitted — for a design on one input clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// mununu#541 — the `sv verify-liveness` CLI report, schema-pinned. See
@@ -2991,6 +3029,13 @@ pub struct SvVerifyLivenessReport {
     /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
+    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
+    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
+    /// one clock, and one note per such clock. The result is one on that model. Empty — and
+    /// omitted — for a design on one input clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// mununu#541 — the `sv verify-liveness --response` CLI report, schema-pinned.
@@ -3005,6 +3050,13 @@ pub struct SvVerifyLivenessAllReport {
     /// Per-response provenance, so a failing conjunct is identifiable rather than being hidden
     /// behind one aggregate verdict.
     pub responses: Vec<SvLivenessResponseView>,
+    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
+    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
+    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
+    /// one clock, and one note per such clock. The result is one on that model. Empty — and
+    /// omitted — for a design on one input clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// One response of a `verify-liveness --response` conjunction (mununu#541).
@@ -3048,6 +3100,33 @@ pub struct VerificationNoteView {
     /// rewording of the note's opening silently broke the join.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub property: Option<String>,
+}
+
+impl From<&crate::adapter::slang::verify_auto::VerificationNote> for VerificationNoteView {
+    fn from(n: &crate::adapter::slang::verify_auto::VerificationNote) -> Self {
+        use crate::adapter::slang::verify_auto::NoteLevel;
+        VerificationNoteView {
+            kind: n.kind.clone(),
+            level: match n.level {
+                NoteLevel::Info => "info",
+                NoteLevel::ScopeCaveat => "scope-caveat",
+                NoteLevel::SoundnessCaveat => "soundness-caveat",
+            }
+            .to_string(),
+            summary: n.summary.clone(),
+            detail: n.detail.clone(),
+            items: n.items.clone(),
+            property: n.property.clone(),
+        }
+    }
+}
+
+/// The `lift_notes` of a response (mununu#1181): the notes an SV lift returns beside its model
+/// ([`crate::adapter::sv_verify::Lifted`]), as the view every report serialises.
+pub fn lift_note_views(
+    notes: &[crate::adapter::slang::verify_auto::VerificationNote],
+) -> Vec<VerificationNoteView> {
+    notes.iter().map(VerificationNoteView::from).collect()
 }
 
 /// Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell
@@ -3575,6 +3654,13 @@ pub struct Btor2CegarResponse {
     /// `emit_ctxdsl: true`. Omitted from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ctxdsl: Option<String>,
+    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
+    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
+    /// domains, a derived clock or a clock the design holds no driver for on the model's one
+    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
+    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lift_notes: Vec<VerificationNoteView>,
 }
 
 /// Track I.1 — a cube cell witnessing a non-HOLDS verdict, viewer-shaped:
@@ -3854,6 +3940,7 @@ mod bottom_reason_view_tests {
             )],
             unsupported: Vec::new(),
             lift_ms: 1,
+            lift_notes: Vec::new(),
         };
         let view = SvPlanResponse::from(&plan);
         assert!(
@@ -3901,6 +3988,7 @@ mod bottom_reason_view_tests {
             }],
             unsupported: vec![("c".into(), "outside the fragment".into())],
             lift_ms: 2514,
+            lift_notes: Vec::new(),
         };
         let view = SvPlanResponse::from(&plan);
         assert_eq!(view.properties.len(), 2);

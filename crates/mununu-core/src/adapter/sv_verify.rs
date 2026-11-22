@@ -3,11 +3,15 @@
 //!
 //! An external tool (e.g. an agent writing RTL) can hand raw SV plus a target atom
 //! and get a verdict, with no manual `sv emit-btor2-per-module` → `btor2 verify-*`
-//! round-trip. Each function is a thin bridge: [`sv_to_btor2`] then the matching
+//! round-trip. Each function is a thin bridge: [`SvLift::lift_with_notes`] then the matching
 //! BTOR2 verb core ([`crate::adapter::reach_portfolio::decide_reach_portfolio`],
 //! [`response_liveness_rescue_atoms`], [`verify_recoverability`]). The SV → BTOR2
 //! lift requires sv2v + Yosys on the host (see [`docs/verifying-rtl.md`]); a missing
 //! tool returns a structured error.
+//!
+//! Every verb returns a [`Lifted`]: its result beside the notes the lift owes the report
+//! (clock domains merged under `--merge-clock-domains`, a clock with a free-source root —
+//! mununu#1181). The handler and the CLI put them in the report's `lift_notes`.
 //!
 //! Atoms are validated **before** the (toolchain-gated) lift, so a malformed
 //! request fails fast and identically to the BTOR2-direct verbs.
@@ -25,8 +29,42 @@ use crate::adapter::liveness_rescue::{
     response_liveness_rescue_atoms, response_liveness_rescue_conjunction,
 };
 use crate::adapter::reach_portfolio::ReachOutcome;
-use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2, sv_to_btor2_with_blackboxes};
+use crate::adapter::slang::verify_auto::{VerificationNote, lift_clock_notes};
+use crate::adapter::yosys::{SvFrontend, SvLiftResult, YosysOptions, sv_to_btor2_with_blackboxes};
 use crate::verdict::PropertyVerdict;
+
+/// A verb's result with what the lift must say beside it (mununu#1181): the clock notes of the
+/// lift — `clock-domains-merged` when [`SvLift::merge_clock_domains`] put several domains, a
+/// derived clock or a free-source clock on the one implicit clock, and one note per free-source
+/// root. Every SV-direct verb returns one, so a caller reads the verdict through `.result` with
+/// the caveat in its hand; the policy test `every_lift_that_can_merge_clock_domains_reports_them`
+/// checks that each surface puts `lift_notes` in its report.
+#[derive(Debug, Clone)]
+pub struct Lifted<T> {
+    /// What the report must say about the lift; empty for a design on one input clock.
+    pub lift_notes: Vec<VerificationNote>,
+    /// The verb's own result.
+    pub result: T,
+}
+
+impl<T> Lifted<T> {
+    /// The same notes beside a result computed from this one.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Lifted<U> {
+        Lifted {
+            lift_notes: self.lift_notes,
+            result: f(self.result),
+        }
+    }
+
+    /// [`Self::map`] for a step that can fail: the error is the step's, and no result means no
+    /// report for the notes to sit in.
+    pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<Lifted<U>, E> {
+        Ok(Lifted {
+            lift_notes: self.lift_notes,
+            result: f(self.result)?,
+        })
+    }
+}
 
 /// The SV → BTOR2 lift inputs shared by every SV-direct verb: the CLI's `SvLiftArgs` and the
 /// API's `lift` object both become one of these.
@@ -86,25 +124,52 @@ impl SvLift {
         .map_err(|e| e.message)
     }
 
-    /// [`Self::lift`] plus how a counterexample names the lift's registers and clocks
+    /// The one lift of every verb here (yosys-slang), through the entry that returns the clock
+    /// domains: the model-only entry refuses the merge opt-in, because it could not report it.
+    fn lift_domains(
+        &self,
+        adjust: impl FnOnce(YosysOptions) -> YosysOptions,
+    ) -> Result<SvLiftResult, String> {
+        let (source, yopts) = self.staged()?;
+        sv_to_btor2_with_blackboxes(&source, &adjust(yopts))
+            .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))
+    }
+
+    /// [`Self::lift_with_notes`] plus how a counterexample names the lift's registers and clocks
     /// ([`crate::trace::TraceNames`]: the design's aliases for bound-checker port names, the clock
     /// nets).
-    fn lift_named(&self) -> Result<(String, crate::trace::TraceNames), String> {
-        let (source, yopts) = self.staged()?;
-        let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
-            .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))?;
+    fn lift_named(&self) -> Result<Lifted<(String, crate::trace::TraceNames)>, String> {
+        let lifted = self.lift_domains(|yopts| yopts)?;
         let names = crate::trace::TraceNames {
             aliases: crate::adapter::yosys::trace_aliases(&lifted.flat_netlist_json),
             clocks: lifted.clock_domains.iter().map(|d| d.net.clone()).collect(),
             ..Default::default()
         };
-        Ok((lifted.btor2, names))
+        Ok(Lifted {
+            lift_notes: lift_clock_notes(&lifted.clock_domains),
+            result: (lifted.btor2, names),
+        })
     }
 
-    /// Lift to a single flattened BTOR2 string (yosys-slang).
-    fn lift(&self) -> Result<String, String> {
-        let (source, yopts) = self.staged()?;
-        sv_to_btor2(&source, &yopts).map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))
+    /// Lift to a single flattened BTOR2 string (yosys-slang), beside the notes its report owes
+    /// the reader (mununu#1181). A verb that lifts by hand (`sv mutate --list`, the `sv cegar`
+    /// route) calls this, so no lift that takes the merge opt-in returns the model alone.
+    pub fn lift_with_notes(&self) -> Result<Lifted<String>, String> {
+        self.lift_with_notes_under(|yopts| yopts)
+    }
+
+    /// [`Self::lift_with_notes`] with the yosys options adjusted first (the `sv cegar` route's
+    /// `setundef` pair). The notes are read off the lift's result, so whatever the adjustment
+    /// turns on is reported.
+    pub fn lift_with_notes_under(
+        &self,
+        adjust: impl FnOnce(YosysOptions) -> YosysOptions,
+    ) -> Result<Lifted<String>, String> {
+        let lifted = self.lift_domains(adjust)?;
+        Ok(Lifted {
+            lift_notes: lift_clock_notes(&lifted.clock_domains),
+            result: lifted.btor2,
+        })
     }
 }
 
@@ -137,12 +202,12 @@ pub fn parse_params(entries: &[String]) -> Result<Vec<(String, String)>, String>
 pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport, String> {
     let primary_name = lift.primary_name.as_str();
     let (source, yopts) = lift.staged()?;
-    // mununu#1148 — the lint reads the domains it lints and names every free-source root in its
-    // notes (`cdc_lint::clock_root_notes`), so it is a verb that reports the roots: a PLL behind
-    // a black box against the reference clock is the textbook crossing it exists to classify.
+    // mununu#1148 — the lint always merges: it reads the domains it lints, lists them in its
+    // report and names every free-source root in its notes (`cdc_lint::clock_root_notes`). A
+    // PLL behind a black box against the reference clock is the textbook crossing it exists to
+    // classify.
     let yopts = YosysOptions {
         merge_clock_domains: true,
-        report_clock_roots: true,
         ..yopts
     };
     let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
@@ -174,13 +239,14 @@ pub fn sv_verify_liveness(
     lift: &SvLift,
     request: &str,
     grant: &str,
-) -> Result<(LivenessVerdict, ReachOutcome), String> {
+) -> Result<Lifted<(LivenessVerdict, ReachOutcome)>, String> {
     let ante: Atom = parse_response_atom(request)?;
     let cons: Atom = parse_response_atom(grant)?;
-    let btor2 = lift.lift()?;
-    response_liveness_rescue_atoms(&btor2, &ante, &cons, false).ok_or_else(|| {
-        "could not build the liveness monitor — an atom likely binds no signal in the design"
-            .to_string()
+    lift.lift_with_notes()?.try_map(|btor2| {
+        response_liveness_rescue_atoms(&btor2, &ante, &cons, false).ok_or_else(|| {
+            "could not build the liveness monitor — an atom likely binds no signal in the design"
+                .to_string()
+        })
     })
 }
 
@@ -192,17 +258,18 @@ pub fn sv_verify_liveness_under_fairness(
     request: &str,
     grant: &str,
     fairness: &[String],
-) -> Result<(LivenessVerdict, ReachOutcome), String> {
+) -> Result<Lifted<(LivenessVerdict, ReachOutcome)>, String> {
     let ante: Atom = parse_response_atom(request)?;
     let cons: Atom = parse_response_atom(grant)?;
     let fair = crate::adapter::liveness_rescue::parse_fairness_atoms(fairness)?;
-    let btor2 = lift.lift()?;
-    crate::adapter::liveness_rescue::response_liveness_rescue_under_fairness(
-        &btor2, &ante, &cons, &fair, false,
-    )
-    .ok_or_else(|| {
-        "could not build the fair-cycle monitor — an atom likely binds no signal in the design"
-            .to_string()
+    lift.lift_with_notes()?.try_map(|btor2| {
+        crate::adapter::liveness_rescue::response_liveness_rescue_under_fairness(
+            &btor2, &ante, &cons, &fair, false,
+        )
+        .ok_or_else(|| {
+            "could not build the fair-cycle monitor — an atom likely binds no signal in the design"
+                .to_string()
+        })
     })
 }
 
@@ -217,19 +284,23 @@ pub fn sv_verify_liveness_under_fairness(
 pub fn sv_verify_liveness_all(
     lift: &SvLift,
     responses: &[String],
-) -> Result<(LivenessVerdict, Vec<ReachOutcome>), String> {
+) -> Result<Lifted<(LivenessVerdict, Vec<ReachOutcome>)>, String> {
     let pairs = parse_response_pairs(responses)?;
-    let btor2 = lift.lift()?;
-    response_liveness_rescue_conjunction(&btor2, &pairs, false).ok_or_else(|| {
-        "could not build a liveness monitor — an atom likely binds no signal in the design, \
-         or no responses were given"
-            .to_string()
+    lift.lift_with_notes()?.try_map(|btor2| {
+        response_liveness_rescue_conjunction(&btor2, &pairs, false).ok_or_else(|| {
+            "could not build a liveness monitor — an atom likely binds no signal in the design, \
+             or no responses were given"
+                .to_string()
+        })
     })
 }
 
 /// `sv verify-recoverability` — lift SV and decide `AG EF target`. The target atom is
 /// validated before the lift.
-pub fn sv_verify_recoverability(lift: &SvLift, target: &str) -> Result<PropertyVerdict, String> {
+pub fn sv_verify_recoverability(
+    lift: &SvLift,
+    target: &str,
+) -> Result<Lifted<PropertyVerdict>, String> {
     sv_verify_recoverability_with_predicates(lift, target, &[])
 }
 
@@ -240,8 +311,9 @@ pub fn sv_verify_recoverability_with_predicates(
     lift: &SvLift,
     target: &str,
     extra_predicates: &[PredicateSpec],
-) -> Result<PropertyVerdict, String> {
-    sv_verify_recoverability_explained(lift, target, extra_predicates, &[]).map(|(v, _, _)| v)
+) -> Result<Lifted<PropertyVerdict>, String> {
+    sv_verify_recoverability_explained(lift, target, extra_predicates, &[])
+        .map(|l| l.map(|(v, _, _)| v))
 }
 
 /// [`sv_verify_recoverability_with_predicates`] that also returns who decided and why the exact
@@ -252,27 +324,29 @@ pub fn sv_verify_recoverability_explained(
     extra_predicates: &[PredicateSpec],
     pins: &[(String, u64)],
 ) -> Result<
-    (
+    Lifted<(
         PropertyVerdict,
         crate::adapter::recoverability::RecoverabilityAttribution,
         Vec<String>,
-    ),
+    )>,
     String,
 > {
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e}")
     })?;
-    let (lifted, names) = lift.lift_named()?;
-    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
-    let (verdict, mut attribution) =
-        crate::adapter::recoverability::verify_recoverability_explained(
-            &btor2,
-            target,
-            extra_predicates,
-            &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions::default(),
-        )?;
-    attribution.trace = attribution.trace.map(|t| names.tidy(t));
-    Ok((verdict, attribution, applied))
+    lift.lift_named()?
+        .try_map(|(lifted, names)| -> Result<_, String> {
+            let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
+            let (verdict, mut attribution) =
+                crate::adapter::recoverability::verify_recoverability_explained(
+                    &btor2,
+                    target,
+                    extra_predicates,
+                    &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions::default(),
+                )?;
+            attribution.trace = attribution.trace.map(|t| names.tidy(t));
+            Ok((verdict, attribution, applied))
+        })
 }
 
 /// `sv verify-recoverability --refine` — lift SV and decide `AG EF target`, returning the canonical
@@ -286,7 +360,7 @@ pub fn sv_verify_recoverability_refined(
     extra_predicates: &[PredicateSpec],
     config_specs: &[(String, Vec<u64>)],
     discover_assumptions: bool,
-) -> Result<(PropertyVerdict, crate::verdict::VerdictRefinement), String> {
+) -> Result<Lifted<(PropertyVerdict, crate::verdict::VerdictRefinement)>, String> {
     sv_verify_recoverability_refined_explained(
         lift,
         target,
@@ -295,8 +369,17 @@ pub fn sv_verify_recoverability_refined(
         discover_assumptions,
         &[],
     )
-    .map(|(v, r, _, _)| (v, r))
+    .map(|l| l.map(|(v, r, _, _)| (v, r)))
 }
+
+/// What [`sv_verify_recoverability_refined_explained`] returns beside the lift's notes: the
+/// verdict, its refinement, the attribution of the canonical verdict, and the pins it applied.
+pub type RefinedRecoverability = (
+    PropertyVerdict,
+    crate::verdict::VerdictRefinement,
+    Option<crate::adapter::recoverability::RecoverabilityAttribution>,
+    Vec<String>,
+);
 
 /// [`sv_verify_recoverability_refined`] that also returns the [`RecoverabilityAttribution`] of
 /// the canonical verdict (`None` only when the target atom did not parse).
@@ -307,32 +390,26 @@ pub fn sv_verify_recoverability_refined_explained(
     config_specs: &[(String, Vec<u64>)],
     discover_assumptions: bool,
     pins: &[(String, u64)],
-) -> Result<
-    (
-        PropertyVerdict,
-        crate::verdict::VerdictRefinement,
-        Option<crate::adapter::recoverability::RecoverabilityAttribution>,
-        Vec<String>,
-    ),
-    String,
-> {
+) -> Result<Lifted<RefinedRecoverability>, String> {
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e}")
     })?;
-    let (lifted, names) = lift.lift_named()?;
-    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
-    let (verdict, refinement, mut attribution) =
-        crate::adapter::recoverability::verify_recoverability_refined_explained(
-            &btor2,
-            target,
-            extra_predicates,
-            config_specs,
-            discover_assumptions,
-        );
-    if let Some(a) = attribution.as_mut() {
-        a.trace = a.trace.take().map(|t| names.tidy(t));
-    }
-    Ok((verdict, refinement, attribution, applied))
+    lift.lift_named()?
+        .try_map(|(lifted, names)| -> Result<_, String> {
+            let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
+            let (verdict, refinement, mut attribution) =
+                crate::adapter::recoverability::verify_recoverability_refined_explained(
+                    &btor2,
+                    target,
+                    extra_predicates,
+                    config_specs,
+                    discover_assumptions,
+                );
+            if let Some(a) = attribution.as_mut() {
+                a.trace = a.trace.take().map(|t| names.tidy(t));
+            }
+            Ok((verdict, refinement, attribution, applied))
+        })
 }
 
 /// `sv check-fsm` — lift SV and auto-scan every FSM-like state register for a reachable
@@ -340,9 +417,9 @@ pub fn sv_verify_recoverability_refined_explained(
 pub fn sv_check_fsm(
     lift: &SvLift,
     max_width: u32,
-) -> Result<Vec<crate::adapter::fsm_scan::FsmFinding>, String> {
-    let btor2 = lift.lift()?;
-    crate::adapter::fsm_scan::fsm_encoding_scan(&btor2, max_width)
+) -> Result<Lifted<Vec<crate::adapter::fsm_scan::FsmFinding>>, String> {
+    lift.lift_with_notes()?
+        .try_map(|btor2| crate::adapter::fsm_scan::fsm_encoding_scan(&btor2, max_width))
 }
 
 /// `sv check-fsm --liveness` — lift SV and run the FSM liveness inventory
@@ -351,9 +428,9 @@ pub fn sv_check_fsm_liveness(
     lift: &SvLift,
     max_width: u32,
     terminal: &[(String, u64)],
-) -> Result<Vec<crate::adapter::fsm_scan::FsmLivenessFinding>, String> {
-    let btor2 = lift.lift()?;
-    crate::adapter::fsm_scan::fsm_liveness_scan(&btor2, max_width, terminal)
+) -> Result<Lifted<Vec<crate::adapter::fsm_scan::FsmLivenessFinding>>, String> {
+    lift.lift_with_notes()?
+        .try_map(|btor2| crate::adapter::fsm_scan::fsm_liveness_scan(&btor2, max_width, terminal))
 }
 
 /// Whether a lint finding names a state register (or its alias) or a
@@ -447,12 +524,15 @@ impl SvLintFinding {
 ///
 /// Findings are deterministic (sorted by name, deduplicated); a name that is both
 /// a register alias and an output is reported once, as a `Register`.
-pub fn sv_lint_registers(lift: &SvLift) -> Result<Vec<SvLintFinding>, String> {
-    let btor2 = lift.lift()?;
-    let mut findings = lint_undriven_partial_writes(&btor2)?;
-    findings.extend(lint_registered_array_read_moving_address(&btor2)?);
-    findings.sort_by(|a, b| (a.rule.as_str(), &a.signal).cmp(&(b.rule.as_str(), &b.signal)));
-    Ok(findings)
+pub fn sv_lint_registers(lift: &SvLift) -> Result<Lifted<Vec<SvLintFinding>>, String> {
+    lift.lift_with_notes()?
+        .try_map(|btor2| -> Result<_, String> {
+            let mut findings = lint_undriven_partial_writes(&btor2)?;
+            findings.extend(lint_registered_array_read_moving_address(&btor2)?);
+            findings
+                .sort_by(|a, b| (a.rule.as_str(), &a.signal).cmp(&(b.rule.as_str(), &b.signal)));
+            Ok(findings)
+        })
 }
 
 /// mununu#506/#507 — the set of dotted prefixes that name a real INSTANCE scope,
@@ -1552,7 +1632,8 @@ mod tests {
             ..Default::default()
         };
         let verdict = sv_verify_recoverability(&lift, "aes_cipher_ctrl_cs == 9")
-            .expect("recoverability decides on the AES cipher-control FSM");
+            .expect("recoverability decides on the AES cipher-control FSM")
+            .result;
         assert_eq!(
             verdict,
             PropertyVerdict::Holds,
@@ -1606,7 +1687,7 @@ endmodule
             merge_clock_domains: false,
             ..Default::default()
         };
-        let btor2 = lift.lift().expect("the slang lift runs");
+        let btor2 = lift.lift_with_notes().expect("the slang lift runs").result;
         // An anonymous free input is an `input` line with no symbol — the design's
         // own ports (`clk`, `rst_n`, `val`) carry theirs.
         let anonymous_inputs = btor2
@@ -1688,7 +1769,9 @@ endmodule
             ..Default::default()
         };
 
-        let bad = sv_lint_registers(&lift_of(BAD, "rom_bad")).expect("lint lifts rom_bad");
+        let bad = sv_lint_registers(&lift_of(BAD, "rom_bad"))
+            .expect("lint lifts rom_bad")
+            .result;
         let hit: Vec<_> = bad
             .iter()
             .filter(|f| f.rule == SvLintRule::RegisteredArrayReadMovingAddress)
@@ -1704,7 +1787,9 @@ endmodule
             hit[0].detail
         );
 
-        let ok = sv_lint_registers(&lift_of(OK, "rom_ok")).expect("lint lifts rom_ok");
+        let ok = sv_lint_registers(&lift_of(OK, "rom_ok"))
+            .expect("lint lifts rom_ok")
+            .result;
         assert!(
             ok.iter()
                 .all(|f| f.rule != SvLintRule::RegisteredArrayReadMovingAddress),
@@ -1748,8 +1833,9 @@ endmodule
   always_ff @(posedge clk) q <= mem[a_q];
 endmodule
 "#;
-        let bad_rst =
-            sv_lint_registers(&lift_of(BAD_RST, "rom_bad_rst")).expect("lint lifts rom_bad_rst");
+        let bad_rst = sv_lint_registers(&lift_of(BAD_RST, "rom_bad_rst"))
+            .expect("lint lifts rom_bad_rst")
+            .result;
         let hit_rst: Vec<_> = bad_rst
             .iter()
             .filter(|f| f.rule == SvLintRule::RegisteredArrayReadMovingAddress)
@@ -1765,8 +1851,9 @@ endmodule
             hit_rst[0].detail
         );
 
-        let ok_rst =
-            sv_lint_registers(&lift_of(OK_RST, "rom_ok_rst")).expect("lint lifts rom_ok_rst");
+        let ok_rst = sv_lint_registers(&lift_of(OK_RST, "rom_ok_rst"))
+            .expect("lint lifts rom_ok_rst")
+            .result;
         assert!(
             ok_rst
                 .iter()
@@ -1804,7 +1891,9 @@ endmodule
             merge_clock_domains: false,
             ..Default::default()
         };
-        let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH).expect("sv check-fsm runs");
+        let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH)
+            .expect("sv check-fsm runs")
+            .result;
         for f in &findings {
             eprintln!(
                 "  {} [{}] legal={:?} {:?}",
@@ -1845,7 +1934,7 @@ endmodule
             "{findings:?}"
         );
         // The same naming on the mutation surface.
-        let btor2 = lift.lift().expect("lift");
+        let btor2 = lift.lift_with_notes().expect("lift").result;
         let targets = crate::adapter::btor2::mutate::list_targets(&btor2).expect("list");
         assert!(
             targets.stick.contains(&"state_q".to_string()),
@@ -1891,7 +1980,8 @@ endmodule
             &[("rst_n".to_string(), vec![0, 1])],
             false,
         )
-        .expect("verify-recoverability runs");
+        .expect("verify-recoverability runs")
+        .result;
         assert_eq!(
             verdict,
             PropertyVerdict::Holds,
@@ -1915,7 +2005,8 @@ endmodule
             &[("rst_n".to_string(), vec![1])],
             false,
         )
-        .expect("verify-recoverability runs");
+        .expect("verify-recoverability runs")
+        .result;
         assert_eq!(
             verdict,
             PropertyVerdict::Holds,

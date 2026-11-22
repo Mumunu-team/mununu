@@ -42,6 +42,6 @@
 
 ## Not covered here
 
-- The verbs other than `sv verify-auto` and `sv cdc-lint` share the refusal and take `--merge-clock-domains`, but drop the domains: under the flag a free-source clock is refused there, and a derived or multi-clock design lifts with nothing in the report (mununu#1181, open).
+- The verbs other than `sv verify-auto` and `sv cdc-lint` share the refusal and take `--merge-clock-domains`, but dropped the domains when this was written: under the flag a free-source clock was refused there, and a derived or multi-clock design lifted with nothing in the report. Fixed by mununu#1181: every verb reports the merge in `lift_notes` and lifts a free-source clock under the flag — see [its briefing](2026-11-merged-clock-domains-on-every-sv-verb.md).
 - A known driver or a top-level input that is also on a port of unknown direction: the known driver or the input is the root and the port is read as a reader. That is a decision, not a measurement of what the missing module does: a stub whose `inout` does drive a top-level clock input lifts by default as an input clock, and no report names the stub. Give the port a direction in the stub, or provide the module's source, to settle it.
 - Which of several drivers the design resolves to. The scan names them and stops.

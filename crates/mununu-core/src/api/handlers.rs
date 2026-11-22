@@ -1188,6 +1188,7 @@ fn btor2_verify_liveness_handler_impl(
                 parallel_rungs: request.parallel_rungs,
             })?;
         return Ok(Json(Btor2VerifyLivenessResponse {
+            lift_notes: Vec::new(),
             outcome: r.outcome,
             property: format!("justice ({} set(s))", r.justice.len()),
             decided_by: Vec::new(),
@@ -1237,6 +1238,7 @@ fn btor2_verify_liveness_handler_impl(
         })?;
 
     Ok(Json(Btor2VerifyLivenessResponse {
+        lift_notes: Vec::new(),
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
@@ -1279,6 +1281,7 @@ fn btor2_verify_liveness_all_handler_impl(
         })?;
 
     Ok(Json(Btor2VerifyLivenessResponse {
+        lift_notes: Vec::new(),
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
@@ -1345,6 +1348,7 @@ fn btor2_verify_liveness_under_fairness_handler_impl(
     };
 
     Ok(Json(Btor2VerifyLivenessResponse {
+        lift_notes: Vec::new(),
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
@@ -1432,6 +1436,7 @@ fn btor2_verify_recoverability_handler_impl(
         };
 
     Ok(Json(Btor2VerifyRecoverabilityResponse {
+        lift_notes: Vec::new(),
         outcome: verdict.as_str().to_string(),
         property: recoverability_property_str(&request.target),
         pins: applied_pins,
@@ -1507,6 +1512,7 @@ fn btor2_check_fsm_handler_impl(
     };
 
     Ok(Json(Btor2CheckFsmResponse {
+        lift_notes: Vec::new(),
         fsm_registers_checked: findings.iter().filter(|f| f.is_checked()).count(),
         illegal_encodings_found,
         registers,
@@ -1697,13 +1703,17 @@ fn sv_verify_liveness_handler_impl(
         format!("({}) -> {base}", gf.join(" && "))
     };
     let lift = sv_lift_of(&request.lift)?;
-    let (verdict, outcome) = if request.fairness.is_empty() {
+    let crate::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: (verdict, outcome),
+    } = if request.fairness.is_empty() {
         sv_verify_liveness(&lift, req_atom, grant_atom)
     } else {
         sv_verify_liveness_under_fairness(&lift, req_atom, grant_atom, &request.fairness)
     }
     .map_err(bad_req)?;
     Ok(Json(Btor2VerifyLivenessResponse {
+        lift_notes: crate::api::models::lift_note_views(&lift_notes),
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
@@ -1729,14 +1739,17 @@ fn sv_verify_liveness_all_handler_impl(
 
     let property = response_conjunction_property(&request.responses);
     let lift = sv_lift_of(&request.lift)?;
-    let (verdict, outcomes) =
-        sv_verify_liveness_all(&lift, &request.responses).map_err(|message| {
-            ApiError::BadRequest {
-                message,
-                details: None,
-            }
-        })?;
+    let crate::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: (verdict, outcomes),
+    } = sv_verify_liveness_all(&lift, &request.responses).map_err(|message| {
+        ApiError::BadRequest {
+            message,
+            details: None,
+        }
+    })?;
     Ok(Json(Btor2VerifyLivenessResponse {
+        lift_notes: crate::api::models::lift_note_views(&lift_notes),
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
@@ -1794,32 +1807,38 @@ fn sv_verify_recoverability_handler_impl(
         })?;
     let lift = sv_lift_of(&request.lift)?;
     let pins = sorted_pins(&request.pins)?;
-    let (verdict, refinement, attribution, applied_pins) = if request.refine
-        || !config_specs.is_empty()
-        || request.discover_assumptions
-    {
-        let (v, r, a, p) = sv_verify_recoverability_refined_explained(
-            &lift,
-            &request.target,
-            &extra,
-            &config_specs,
-            request.discover_assumptions,
-            &pins,
-        )
-        .map_err(|message| ApiError::BadRequest {
-            message,
-            details: None,
-        })?;
-        (v, Some(r), a, p)
-    } else {
-        let (v, a, p) = sv_verify_recoverability_explained(&lift, &request.target, &extra, &pins)
+    let (lift_notes, verdict, refinement, attribution, applied_pins) =
+        if request.refine || !config_specs.is_empty() || request.discover_assumptions {
+            let crate::adapter::sv_verify::Lifted {
+                lift_notes,
+                result: (v, r, a, p),
+            } = sv_verify_recoverability_refined_explained(
+                &lift,
+                &request.target,
+                &extra,
+                &config_specs,
+                request.discover_assumptions,
+                &pins,
+            )
             .map_err(|message| ApiError::BadRequest {
-            message,
-            details: None,
-        })?;
-        (v, None, Some(a), p)
-    };
+                message,
+                details: None,
+            })?;
+            (lift_notes, v, Some(r), a, p)
+        } else {
+            let crate::adapter::sv_verify::Lifted {
+                lift_notes,
+                result: (v, a, p),
+            } = sv_verify_recoverability_explained(&lift, &request.target, &extra, &pins).map_err(
+                |message| ApiError::BadRequest {
+                    message,
+                    details: None,
+                },
+            )?;
+            (lift_notes, v, None, Some(a), p)
+        };
     Ok(Json(Btor2VerifyRecoverabilityResponse {
+        lift_notes: crate::api::models::lift_note_views(&lift_notes),
         outcome: verdict.as_str().to_string(),
         property,
         pins: applied_pins,
@@ -1847,11 +1866,14 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
     use crate::adapter::sv_verify::sv_check_fsm;
 
     let lift = sv_lift_of(&request.lift)?;
-    let findings =
-        sv_check_fsm(&lift, request.max_width).map_err(|message| ApiError::BadRequest {
-            message,
-            details: None,
-        })?;
+    // One lift's notes speak for both: the `liveness` scan below lifts the same request again.
+    let crate::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: findings,
+    } = sv_check_fsm(&lift, request.max_width).map_err(|message| ApiError::BadRequest {
+        message,
+        details: None,
+    })?;
 
     let illegal_encodings_found = findings.iter().filter(|f| f.is_finding()).count();
     let registers = findings
@@ -1879,6 +1901,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
                 message,
                 details: None,
             })?
+            .result
             .iter()
             .map(crate::api::models::FsmLivenessView::from)
             .collect()
@@ -1887,6 +1910,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
     };
 
     Ok(Json(Btor2CheckFsmResponse {
+        lift_notes: crate::api::models::lift_note_views(&lift_notes),
         fsm_registers_checked: findings.iter().filter(|f| f.is_checked()).count(),
         illegal_encodings_found,
         registers,
@@ -1987,7 +2011,10 @@ fn sv_lint_handler_impl(request: SvLintRequest) -> ApiResult<Json<SvLintResponse
 
     let lift = sv_lift_of(&request.lift)?;
 
-    let findings = sv_lint_registers(&lift).map_err(|message| ApiError::BadRequest {
+    let crate::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: findings,
+    } = sv_lint_registers(&lift).map_err(|message| ApiError::BadRequest {
         message,
         details: None,
     })?;
@@ -2007,6 +2034,7 @@ fn sv_lint_handler_impl(request: SvLintRequest) -> ApiResult<Json<SvLintResponse
         .collect::<Vec<_>>();
 
     Ok(Json(SvLintResponse {
+        lift_notes: crate::api::models::lift_note_views(&lift_notes),
         signals_flagged: findings.len(),
         registers_flagged,
         findings,
@@ -2066,7 +2094,6 @@ fn parse_config_values(
 fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateResponse>> {
     use crate::adapter::btor2::mutate::{Mutation, list_targets};
     use crate::adapter::slang::verify_auto::{VerifyAutoOptions, engine_selection};
-    use crate::adapter::yosys::sv_to_btor2;
     use crate::planner::mutate_and_compare;
 
     let lift = sv_lift_of(&request.lift)?;
@@ -2081,19 +2108,21 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
     // `list` mode — lift once and enumerate the targets (no verification). The discovery lift
     // honours `lift_overrides` too (mununu#725 — it does not go through `verify_auto`).
     if request.list {
-        let (primary, yopts) = lift.staged().map_err(|message| ApiError::BadRequest {
-            message: format!("sv mutate --list: {message}"),
-            details: None,
-        })?;
-        let btor2 = sv_to_btor2(&primary, &yopts).map_err(|e| ApiError::BadRequest {
-            message: format!("sv mutate --list: {}", e.message),
-            details: None,
-        })?;
+        let crate::adapter::sv_verify::Lifted {
+            lift_notes,
+            result: btor2,
+        } = lift
+            .lift_with_notes()
+            .map_err(|message| ApiError::BadRequest {
+                message: format!("sv mutate --list: {message}"),
+                details: None,
+            })?;
         let t = list_targets(&btor2).map_err(|message| ApiError::BadRequest {
             message,
             details: None,
         })?;
         return Ok(Json(SvMutateResponse {
+            lift_notes: crate::api::models::lift_note_views(&lift_notes),
             mutation: None,
             outcome: None,
             targets: Some(SvMutateTargets {
@@ -2156,6 +2185,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
     })?;
 
     Ok(Json(SvMutateResponse {
+        lift_notes: crate::api::models::lift_note_views(&report.lift_notes),
         outcome: Some(report.outcome().to_string()),
         mutation: Some(report.mutation),
         targets: None,
@@ -2191,7 +2221,7 @@ pub async fn sv_cegar_handler(
 }
 
 fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarResponse>> {
-    use crate::adapter::yosys::{YosysOptions, sv_to_btor2};
+    use crate::adapter::yosys::YosysOptions;
 
     if request.predicates.is_empty() {
         return Err(ApiError::BadRequest {
@@ -2203,22 +2233,19 @@ fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarRe
     // SV → single flattened BTOR2 (yosys-slang). The per-module
     // split is for composition; CEGAR's predicate-cube lift wants one
     // transition system, so the flattened shape is the right input.
-    let (source, yopts) =
-        sv_lift_of(&request.lift)?
-            .staged()
-            .map_err(|message| ApiError::BadRequest {
-                message,
-                details: None,
-            })?;
-    let yopts = YosysOptions {
-        setundef_anyseq: request.setundef_anyseq,
-        setundef_anyconst: request.setundef_anyconst,
-        ..yopts
-    };
-    let btor2 = sv_to_btor2(&source, &yopts).map_err(|e| ApiError::BadRequest {
-        message: format!("SV → BTOR2 (yosys-slang): {}", e.message),
-        details: None,
-    })?;
+    let crate::adapter::sv_verify::Lifted {
+        lift_notes,
+        result: btor2,
+    } = sv_lift_of(&request.lift)?
+        .lift_with_notes_under(|yopts| YosysOptions {
+            setundef_anyseq: request.setundef_anyseq,
+            setundef_anyconst: request.setundef_anyconst,
+            ..yopts
+        })
+        .map_err(|message| ApiError::BadRequest {
+            message,
+            details: None,
+        })?;
 
     let params = CegarRunParams {
         btor2_content: &btor2,
@@ -2233,7 +2260,11 @@ fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarRe
         emit_ctxdsl: request.emit_ctxdsl,
         engine: request.engine.as_deref(),
     };
-    Ok(Json(run_cegar_build_response(params)?))
+    // The CEGAR builders are the `btor2` route's too, which lifts nothing: the lift's notes are
+    // set here, on the one route that has a lift.
+    let mut response = run_cegar_build_response(params)?;
+    response.lift_notes = crate::api::models::lift_note_views(&lift_notes);
+    Ok(Json(response))
 }
 
 /// XL.6a — `POST /api/v1/sv/extract-sva`. Runs the slang SVA front-end over the
@@ -2742,6 +2773,7 @@ fn run_symbolic_cegar_response(
     let v = &result.final_verdicts;
 
     Ok(Btor2CegarResponse {
+        lift_notes: Vec::new(),
         success: true,
         iterations,
         final_predicates: result
@@ -2997,6 +3029,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
         .collect();
 
     Ok(Btor2CegarResponse {
+        lift_notes: Vec::new(),
         success: true,
         iterations,
         final_predicates: trace.final_predicates.iter().map(&pred_view).collect(),
@@ -6800,5 +6833,236 @@ mod cancel_tests {
             super::blocking(|| Ok::<bool, super::ApiError>(crate::adapter::run_budget::expired()))
                 .await;
         assert_eq!(r.ok(), Some(false), "the body ran under a live budget");
+    }
+}
+
+#[cfg(test)]
+mod lift_notes_tests {
+    //! mununu#1181 — every `sv` route that lifts under `merge_clock_domains` says so in its
+    //! response. Each row builds its request from JSON, as a client does, runs the route's
+    //! blocking body and reads the serialised response.
+
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// Two clock domains: `seen` on `clk_a`, the three-state `st` on `clk_b`.
+    const TWO_CLOCKS: &str = "\
+module top(input logic clk_a, input logic clk_b, input logic rst, input logic req,
+           output logic gnt);
+  logic seen;
+  logic [1:0] st;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  always_ff @(posedge clk_b)
+    if (rst) st <= 2'd0;
+    else case (st)
+      2'd0: st <= seen ? 2'd1 : 2'd0;
+      2'd1: st <= 2'd2;
+      default: st <= 2'd0;
+    endcase
+  assign gnt = (st == 2'd2);
+  a_st_bounded: assert property (@(posedge clk_b) st != 2'd3);
+endmodule
+";
+
+    fn lift_of(source: &str, merge: bool) -> Value {
+        json!({ "source": source, "top": "top", "merge_clock_domains": merge })
+    }
+
+    fn request<T: serde::de::DeserializeOwned>(lift: &Value, rest: Value) -> T {
+        let mut body = rest;
+        body["lift"] = lift.clone();
+        serde_json::from_value(body).expect("a request the route accepts")
+    }
+
+    /// What a route answered: its serialised response, or the text of its refusal.
+    type Answer = Result<Value, String>;
+
+    /// The text a client reads in a refusal: the message, and the details when there are any.
+    fn refusal_text(error: ApiError) -> String {
+        match error {
+            ApiError::BadRequest {
+                message,
+                details: Some(details),
+            } => format!("{message}\n{details}"),
+            other => other.to_string(),
+        }
+    }
+
+    fn body<T: serde::Serialize>(response: ApiResult<Json<T>>) -> Answer {
+        let Json(response) = response.map_err(refusal_text)?;
+        Ok(serde_json::to_value(&response).expect("a response serialises"))
+    }
+
+    /// One row per `sv` route that lifts and is not `sv/verify-auto` (whose `notes` carried the
+    /// caveat before) or `sv/cdc-lint` (which lists the domains it lints): the route's name and
+    /// its answer to `lift`.
+    fn every_route(lift: &Value) -> Vec<(&'static str, Answer)> {
+        let mut rows = Vec::new();
+        let mut row = |route: &'static str, answer: Answer| rows.push((route, answer));
+        row(
+            "sv/verify-liveness (request / grant)",
+            body(sv_verify_liveness_handler_impl(request(
+                lift,
+                json!({ "request": "seen == 1", "grant": "st == 2" }),
+            ))),
+        );
+        row(
+            "sv/verify-liveness (responses)",
+            body(sv_verify_liveness_handler_impl(request(
+                lift,
+                json!({ "responses": ["seen == 1 => st == 2"] }),
+            ))),
+        );
+        row(
+            "sv/verify-recoverability",
+            body(sv_verify_recoverability_handler_impl(request(
+                lift,
+                json!({ "target": "st == 0" }),
+            ))),
+        );
+        row(
+            "sv/verify-recoverability (refine)",
+            body(sv_verify_recoverability_handler_impl(request(
+                lift,
+                json!({ "target": "st == 0", "refine": true }),
+            ))),
+        );
+        row(
+            "sv/check-fsm",
+            body(sv_check_fsm_handler_impl(request(lift, json!({})))),
+        );
+        row(
+            "sv/check-fsm (liveness)",
+            body(sv_check_fsm_handler_impl(request(
+                lift,
+                json!({ "liveness": true }),
+            ))),
+        );
+        row(
+            "sv/lint",
+            body(sv_lint_handler_impl(request(lift, json!({})))),
+        );
+        row(
+            "sv/mutate (list)",
+            body(sv_mutate_handler_impl(request(
+                lift,
+                json!({ "list": true }),
+            ))),
+        );
+        row(
+            "sv/mutate (run)",
+            body(sv_mutate_handler_impl(request(
+                lift,
+                json!({ "mutation": "stick:st", "engine": "exact-symbolic" }),
+            ))),
+        );
+        row(
+            "sv/cegar",
+            body(sv_cegar_handler_impl(request(
+                lift,
+                json!({
+                    "formula": "nu X. < true > X",
+                    "predicates": [{ "name": "st_zero", "register": "st", "value": 0 }],
+                    "max_iterations": 2,
+                }),
+            ))),
+        );
+        // `sv/plan` has no blocking body of its own: these are its three steps.
+        let plan_request: SvVerifyAutoRequest = request(lift, json!({}));
+        let plan = sv_verify_auto_inputs(&plan_request)
+            .map_err(refusal_text)
+            .and_then(|(sources, yopts, opts)| {
+                crate::planner::plan_auto(&sources, &yopts, &opts).map_err(|e| e.message)
+            })
+            .map(|plan| {
+                serde_json::to_value(SvPlanResponse::from(&plan)).expect("a plan serialises")
+            });
+        row("sv/plan", plan);
+        rows
+    }
+
+    /// The same rows where every route is expected to lift: a refusal fails the test.
+    fn every_response(lift: &Value) -> Vec<(&'static str, Value)> {
+        every_route(lift)
+            .into_iter()
+            .map(|(route, answer)| {
+                let response = answer.unwrap_or_else(|refusal| panic!("{route}: {refusal}"));
+                (route, response)
+            })
+            .collect()
+    }
+
+    /// REPRODUCER and the class's enumerating test at the API. A two-clock design lifted under
+    /// `merge_clock_domains` steps both domains together, an under-approximation no verdict on
+    /// it transfers from; every route says so with the `clock-domains-merged` soundness caveat
+    /// in `lift_notes`. Fails on the parent, where no row carried it: the routes lifted through
+    /// entries that drop the clock domains. The same routes on the design with one clock carry
+    /// no `lift_notes` key at all.
+    #[test]
+    #[ignore = "requires yosys-slang + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_x1181_every_sv_route_reports_the_merged_clock_domains() {
+        let merged = every_response(&lift_of(TWO_CLOCKS, true));
+        let silent: Vec<&str> = merged
+            .iter()
+            .filter(|(_, response)| {
+                !response["lift_notes"].as_array().is_some_and(|notes| {
+                    notes.iter().any(|n| {
+                        n["kind"] == "clock-domains-merged" && n["level"] == "soundness-caveat"
+                    })
+                })
+            })
+            .map(|(route, _)| *route)
+            .collect();
+        assert!(
+            silent.is_empty(),
+            "these routes lifted two clock domains onto one clock and their response does not \
+             say so: {silent:?}\n{merged:#?}"
+        );
+
+        let one_clock = TWO_CLOCKS.replace("clk_b", "clk_a").replace(
+            "input logic clk_a, input logic clk_a,",
+            "input logic clk_a,",
+        );
+        for merge in [false, true] {
+            for (route, response) in every_response(&lift_of(&one_clock, merge)) {
+                assert!(
+                    response.get("lift_notes").is_none(),
+                    "{route} (merge_clock_domains: {merge}): a design on one input clock has \
+                     nothing to say about its clocks: {response:#}"
+                );
+            }
+        }
+    }
+
+    /// The refusal the opt-in answers is unchanged on every route of the table: without the
+    /// opt-in each refuses the two-clock design, counting the domains and naming the flag its
+    /// own request takes (`lift.merge_clock_domains`).
+    #[test]
+    #[ignore = "requires yosys-slang (mununu-sva docker image); run with --ignored"]
+    fn e2e_x1181_without_the_opt_in_a_two_clock_design_is_still_refused() {
+        let rows = every_route(&lift_of(TWO_CLOCKS, false));
+        assert_eq!(rows.len(), 11, "the routes and modes of the reporting test");
+        for (route, answer) in rows {
+            let refusal = match answer {
+                Err(refusal) => refusal,
+                Ok(response) => {
+                    panic!("{route}: lifted two clock domains without the opt-in: {response:#}")
+                }
+            };
+            assert!(
+                refusal.contains("2 clock domains")
+                    && refusal.contains("--merge-clock-domains")
+                    && refusal.contains("lift.merge_clock_domains"),
+                "{route}: {refusal}"
+            );
+            // Each of these routes takes `lift.merge_clock_domains`: none is told it has no
+            // opt-in (the wording of the lifts that return the model alone).
+            assert!(
+                !refusal.contains(crate::adapter::yosys::MERGE_NOT_OFFERED_HERE),
+                "{route}: {refusal}"
+            );
+        }
     }
 }

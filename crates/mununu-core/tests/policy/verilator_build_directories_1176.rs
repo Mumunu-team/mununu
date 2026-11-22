@@ -6,7 +6,7 @@
 //! or of the work-directory type, or a Verilator module that goes back to the system temporary
 //! directory on its own, fails here until it is listed with its check.
 
-use crate::clock_roots_reported_1148::{product_code, rel};
+use crate::merged_clock_domains_reported_1181::{product_code, rel};
 use crate::remedies_name_real_flags_1106::{repo_root, rust_files_under};
 
 /// What starts the build.
