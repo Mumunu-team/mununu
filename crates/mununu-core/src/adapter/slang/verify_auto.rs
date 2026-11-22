@@ -2685,6 +2685,68 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
     slot.items = engines_ran.iter().map(|e| format!("ran:{e}")).collect();
 }
 
+/// mununu#1148 — one note per clock domain whose root the model ticks every step without a
+/// driver it can read. SOUNDNESS: right for an independent source (a PLL behind a black box or
+/// a cut); for a black-boxed or stubbed clock gate or divider, or a net nothing drives, the
+/// lockstep model is neither an over- nor an under-approximation of the real design, so no
+/// verdict on the flops it clocks transfers on its own — a soundness caveat, like
+/// `blackbox-cut`. Pure over the domains: the seam `sv verify-auto` consumes.
+pub(crate) fn clock_root_notes(
+    domains: &[crate::adapter::yosys::ClockDomain],
+) -> Vec<VerificationNote> {
+    use crate::adapter::yosys::ClockRoot;
+    domains
+        .iter()
+        .filter_map(|d| {
+            // One exhaustive match: a new root kind is a compile error here, not a note with
+            // another kind's remedy.
+            let (kind, source, cell, remedy) = match &d.root {
+                ClockRoot::Input | ClockRoot::Derived(_) => return None,
+                ClockRoot::BlackBox(t) => (
+                    "clock-rooted-at-black-box",
+                    format!("the output of black box `{t}`"),
+                    t.clone(),
+                    "Provide the source of the cell that drives the clock, or model its gating \
+                     as a clock enable on the root clock.",
+                ),
+                ClockRoot::Cut => (
+                    "clock-rooted-at-black-box",
+                    "a cut net (the output of a declared or empty black box, or a cut point)"
+                        .to_string(),
+                    "cut net".to_string(),
+                    "Provide the black box's source, or remove the cut point from the clock net.",
+                ),
+                ClockRoot::Undriven => (
+                    "clock-undriven",
+                    "nothing: the net has no driver".to_string(),
+                    String::new(),
+                    "Connect the clock in the RTL.",
+                ),
+            };
+            Some(VerificationNote {
+                kind: kind.into(),
+                level: NoteLevel::SoundnessCaveat,
+                summary: format!(
+                    "clock `{}` is driven by {source} and clocks {} storage cell(s); the model \
+                     ticks it on every step",
+                    d.net, d.cells
+                ),
+                detail: format!(
+                    "The clock's real source is not in the lifted design, so the scan cannot \
+                     tell an independent clock (a PLL — the lockstep model is right) from a \
+                     cell that gates or divides its input, or from a net nothing drives (the \
+                     flops never tick). In the last two cases the model is neither an over- nor \
+                     an under-approximation of the design, and no verdict on the flops this \
+                     clock drives transfers on its own; the lift accepted it because \
+                     `--merge-clock-domains` was given. {remedy}"
+                ),
+                items: vec![d.net.clone(), cell, d.cells.to_string()],
+                property: None,
+            })
+        })
+        .collect()
+}
+
 fn build_notes(
     report: &AutoVerifyReport,
     must_edge_posture: &str,
@@ -2713,10 +2775,16 @@ fn build_notes(
                      tick together.",
                     d.merged_clock_domains.len()
                 )
-            } else {
+            } else if d.merged_clock_domains[0].contains(", derived") {
                 // Roadmap B2 — one domain, on a derived clock.
                 "lift: a derived clock merged onto the model's clock — every verdict assumes it \
                  ticks on every step."
+                    .to_string()
+            } else {
+                // mununu#1148 — one domain, on a clock the design holds no driver for; the
+                // `clock-rooted-at-black-box` / `clock-undriven` note beside this one names it.
+                "lift: a clock with no driver in the lifted design merged onto the model's \
+                 clock — every verdict assumes it ticks on every step."
                     .to_string()
             },
             detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
@@ -5589,6 +5657,16 @@ fn slice_seeds(formula: &str) -> Vec<String> {
     out
 }
 
+/// mununu#1148 — the lift options of a verb that reports the clock roots: `sv verify-auto` is
+/// the one caller, and the only place [`YosysOptions::report_clock_roots`] is set. Every other
+/// field is the caller's.
+pub(crate) fn lift_options_reporting_roots(yosys_opts: &YosysOptions) -> YosysOptions {
+    YosysOptions {
+        report_clock_roots: true,
+        ..yosys_opts.clone()
+    }
+}
+
 pub(crate) fn lift_sv(
     sources: &[(String, String)],
     yosys_opts: &YosysOptions,
@@ -5602,6 +5680,10 @@ pub(crate) fn lift_sv(
         message: "adapter/slang/verify_auto: no SV sources provided".to_string(),
         location: None,
     })?;
+    // mununu#1148 — this verb reads the lifted clock domains and reports every free-source root
+    // (`clock_root_notes`), so the lift may accept such a clock under `--merge-clock-domains`.
+    let reporting = lift_options_reporting_roots(yosys_opts);
+    let yosys_opts = &reporting;
     let overridden;
     let (primary_content, yosys_opts) = if opts.lift_overrides.is_empty() {
         (primary_content, yosys_opts)
@@ -6154,12 +6236,20 @@ pub(crate) fn prepare_model(
     report.diagnostics.trace_names = trace_names;
     // Roadmap B2 — a lone DERIVED domain (a gated or divided clock) that `--merge-clock-domains`
     // let through is merged onto the model's clock as surely as a second domain is.
-    if clock_domains.len() > 1 || clock_domains.iter().any(|d| d.derived_from.is_some()) {
+    if clock_domains.len() > 1
+        || clock_domains
+            .iter()
+            .any(|d| d.derived_from().is_some() || d.is_free_source())
+    {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
             .collect();
     }
+    // mununu#1148 — a clock the model ticks every step without a driver it can read (a black
+    // box, a cut net, no driver) is a note the reader sees; the rebuild below keeps it (a kind
+    // it does not regenerate).
+    report.notes.extend(clock_root_notes(&clock_domains));
     report.diagnostics.blackboxed_modules = blackboxed_modules;
     report.diagnostics.auto_provided_stubs = auto_provided_stubs;
     // Which RTL front end produced this lift — provenance on the report.
@@ -24871,6 +24961,121 @@ mod source_map_tests {
             why("p_other", None, None),
             None,
             "no selection runs every row"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clock_root_note_tests {
+    //! mununu#1148 — the clock-root note at its seam.
+    use super::*;
+    use crate::adapter::yosys::{ClockDomain, ClockRoot};
+
+    fn domain(net: &str, root: ClockRoot) -> ClockDomain {
+        ClockDomain {
+            net: net.into(),
+            posedge: true,
+            cells: 3,
+            root,
+        }
+    }
+
+    /// The verb that reports the roots is the one that may lift a free-source clock under the
+    /// opt-in: `lift_sv` sets `report_clock_roots` and nothing else; the lift refuses the
+    /// opt-in without it and accepts it with it (the verbs dimension of `clock-net-driver`).
+    #[test]
+    fn x1148_only_the_reporting_verb_lifts_a_free_source_clock_under_the_opt_in() {
+        use crate::adapter::yosys::{YosysOptions, refuse_merged_clock_domains};
+        let caller = YosysOptions {
+            top: Some("top".into()),
+            merge_clock_domains: true,
+            ..Default::default()
+        };
+        let reporting = lift_options_reporting_roots(&caller);
+        assert!(reporting.report_clock_roots);
+        assert_eq!(reporting.top, caller.top);
+        assert!(reporting.merge_clock_domains);
+        assert!(
+            !YosysOptions::default().report_clock_roots,
+            "every other verb builds its options without the flag"
+        );
+        // The lift's decision at its seam, for each free-source root: the plain opt-in (any
+        // other verb) is refused naming where it works; the reporting verb's options lift it.
+        for root in [
+            ClockRoot::BlackBox("prim_clock_gating".into()),
+            ClockRoot::Cut,
+            ClockRoot::Undriven,
+        ] {
+            let domains = [domain("gclk", root)];
+            let err = refuse_merged_clock_domains(&domains, &caller)
+                .expect_err("the opt-in on a verb that drops the roots is refused");
+            assert!(
+                err.message.contains("only on `sv verify-auto`"),
+                "{}",
+                err.message
+            );
+            refuse_merged_clock_domains(&domains, &reporting).expect("the reporting verb lifts it");
+        }
+    }
+
+    /// One note per free-source root, none for an input or a derived clock; the kind, the
+    /// level and the items are what a consumer gates on.
+    #[test]
+    fn x1148_a_free_source_clock_is_a_soundness_caveat_with_its_cell() {
+        let notes = clock_root_notes(&[
+            domain("clk", ClockRoot::Input),
+            domain("gated", ClockRoot::Derived("$and".into())),
+            domain("gclk", ClockRoot::BlackBox("prim_clock_gating".into())),
+            domain("pll", ClockRoot::Cut),
+            domain("floating", ClockRoot::Undriven),
+        ]);
+        let kinds: Vec<&str> = notes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "clock-rooted-at-black-box",
+                "clock-rooted-at-black-box",
+                "clock-undriven"
+            ]
+        );
+        assert!(notes.iter().all(|n| n.level == NoteLevel::SoundnessCaveat));
+        assert_eq!(
+            notes[0].items,
+            vec!["gclk".to_string(), "prim_clock_gating".into(), "3".into()]
+        );
+        assert!(
+            notes[0].summary.contains("black box `prim_clock_gating`"),
+            "{}",
+            notes[0].summary
+        );
+        assert!(
+            notes[1].summary.contains("a cut net"),
+            "{}",
+            notes[1].summary
+        );
+        assert!(
+            notes[2].summary.contains("no driver"),
+            "{}",
+            notes[2].summary
+        );
+    }
+
+    /// The report's notes rebuild keeps the note (a kind it does not regenerate), so a note
+    /// pushed before `build_notes` survives into the shipped report.
+    #[test]
+    fn x1148_the_clock_root_note_survives_the_notes_rebuild() {
+        let mut report = AutoVerifyReport::default();
+        report.notes.extend(clock_root_notes(&[domain(
+            "gclk",
+            ClockRoot::BlackBox("pll".into()),
+        )]));
+        let rebuilt = build_notes(&report, "", &[], &[], &[], &[], &NotePosture::Exact);
+        assert!(
+            rebuilt
+                .iter()
+                .any(|n| n.kind == "clock-rooted-at-black-box"),
+            "{:?}",
+            rebuilt.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
         );
     }
 }

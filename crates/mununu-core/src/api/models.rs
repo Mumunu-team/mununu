@@ -1802,7 +1802,9 @@ pub struct SvLiftRequest {
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
     /// Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which
-    /// then ticks on every step.
+    /// then ticks on every step. Only `sv/verify-auto` reports the merged domains; a clock with
+    /// no driver in the design (a black box, a cut net, undriven) lifts under it only on
+    /// `sv/verify-auto` and `sv/cdc-lint`, whose reports name the root.
     #[serde(default)]
     pub merge_clock_domains: bool,
 }
@@ -3069,6 +3071,9 @@ pub struct ModelDiagnosticsView {
     /// empty for a design on one root clock. Non-empty means every verdict assumes the domains
     /// tick together, and a derived one on every step (the `clock-domains-merged` note).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// mununu#1148 — a domain whose root the model ticks every step without a driver it can
+    /// read ends with ", rooted at black box `<cell>`", ", rooted at a cut net (…)" or
+    /// ", undriven"; a derived one with ", derived: driven by `<cell>`".
     pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
     /// under a pin is a claim about THAT configuration only, so the scope ships with it.
