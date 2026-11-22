@@ -622,7 +622,7 @@ fn artifacts_from_cached(
         ),
         location: None,
     })?;
-    let clock_domains = clock_domains(&hit.flat_netlist_json);
+    let clock_domains = clock_domains_with_hierarchy(&hit.flat_netlist_json, &hit.hier_json);
     refuse_merged_clock_domains(&clock_domains, yopts)?;
     Ok(SvFlattenArtifacts {
         btor2: hit.btor2,
@@ -1077,7 +1077,7 @@ fn run_sv_flatten_btor2_concrete(
     // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
     let flat_netlist_json =
         read_lift_snapshot(&clock_json_path(&plan.btor_path), "flattened netlist")?;
-    let clock_domains = clock_domains(&flat_netlist_json);
+    let clock_domains = clock_domains_with_hierarchy(&flat_netlist_json, &hier_json);
     refuse_merged_clock_domains(&clock_domains, yopts)?;
 
     Ok(SvFlattenArtifacts {
@@ -1135,15 +1135,15 @@ pub(crate) fn refuse_merged_clock_domains(
         if !yopts.report_clock_roots
             && let Some(d) = domains.iter().find(|d| d.is_free_source())
         {
+            let (what, _, _) = free_source_wording(d);
             return Err(AdapterError {
                 kind: AdapterErrorKind::UnsupportedConstruct,
                 message: format!(
-                    "adapter/yosys: the clock net `{}` has no driver in the lifted design; \
-                     `--merge-clock-domains` lifts such a clock only on `sv verify-auto` and \
-                     `sv cdc-lint`, whose reports name the root in a note — this verb drops the \
-                     clock domains, so the lockstep model would ship with nothing said about it \
-                     (a mununu limitation). Clock domains: {}.",
-                    d.net,
+                    "adapter/yosys: {} is {what}; `--merge-clock-domains` lifts such a clock \
+                     only on `sv verify-auto` and `sv cdc-lint`, whose reports name the root in \
+                     a note — this verb drops the clock domains, so the lockstep model would \
+                     ship with nothing said about it (a mununu limitation). Clock domains: {}.",
+                    d.subject(),
                     describe_clock_domains(domains)
                 ),
                 location: None,
@@ -1178,40 +1178,22 @@ pub(crate) fn refuse_merged_clock_domains(
     // net, no driver at all) is refused the same way: whether ticking it on every step is right
     // (an independent source) or hides gating, division or a clock that never runs is not in
     // the model. `--merge-clock-domains` accepts the lockstep reading, and `sv verify-auto`
-    // then names the root in a `clock-rooted-at-black-box` / `clock-undriven` note. Before this
-    // the cut shape was refused as "derived from logic" and the stub shape lifted silently.
+    // then names the root in a note (`clock-rooted-at-black-box`, `clock-undriven`,
+    // `clock-constant`, `clock-multi-driven`). Before this the cut shape was refused as
+    // "derived from logic" and the stub shape lifted silently; mununu#1180 added the constant,
+    // the port of unknown direction and the several-driver shapes, which lifted silently too.
     if let Some(d) = domains.iter().find(|d| d.is_free_source()) {
-        let (what, remedy) = match &d.root {
-            ClockRoot::BlackBox(t) => (
-                format!("the output of black box `{t}`, whose body is not in the lifted design"),
-                "provide the source of the cell that drives the clock, or model its gating as a \
-                 clock enable on the root clock",
-            ),
-            ClockRoot::Cut => (
-                "a cut net (the output of a declared or empty black box, or a cut point: \
-                 `--cutpoint` on the `sv` verbs)"
-                    .to_string(),
-                "provide the black box's source, or remove the cut point from the clock net",
-            ),
-            // `is_free_source` excludes an input and a derived clock; the arms are spelled
-            // out so a new root kind is a compile error here, not an "undriven" by default.
-            ClockRoot::Undriven | ClockRoot::Input | ClockRoot::Derived(_) => (
-                "undriven: no cell or input drives it, so its flops never tick".to_string(),
-                "connect the clock in the RTL",
-            ),
-        };
+        let (what, why, remedy) = free_source_wording(d);
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
-                "adapter/yosys: the clock net `{}` is {what}; the model has one implicit clock \
-                 that ticks on every step, which is right for an independent source and neither \
-                 an over- nor an under-approximation of a clock that is gated, divided or never \
-                 runs, so no verdict on the {} storage cell(s) it clocks would transfer on its \
-                 own. Clock domains: {}. {remedy}; `--merge-clock-domains` on `sv verify-auto` \
+                "adapter/yosys: {} is {what}; {why}, so no verdict on the {} storage cell(s) it \
+                 clocks would transfer on its own. Clock domains: {}. {remedy}; \
+                 `--merge-clock-domains` on `sv verify-auto` \
                  accepts the lockstep model explicitly and names the root in a note — on the \
                  other `sv` verbs the flag does not lift such a clock, since they drop the roots \
                  (a mununu limitation).",
-                d.net,
+                d.subject(),
                 d.cells,
                 describe_clock_domains(domains)
             ),
@@ -1235,6 +1217,70 @@ pub(crate) fn refuse_merged_clock_domains(
         });
     }
     Ok(())
+}
+
+/// mununu#1148 / mununu#1180 — what a free-source clock root is, and what the user can do about
+/// it, in the words of both refusals (the default one and the opt-in on a verb that drops the
+/// roots). One exhaustive match: a new root kind is a compile error here, not an "undriven" by
+/// default. Starts lower-case, the remedy has no final stop.
+fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) {
+    // Why the lockstep model says nothing about the cells on such a clock.
+    const FREE: &str = "the model has one implicit clock that ticks on every step, which is \
+                        right for an independent source and neither an over- nor an \
+                        under-approximation of a clock that is gated, divided or never runs";
+    const NEVER_TICKS: &str = "the model has one implicit clock that ticks on every step and \
+                               would update them on every one, which is neither an over- nor an \
+                               under-approximation of cells that keep their value";
+    match &d.root {
+        ClockRoot::BlackBox(t) => (
+            format!("the output of black box `{t}`, whose body is not in the lifted design"),
+            FREE,
+            "provide the source of the cell that drives the clock, or model its gating as a \
+             clock enable on the root clock",
+        ),
+        ClockRoot::BlackBoxPort(types) => (
+            format!(
+                "on a port of black box {} and the lifted design does not say that any of them \
+                 drives it (an `inout` port, or a module with no declaration): one of them may \
+                 drive the clock, or nothing does",
+                quoted_list(types)
+            ),
+            FREE,
+            "provide the source of the cell that drives the clock, or connect the clock in the \
+             RTL",
+        ),
+        ClockRoot::MultiDriven(types) => (
+            format!(
+                "driven by more than one cell ({}); which one the design resolves to is not in \
+                 the lifted netlist",
+                quoted_list(types)
+            ),
+            FREE,
+            "leave one driver on the clock net in the RTL",
+        ),
+        ClockRoot::Constant { value, .. } => (
+            format!(
+                "tied to constant {value}, which has no edge: the storage cells on it never \
+                 update in the design"
+            ),
+            NEVER_TICKS,
+            "connect the clock in the RTL",
+        ),
+        ClockRoot::Cut => (
+            "a cut net (the output of a declared or empty black box, or a cut point: \
+             `--cutpoint` on the `sv` verbs)"
+                .to_string(),
+            FREE,
+            "provide the black box's source, or remove the cut point from the clock net",
+        ),
+        // `is_free_source` excludes an input and a derived clock; the arms are spelled out so
+        // the match stays exhaustive.
+        ClockRoot::Undriven | ClockRoot::Input | ClockRoot::Derived(_) => (
+            "undriven: no cell or input drives it, so its flops never tick".to_string(),
+            FREE,
+            "connect the clock in the RTL",
+        ),
+    }
 }
 
 /// The yosys BTOR backend's loop diagnostic, as its first line reads (the "Active cells" list
@@ -1510,18 +1556,45 @@ pub enum ClockRoot {
     /// No driver in the netlist: the flops on it never tick in the real design; the model ticks
     /// them on every step.
     Undriven,
+    /// mununu#1180 — the clock pin is tied to a constant (`CLK: ["0"]`; measured 2026-11-22: a
+    /// wire tied low, a sub-instance's clock port tied to `1'b1`). A constant has no edge, so
+    /// the cells never tick in the real design; the model ticks them on every step. `value` is
+    /// the bit yosys wrote (`0`, `1`, `x` or `z`); a constant is not a net, so `register` names
+    /// one storage cell on it (the first by name) for the message to point at.
+    Constant { value: String, register: String },
     /// A yosys primitive (`$`-cell type): a gated, divided or muxed clock, logic the one-clock
     /// model cannot carry (refused unless `--merge-clock-domains`).
     Derived(String),
-    /// The output of a cell the flattened netlist still holds under its own type with no
-    /// `port_directions` — a `(* mununu_missing_module *)` stub deleted after the hierarchy
-    /// snapshot (measured 2026-11-20: yosys writes no directions for a cell of unknown type), or
-    /// a hand-written fixture's black box. The cell type.
+    /// The output of a black box the flattened netlist still holds under its own type: a
+    /// `(* mununu_missing_module *)` stub deleted after the hierarchy snapshot, whose declared
+    /// `output` port the net is on (the directions come from that snapshot: yosys writes none
+    /// for a cell of unknown type, measured 2026-11-20), or a cell with `port_directions` (a
+    /// hand-written fixture). The cell type.
     BlackBox(String),
+    /// mununu#1180 — the net is on a port of one or more black boxes and the lifted design does
+    /// not say that any of them drives it: an `inout` port, or a cell of a module with no
+    /// declaration (no port directions anywhere). One of them may drive the clock, or nothing
+    /// does. The cell types, sorted; before, the last cell read was named as the driver, a
+    /// cell that only reads the net included.
+    BlackBoxPort(Vec<String>),
+    /// mununu#1180 — more than one cell output on the bit (measured: two stubs' outputs on one
+    /// net; a `$and` and a stub's output). Which one the real design resolves to is not in the
+    /// lifted netlist. The driver cell types, sorted; before, the last cell read won silently.
+    MultiDriven(Vec<String>),
     /// A cut net (`$anyseq`): `cutpoint -blackbox` on a declared or empty black box (a PLL, a
-    /// clock gate under `--empty-blackboxes`) or `--cutpoint` on the net. The design's own cell
-    /// is gone, so its type is unknown; the net is a free source, not logic.
+    /// clock gate under `--empty-blackboxes`, a pad's `inout` port) or `--cutpoint` on the net.
+    /// The design's own cell is gone, so its type is unknown; the net is a free source, not
+    /// logic.
     Cut,
+}
+
+/// `` `a`, `b` `` — cell types as a message lists them.
+pub(crate) fn quoted_list(types: &[String]) -> String {
+    types
+        .iter()
+        .map(|t| format!("`{t}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl ClockDomain {
@@ -1533,13 +1606,28 @@ impl ClockDomain {
         }
     }
 
-    /// mununu#1148 — a root the model ticks every step without a driver it can read: a black
-    /// box, a cut net or no driver at all.
+    /// How a message names this clock: its net, or — a constant is no net — a storage cell
+    /// clocked by it.
+    pub fn subject(&self) -> String {
+        match &self.root {
+            ClockRoot::Constant { register, .. } => format!("the clock of `{register}`"),
+            _ => format!("the clock net `{}`", self.net),
+        }
+    }
+
+    /// mununu#1148 — a root the model ticks every step without one driver it can read: a black
+    /// box, a cut net, no driver at all, a constant, or several drivers (mununu#1180). Spelled
+    /// out per kind, so a new root kind is a compile error here.
     pub fn is_free_source(&self) -> bool {
-        matches!(
-            self.root,
-            ClockRoot::BlackBox(_) | ClockRoot::Cut | ClockRoot::Undriven
-        )
+        match self.root {
+            ClockRoot::Input | ClockRoot::Derived(_) => false,
+            ClockRoot::BlackBox(_)
+            | ClockRoot::BlackBoxPort(_)
+            | ClockRoot::MultiDriven(_)
+            | ClockRoot::Constant { .. }
+            | ClockRoot::Cut
+            | ClockRoot::Undriven => true,
+        }
     }
 }
 
@@ -1558,7 +1646,16 @@ pub fn describe_clock_domains(domains: &[ClockDomain]) -> String {
                     ClockRoot::Input => String::new(),
                     ClockRoot::Undriven => ", undriven".to_string(),
                     ClockRoot::Derived(t) => format!(", derived: driven by `{t}`"),
+                    ClockRoot::Constant { value, register } =>
+                        format!(", tied to constant {value}: never ticks; clocks `{register}`"),
                     ClockRoot::BlackBox(t) => format!(", rooted at black box `{t}`"),
+                    ClockRoot::BlackBoxPort(types) => format!(
+                        ", on a port of black box {}, which may drive it",
+                        quoted_list(types)
+                    ),
+                    ClockRoot::MultiDriven(types) => {
+                        format!(", driven by more than one cell: {}", quoted_list(types))
+                    }
                     ClockRoot::Cut => {
                         ", rooted at a cut net (a black-box output or a cut point)".to_string()
                     }
@@ -1807,14 +1904,31 @@ pub fn name_staged_primary(sources: &mut [crate::trace::CellSource], primary: &s
 /// (OpenTitan `prim_esc_sender`, measured 2026-10-23). A domain is a distinct (clock net, edge)
 /// a storage cell fires on — the `CLK` pin of a flop (`$dff`, `$adff`, `$dffe`, `$sdff`, `$aldff`, `$dffsr`, … with `CLK_POLARITY`)
 /// and every clocked port of a memory (`$mem_v2` `RD_CLK` / `WR_CLK` where the port's
-/// `*_CLK_ENABLE` bit is set). A constant clock bit is not a domain. Sorted by net, then edge.
+/// `*_CLK_ENABLE` bit is set). A clock pin tied to a constant is a domain of its own, named
+/// `1'b0` / `1'b1` (mununu#1180: it was dropped as "not a net", so flops that never tick lifted
+/// with nothing said). Sorted by net, then edge.
+///
+/// This form has no hierarchy snapshot, so a black box of unknown type has no port directions:
+/// a net on its ports is [`ClockRoot::BlackBoxPort`]. The lift calls
+/// [`clock_domains_with_hierarchy`].
 pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
+    clock_domains_with_hierarchy(flat_json, "")
+}
+
+/// [`clock_domains`] with the lift's hierarchy snapshot (`write_json` before `delete
+/// =A:mununu_missing_module`): a deleted stub's declared port directions are read from it, so
+/// the stub whose `output` the clock net is on is the driver and one that only reads the net is
+/// not (mununu#1180; measured 2026-11-22 — the snapshot keeps the stub module with its ports,
+/// the flattened netlist keeps the cell under the same type name, parametrised or not). An
+/// empty or unreadable snapshot leaves every direction unknown.
+pub fn clock_domains_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<ClockDomain> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(flat_json) else {
         return Vec::new();
     };
     let Some(modules) = root.get("modules").and_then(|m| m.as_object()) else {
         return Vec::new();
     };
+    let declared = declared_port_directions(hier_json);
     // A yosys parameter is a binary string, most significant bit first.
     let param_bit = |cell: &serde_json::Value, name: &str, i: usize| -> Option<bool> {
         let bits = cell.get("parameters")?.get(name)?.as_str()?;
@@ -1825,20 +1939,49 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
     let mut roots: std::collections::BTreeMap<(String, bool), ClockRoot> = Default::default();
     for body in modules.values() {
         let names = net_names(body);
-        let drivers = clock_drivers(body);
-        let net_of = |bit: &serde_json::Value| -> Option<String> {
-            let id = bit.as_i64()?; // "0" / "1" / "x" are constants, not nets
-            Some(
-                names
+        let drivers = clock_drivers(body, &declared);
+        // One storage cell (`storage`: a name to point at) fires on `bit` at `edge`.
+        let mut fires_on = |bit: &serde_json::Value, edge: bool, storage: &str| {
+            let net = match (bit.as_i64(), bit.as_str()) {
+                (Some(id), _) => names
                     .get(&id)
                     .cloned()
                     .unwrap_or_else(|| format!("net#{id}")),
-            )
+                // `"0"` / `"1"` / `"x"` / `"z"`: a constant, not a net.
+                (None, Some(value)) => format!("1'b{value}"),
+                (None, None) => return,
+            };
+            let key = (net, edge);
+            *count.entry(key.clone()).or_default() += 1;
+            match (bit.as_i64(), bit.as_str()) {
+                (Some(id), _) => {
+                    roots.entry(key).or_insert_with(|| drivers.root_of(id));
+                }
+                (None, Some(value)) => {
+                    // The storage cell named is the first by name, whatever the cell order.
+                    let first = match roots.get(&key) {
+                        Some(ClockRoot::Constant { register, .. })
+                            if register.as_str() <= storage =>
+                        {
+                            register.clone()
+                        }
+                        _ => storage.to_string(),
+                    };
+                    roots.insert(
+                        key,
+                        ClockRoot::Constant {
+                            value: value.to_string(),
+                            register: first,
+                        },
+                    );
+                }
+                (None, None) => {}
+            }
         };
         let Some(cells) = body.get("cells").and_then(|c| c.as_object()) else {
             continue;
         };
-        for cell in cells.values() {
+        for (cell_name, cell) in cells {
             let ty = cell.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let conns = cell.get("connections");
             if ty.starts_with("$mem") {
@@ -1854,15 +1997,8 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
                         if param_bit(cell, en, i) != Some(true) {
                             continue;
                         }
-                        if let Some(net) = net_of(bit) {
-                            let edge = param_bit(cell, pol, i).unwrap_or(true);
-                            if let Some(b) = bit.as_i64() {
-                                roots
-                                    .entry((net.clone(), edge))
-                                    .or_insert_with(|| drivers.root_of(b));
-                            }
-                            *count.entry((net, edge)).or_default() += 1;
-                        }
+                        let edge = param_bit(cell, pol, i).unwrap_or(true);
+                        fires_on(bit, edge, cell_name.trim_start_matches('\\'));
                     }
                 }
                 continue;
@@ -1874,15 +2010,20 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
             else {
                 continue;
             };
-            if let Some(net) = net_of(bit) {
-                let edge = param_bit(cell, "CLK_POLARITY", 0).unwrap_or(true);
-                if let Some(b) = bit.as_i64() {
-                    roots
-                        .entry((net.clone(), edge))
-                        .or_insert_with(|| drivers.root_of(b));
-                }
-                *count.entry((net, edge)).or_default() += 1;
-            }
+            // A flop is named by the net it drives (`q`, not `$procdff$12`).
+            let register = conns
+                .and_then(|c| c.get("Q"))
+                .and_then(|q| q.as_array())
+                .and_then(|q| q.first())
+                .and_then(|b| b.as_i64())
+                .and_then(|id| names.get(&id))
+                .map(|n| match n.rfind('[') {
+                    Some(i) if n.ends_with(']') => n[..i].to_string(),
+                    _ => n.clone(),
+                })
+                .unwrap_or_else(|| cell_name.clone());
+            let edge = param_bit(cell, "CLK_POLARITY", 0).unwrap_or(true);
+            fires_on(bit, edge, &register);
         }
     }
     count
@@ -1899,15 +2040,45 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
         .collect()
 }
 
+/// mununu#1180 — module → (port → `input` / `output` / `inout`) for every module the hierarchy
+/// snapshot declares; the clock scan looks a black box of unknown type up here. Empty for an
+/// empty or unreadable snapshot: the directions are then unknown, which the scan reports as
+/// such ([`ClockRoot::BlackBoxPort`]) rather than guessing.
+fn declared_port_directions(hier_json: &str) -> HashMap<String, HashMap<String, String>> {
+    let mut out = HashMap::new();
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(hier_json) else {
+        return out;
+    };
+    let Some(modules) = root.get("modules").and_then(|m| m.as_object()) else {
+        return out;
+    };
+    for (name, body) in modules {
+        let Some(ports) = body.get("ports").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let dirs: HashMap<String, String> = ports
+            .iter()
+            .filter_map(|(port, p)| {
+                let d = p.get("direction").and_then(|d| d.as_str())?;
+                Some((port.clone(), d.to_string()))
+            })
+            .collect();
+        out.insert(name.trim_start_matches('\\').to_string(), dirs);
+    }
+    out
+}
+
 /// Roadmap B2 — who drives each bit of one flattened module, for tracing a clock to its root.
 struct ClockDrivers {
-    /// bit → (driver cell type, the input bit it passes through for an inverter or buffer).
-    driver: HashMap<i64, (String, Option<i64>)>,
-    /// mununu#1148 — bits on the ports of a cell the netlist holds under its own type with no
-    /// `port_directions` (a deleted `(* mununu_missing_module *)` stub): yosys writes no
-    /// directions for a cell of unknown type, so every port is a candidate output. A bit with
-    /// a real driver, or a top-level input, is never read as one.
-    candidate: HashMap<i64, String>,
+    /// bit → every cell output on it: (driver cell type, the input bit it passes through for
+    /// an inverter or buffer). More than one entry is a bit with several drivers (mununu#1180:
+    /// a map of one driver per bit kept the last cell read, silently).
+    driver: HashMap<i64, Vec<(String, Option<i64>)>>,
+    /// mununu#1148 / mununu#1180 — bit → the black-box types that have it on a port that may
+    /// drive it and is not known to: an `inout` port, or any port of a cell with no directions
+    /// in the netlist or in the hierarchy snapshot (yosys writes none for a cell of unknown
+    /// type). A bit with a real driver, or a top-level input, is never read as one.
+    candidate: HashMap<i64, std::collections::BTreeSet<String>>,
     /// The module's top-level input (and `inout`) bits: a clock the design receives.
     inputs: std::collections::HashSet<i64>,
 }
@@ -1917,9 +2088,12 @@ struct ClockDrivers {
 /// polarity, not from the net).
 const CLOCK_PASS_THROUGH: &[&str] = &["$not", "$buf", "$pos", "$_NOT_", "$_BUF_"];
 
-fn clock_drivers(body: &serde_json::Value) -> ClockDrivers {
-    let mut driver = HashMap::new();
-    let mut candidate = HashMap::new();
+fn clock_drivers(
+    body: &serde_json::Value,
+    declared: &HashMap<String, HashMap<String, String>>,
+) -> ClockDrivers {
+    let mut driver: HashMap<i64, Vec<(String, Option<i64>)>> = HashMap::new();
+    let mut candidate: HashMap<i64, std::collections::BTreeSet<String>> = HashMap::new();
     let inputs: std::collections::HashSet<i64> = body
         .get("ports")
         .and_then(|p| p.as_object())
@@ -1952,37 +2126,44 @@ fn clock_drivers(body: &serde_json::Value) -> ClockDrivers {
             continue;
         };
         let dirs = cell.get("port_directions").and_then(|d| d.as_object());
-        // mununu#1148 — a non-`$` cell with no `port_directions` is a black box of unknown
-        // type (measured: a deleted `(* mununu_missing_module *)` stub); every port is a
-        // candidate output, decided in `root_of` against the real drivers and the inputs.
-        if dirs.is_none() && !ty.starts_with('$') {
-            for bits in conns.values() {
-                for bit in bits.as_array().into_iter().flatten() {
-                    if let Some(id) = bit.as_i64() {
-                        candidate.insert(id, ty.to_string());
-                    }
-                }
-            }
-            continue;
-        }
         let input_a = conns.get("A").and_then(|a| a.as_array());
         for (port, bits) in conns {
-            // A `$`-cell without `port_directions` (a hand-written fixture) names its outputs
-            // `Y` / `Q` as the yosys cell library does.
-            let is_output = match dirs.and_then(|d| d.get(port)).and_then(|d| d.as_str()) {
-                Some(d) => d == "output",
-                None => port == "Y" || port == "Q",
+            // The direction of this port, from the cell itself, else — a black box of unknown
+            // type (a deleted `(* mununu_missing_module *)` stub) — from the module the
+            // hierarchy snapshot declared. A `$`-cell without `port_directions` (a hand-written
+            // fixture) names its outputs `Y` / `Q` as the yosys cell library does.
+            let direction = match dirs.and_then(|d| d.get(port)).and_then(|d| d.as_str()) {
+                Some(d) => Some(d),
+                None if ty.starts_with('$') => Some(if port == "Y" || port == "Q" {
+                    "output"
+                } else {
+                    "input"
+                }),
+                None => declared
+                    .get(ty.trim_start_matches('\\'))
+                    .and_then(|ports| ports.get(port))
+                    .map(String::as_str),
             };
-            if !is_output {
-                continue;
-            }
             for (i, bit) in bits.as_array().into_iter().flatten().enumerate() {
                 let Some(id) = bit.as_i64() else { continue };
-                let through = CLOCK_PASS_THROUGH
-                    .contains(&ty)
-                    .then(|| input_a.and_then(|a| a.get(i)).and_then(|b| b.as_i64()))
-                    .flatten();
-                driver.insert(id, (ty.to_string(), through));
+                match direction {
+                    Some("output") => {
+                        let through = CLOCK_PASS_THROUGH
+                            .contains(&ty)
+                            .then(|| input_a.and_then(|a| a.get(i)).and_then(|b| b.as_i64()))
+                            .flatten();
+                        driver
+                            .entry(id)
+                            .or_default()
+                            .push((ty.to_string(), through));
+                    }
+                    Some("input") => {}
+                    // `inout`, or no direction anywhere: the port may drive the bit. Only a
+                    // black box has such a port (a `$`-cell's are all known).
+                    _ => {
+                        candidate.entry(id).or_default().insert(ty.to_string());
+                    }
+                }
             }
         }
     }
@@ -1998,33 +2179,46 @@ impl ClockDrivers {
     /// classification comes from, so a new netlist shape fails to match here, not in a sibling.
     ///
     /// SOUNDNESS: the model has one implicit clock that ticks on every step. A `Derived` root is
-    /// logic the model would ignore (refused). A `BlackBox`, `Cut` or `Undriven` root is ticked
-    /// every step too: right for an independent source (a PLL), and for a cell that gates or
-    /// divides its input, or a net nothing drives, neither an over- nor an under-approximation
-    /// of the real design — the scan names the kind and the report says so (no transfer is
-    /// claimed for the flops on it).
+    /// logic the model would ignore (refused). A `BlackBox`, `BlackBoxPort`, `MultiDriven`,
+    /// `Cut` or `Undriven` root is ticked every step too: right for an independent source (a
+    /// PLL), and for a cell that gates or divides its input, or a net nothing drives, neither
+    /// an over- nor an under-approximation of the real design — the scan names the kind and
+    /// the report says so (no transfer is claimed for the flops on it). A `Constant` clock (the
+    /// scan's, not this walk's: a constant is no net) is the same decision: the model updates
+    /// on every step cells that keep their value in the design.
     fn root_of(&self, bit: i64) -> ClockRoot {
         let mut at = bit;
         // A pass-through chain longer than the design has cells is a combinational loop; the
         // bound keeps the walk finite and reports the loop's cell as the driver.
         for _ in 0..=self.driver.len() {
-            match self.driver.get(&at) {
-                None => {
+            let drivers = self.driver.get(&at).map(Vec::as_slice).unwrap_or(&[]);
+            match drivers {
+                [] => {
                     return if self.inputs.contains(&at) {
                         ClockRoot::Input
-                    } else if let Some(ty) = self.candidate.get(&at) {
-                        ClockRoot::BlackBox(ty.clone())
+                    } else if let Some(types) = self.candidate.get(&at) {
+                        ClockRoot::BlackBoxPort(types.iter().cloned().collect())
                     } else {
                         ClockRoot::Undriven
                     };
                 }
-                Some((ty, Some(next))) if CLOCK_PASS_THROUGH.contains(&ty.as_str()) => at = *next,
-                Some((ty, _)) if ty == "$anyseq" => return ClockRoot::Cut,
-                Some((ty, _)) if ty.starts_with('$') => return ClockRoot::Derived(ty.clone()),
-                Some((ty, _)) => return ClockRoot::BlackBox(ty.clone()),
+                [(ty, Some(next))] if CLOCK_PASS_THROUGH.contains(&ty.as_str()) => at = *next,
+                [(ty, _)] if ty == "$anyseq" => return ClockRoot::Cut,
+                [(ty, _)] if ty.starts_with('$') => return ClockRoot::Derived(ty.clone()),
+                [(ty, _)] => return ClockRoot::BlackBox(ty.clone()),
+                // mununu#1180 — several cell outputs on one bit. Two cut black boxes on one
+                // net are two `$anyseq` cells (measured): still a cut net. Anything else is
+                // named with every driver, sorted, so the answer does not follow the cell
+                // order of the netlist.
+                many if many.iter().all(|(ty, _)| ty == "$anyseq") => return ClockRoot::Cut,
+                many => {
+                    let types: std::collections::BTreeSet<String> =
+                        many.iter().map(|(ty, _)| ty.clone()).collect();
+                    return ClockRoot::MultiDriven(types.into_iter().collect());
+                }
             }
         }
-        match self.driver.get(&at) {
+        match self.driver.get(&at).and_then(|d| d.first()) {
             Some((ty, _)) => ClockRoot::Derived(ty.clone()),
             None => ClockRoot::Undriven,
         }
@@ -4018,8 +4212,10 @@ impl Drop for TempDir {
 
 #[cfg(test)]
 mod tests {
-    /// Two flops on two clock nets are two domains; constant clock bits are none; a `$mem_v2`
-    /// port counts only when its clock is enabled; a hidden name loses to a public one.
+    /// Two flops on two clock nets are two domains; a flop on a constant clock bit is a domain
+    /// of its own, rooted at the constant (mununu#1180: it never ticks, so it is not "none");
+    /// a `$mem_v2` port counts only when its clock is enabled; a hidden name loses to a public
+    /// one.
     #[test]
     fn clock_domains_counts_distinct_clock_nets_and_edges() {
         // Both clocks are top-level inputs (a real `write_json` always carries `ports`;
@@ -4052,6 +4248,15 @@ mod tests {
             d,
             vec![
                 ClockDomain {
+                    net: "1'b0".into(),
+                    posedge: true,
+                    cells: 1,
+                    root: ClockRoot::Constant {
+                        value: "0".into(),
+                        register: "k".into(),
+                    },
+                },
+                ClockDomain {
                     net: "clk_a".into(),
                     posedge: false,
                     cells: 1,
@@ -4072,7 +4277,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            describe_clock_domains(&d[1..]),
+            describe_clock_domains(&d[2..]),
             "clk_a (posedge, 2 cells), clk_b (posedge, 1 cell)"
         );
     }
@@ -4467,6 +4672,11 @@ endmodule
     /// cell stays under its own type with NO `port_directions` and `gclk` has no driver.
     const MISSING_MODULE_CLOCK_GATE_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"en":{"direction":"input","bits":[3]},"d":{"direction":"input","bits":[4]},"q":{"direction":"output","bits":[5]},"r":{"direction":"output","bits":[6]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[4],"Q":[5]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[4],"Q":[6]}},"u_cg":{"type":"prim_clock_gating","parameters":{},"connections":{"clk_i":[2],"clk_o":[7],"en_i":[3]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[4]},"en":{"hide_name":0,"bits":[3]},"gclk":{"hide_name":0,"bits":[7]},"q":{"hide_name":0,"bits":[5]},"r":{"hide_name":0,"bits":[6]}}}}}"#;
 
+    /// mununu#1180 — the stub as the hierarchy snapshot of the same lift declares it (trimmed to
+    /// what the scan reads): the snapshot is taken before the stub is deleted, so it is where
+    /// the directions of the cell's ports are.
+    const MISSING_MODULE_CLOCK_GATE_HIERARCHY: &str = r#"{"modules":{"prim_clock_gating":{"attributes":{"mununu_missing_module":"1"},"ports":{"clk_i":{"direction":"input"},"en_i":{"direction":"input"},"clk_o":{"direction":"output"}}}}}"#;
+
     /// The same design with the gate a declared (empty) black box: `cutpoint -blackbox` removes
     /// the cell and drives `gclk` from `$anyseq`.
     const CUT_BLACK_BOX_CLOCK_GATE_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"en":{"direction":"input","bits":[3]},"d":{"direction":"input","bits":[4]},"q":{"direction":"output","bits":[5]},"r":{"direction":"output","bits":[6]}},"cells":{"$auto$cutpoint.cc:141:execute$1":{"type":"$anyseq","parameters":{"WIDTH":"00000000000000000000000000000001"},"port_directions":{"Y":"output"},"connections":{"Y":[7]}},"$auto$cutpoint.cc:154:execute$3":{"type":"$scopeinfo","parameters":{"TYPE":"blackbox"},"port_directions":{},"connections":{}},"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[4],"Q":[5]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[4],"Q":[6]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[4]},"en":{"hide_name":0,"bits":[3]},"gclk":{"hide_name":0,"bits":[7]},"q":{"hide_name":0,"bits":[5]},"r":{"hide_name":0,"bits":[6]}}}}}"#;
@@ -4476,7 +4686,10 @@ endmodule
     /// root. Fails on the parent, which reads `gclk` as a root clock and says nothing.
     #[test]
     fn x1148_a_clock_rooted_at_a_black_box_output_is_named_in_the_description() {
-        let domains = clock_domains(MISSING_MODULE_CLOCK_GATE_NETLIST);
+        let domains = clock_domains_with_hierarchy(
+            MISSING_MODULE_CLOCK_GATE_NETLIST,
+            MISSING_MODULE_CLOCK_GATE_HIERARCHY,
+        );
         let text = describe_clock_domains(&domains);
         assert!(
             text.contains("gclk (posedge, 1 cell, rooted at black box `prim_clock_gating`)"),
@@ -4491,9 +4704,20 @@ endmodule
     /// included).
     #[test]
     fn the_two_black_box_shapes_are_free_roots_not_derived_domains() {
-        let stub = clock_domains(MISSING_MODULE_CLOCK_GATE_NETLIST);
+        let stub = clock_domains_with_hierarchy(
+            MISSING_MODULE_CLOCK_GATE_NETLIST,
+            MISSING_MODULE_CLOCK_GATE_HIERARCHY,
+        );
         let gated = stub.iter().find(|d| d.net == "gclk").expect("gclk");
         assert_eq!(gated.root, ClockRoot::BlackBox("prim_clock_gating".into()));
+        // mununu#1180 — without the snapshot nothing says which port drives: the root is the
+        // port of a black box, not its output.
+        let undeclared = clock_domains(MISSING_MODULE_CLOCK_GATE_NETLIST);
+        let gated_undeclared = undeclared.iter().find(|d| d.net == "gclk").expect("gclk");
+        assert_eq!(
+            gated_undeclared.root,
+            ClockRoot::BlackBoxPort(vec!["prim_clock_gating".into()])
+        );
         assert_eq!(gated.derived_from(), None);
         let clk = stub.iter().find(|d| d.net == "clk").expect("clk");
         assert_eq!(clk.root, ClockRoot::Input);
@@ -4551,10 +4775,12 @@ endmodule
         }
     }
 
-    /// mununu#1148 — every kind of root the walk returns, on one hand netlist: an input, an
-    /// `$and` (derived), a `$dff` (derived), a `$anyseq` (cut), a cell of unknown type with no
-    /// directions (black box), an undriven net, and an inverter in front of each of the last
-    /// two; the match is exhaustive over `ClockRoot`.
+    /// mununu#1148 / mununu#1180 — every kind of root the walk returns, on one hand netlist: an
+    /// input, an `$and` (derived), a `$dff` (derived), a `$anyseq` (cut), a cell of unknown type
+    /// whose declared output the net is on (black box), an undriven net, an inverter in front of
+    /// each of the last two, a cell of unknown type with no declaration (a port that may drive),
+    /// two cell outputs on one bit (several drivers) and a constant; the match is exhaustive
+    /// over `ClockRoot`.
     #[test]
     fn every_clock_root_kind_is_classified_and_described() {
         let json = r#"{"modules": {"top": {
@@ -4562,7 +4788,9 @@ endmodule
             "netnames": {"clk": {"hide_name": 0, "bits": [2]}, "gated": {"hide_name": 0, "bits": [4]}, "io": {"hide_name": 0, "bits": [11]},
                          "div": {"hide_name": 0, "bits": [5]}, "cut": {"hide_name": 0, "bits": [6]},
                          "bb": {"hide_name": 0, "bits": [7]}, "bb_n": {"hide_name": 0, "bits": [8]},
-                         "none": {"hide_name": 0, "bits": [9]}, "none_n": {"hide_name": 0, "bits": [10]}},
+                         "none": {"hide_name": 0, "bits": [9]}, "none_n": {"hide_name": 0, "bits": [10]},
+                         "port": {"hide_name": 0, "bits": [12]}, "multi": {"hide_name": 0, "bits": [13]},
+                         "tied_q": {"hide_name": 0, "bits": [29]}},
             "cells": {
                 "g": {"type": "$and", "port_directions": {"A": "input", "B": "input", "Y": "output"}, "connections": {"A": [2], "B": [3], "Y": [4]}},
                 "dv": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "port_directions": {"CLK": "input", "D": "input", "Q": "output"}, "connections": {"CLK": [2], "D": [5], "Q": [5]}},
@@ -4576,10 +4804,18 @@ endmodule
                 "f3": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [6], "D": [3], "Q": [23]}},
                 "f4": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [8], "D": [3], "Q": [24]}},
                 "f5": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [10], "D": [3], "Q": [25]}},
-                "f6": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [11], "D": [3], "Q": [26]}}
+                "f6": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [11], "D": [3], "Q": [26]}},
+                "p": {"type": "pad_wrap", "connections": {"io": [12]}},
+                "m1": {"type": "$and", "port_directions": {"A": "input", "B": "input", "Y": "output"}, "connections": {"A": [2], "B": [3], "Y": [13]}},
+                "m2": {"type": "osc_wrap", "port_directions": {"o": "output"}, "connections": {"o": [13]}},
+                "f7": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [12], "D": [3], "Q": [27]}},
+                "f8": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": [13], "D": [3], "Q": [28]}},
+                "f9": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": ["0"], "D": [3], "Q": [29]}}
             }
         }}}"#;
-        let domains = clock_domains(json);
+        // `pll_wrap` is declared (its `o` is an output); `pad_wrap` is not.
+        let hier = r#"{"modules": {"pll_wrap": {"ports": {"i": {"direction": "input"}, "o": {"direction": "output"}}}}}"#;
+        let domains = clock_domains_with_hierarchy(json, hier);
         let root = |net: &str| {
             domains
                 .iter()
@@ -4599,6 +4835,21 @@ endmodule
         assert_eq!(root("cut"), ClockRoot::Cut);
         assert_eq!(root("bb_n"), ClockRoot::BlackBox("pll_wrap".into()));
         assert_eq!(root("none_n"), ClockRoot::Undriven);
+        assert_eq!(
+            root("port"),
+            ClockRoot::BlackBoxPort(vec!["pad_wrap".into()])
+        );
+        assert_eq!(
+            root("multi"),
+            ClockRoot::MultiDriven(vec!["$and".into(), "osc_wrap".into()])
+        );
+        assert_eq!(
+            root("1'b0"),
+            ClockRoot::Constant {
+                value: "0".into(),
+                register: "tied_q".into()
+            }
+        );
         let text = describe_clock_domains(&domains);
         for d in &domains {
             let cells = format!("{} cell{}", d.cells, if d.cells == 1 { "" } else { "s" });
@@ -4615,12 +4866,509 @@ endmodule
                     "{} (posedge, {cells}, rooted at a cut net (a black-box output or a cut point))",
                     d.net
                 ),
+                ClockRoot::BlackBoxPort(t) => format!(
+                    "{} (posedge, {cells}, on a port of black box {}, which may drive it)",
+                    d.net,
+                    quoted_list(t)
+                ),
+                ClockRoot::MultiDriven(t) => format!(
+                    "{} (posedge, {cells}, driven by more than one cell: {})",
+                    d.net,
+                    quoted_list(t)
+                ),
+                ClockRoot::Constant { value, register } => format!(
+                    "{} (posedge, {cells}, tied to constant {value}: never ticks; clocks `{register}`)",
+                    d.net
+                ),
             };
             assert!(text.contains(&expected), "{expected} not in {text}");
             assert_eq!(
                 d.is_free_source(),
                 !matches!(d.root, ClockRoot::Input | ClockRoot::Derived(_))
             );
+        }
+    }
+
+    // mununu#1180 — the netlists the clock scan reads for the class's open shapes, captured in
+    // `mununu-sva` on 2026-11-22 with the lift's own script. Each top clocks `r` on its input
+    // `clk` and `q` on the net in question; the netlists are trimmed to the fields the scan
+    // reads, and each comes with the modules of the same lift's hierarchy snapshot (where a
+    // `(* mununu_missing_module *)` stub's port directions are — the flat cell has none).
+
+    /// `wire c = 1'b0; always @(posedge c) q <= d;` — the flop's `CLK` is the constant bit `"0"`.
+    const CONSTANT_LOW_CLOCK_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":["0"],"D":[3],"Q":[4]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}}},"netnames":{"c":{"hide_name":0,"bits":["0"]},"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]}}}}}"#;
+
+    /// `leaf u(.ck(1'b1), …)` with the flop inside `leaf` — after `flatten`, `CLK` is `"1"`.
+    const CONSTANT_HIGH_CLOCK_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]}},"cells":{"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}},"$driver$u.q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":["1"],"D":[3],"Q":[4]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]},"u.ck":{"hide_name":0,"bits":["1"]},"u.d":{"hide_name":0,"bits":[3]},"u.q":{"hide_name":0,"bits":[4]}}}}}"#;
+
+    /// Stub `pll` drives `pclk` (its `clk_o`), stub `mon` reads it (its `clk_i`).
+    const STUB_DRIVER_AND_READER_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]},"ok":{"direction":"output","bits":[6]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[3],"Q":[4]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}},"u_mon":{"type":"mon","connections":{"clk_i":[7],"ok_o":[6]}},"u_pll":{"type":"pll","connections":{"clk_o":[7],"ref_i":[2]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"ok":{"hide_name":0,"bits":[6]},"pclk":{"hide_name":0,"bits":[7]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]}}}}}"#;
+    const STUB_DRIVER_AND_READER_HIERARCHY: &str = r#"{"modules":{"mon":{"attributes":{"mununu_missing_module":"1"},"ports":{"clk_i":{"direction":"input"},"ok_o":{"direction":"output"}}},"pll":{"attributes":{"mununu_missing_module":"1"},"ports":{"ref_i":{"direction":"input"},"clk_o":{"direction":"output"}}}}}"#;
+
+    /// Nothing drives `nclk`; stub `mon` reads it.
+    const STUB_READER_ONLY_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]},"ok":{"direction":"output","bits":[6]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[3],"Q":[4]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}},"u_mon":{"type":"mon","connections":{"clk_i":[7],"ok_o":[6]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"nclk":{"hide_name":0,"bits":[7]},"ok":{"hide_name":0,"bits":[6]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]}}}}}"#;
+    const STUB_READER_ONLY_HIERARCHY: &str = r#"{"modules":{"mon":{"attributes":{"mununu_missing_module":"1"},"ports":{"clk_i":{"direction":"input"},"ok_o":{"direction":"output"}}}}}"#;
+
+    /// `pclk` on the `inout io` of a declared (empty) black box `pad`: `cutpoint -blackbox`
+    /// removes the cell and drives the net from `$anyseq` (the `pad` module itself stays in the
+    /// netlist, with no cells).
+    const DECLARED_INOUT_BLACK_BOX_NETLIST: &str = r#"{"modules":{"pad":{"ports":{"io":{"direction":"inout","bits":[2]},"oe":{"direction":"input","bits":[3]}},"cells":{},"netnames":{"io":{"hide_name":0,"bits":[2]},"oe":{"hide_name":0,"bits":[3]}}},"top":{"ports":{"clk":{"direction":"input","bits":[2]},"oe":{"direction":"input","bits":[3]},"d":{"direction":"input","bits":[4]},"q":{"direction":"output","bits":[5]},"r":{"direction":"output","bits":[6]}},"cells":{"$auto$cutpoint.cc:141:execute$1":{"type":"$anyseq","port_directions":{"Y":"output"},"connections":{"Y":[7]}},"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[4],"Q":[5]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[4],"Q":[6]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[4]},"oe":{"hide_name":0,"bits":[3]},"pclk":{"hide_name":0,"bits":[7]},"q":{"hide_name":0,"bits":[5]},"r":{"hide_name":0,"bits":[6]}}}}}"#;
+    const DECLARED_INOUT_BLACK_BOX_HIERARCHY: &str = r#"{"modules":{"pad":{"attributes":{"blackbox":"00000000000000000000000000000001"},"ports":{"io":{"direction":"inout"},"oe":{"direction":"input"}}}}}"#;
+
+    /// The same `pad` as a `(* mununu_missing_module *)` stub: the cell stays, `pclk` on its
+    /// `io`.
+    const STUB_INOUT_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"oe":{"direction":"input","bits":[3]},"d":{"direction":"input","bits":[4]},"q":{"direction":"output","bits":[5]},"r":{"direction":"output","bits":[6]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[4],"Q":[5]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[4],"Q":[6]}},"u_pad":{"type":"pad","connections":{"io":[7],"oe":[3]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[4]},"oe":{"hide_name":0,"bits":[3]},"pclk":{"hide_name":0,"bits":[7]},"q":{"hide_name":0,"bits":[5]},"r":{"hide_name":0,"bits":[6]}}}}}"#;
+    const STUB_INOUT_HIERARCHY: &str = r#"{"modules":{"pad":{"attributes":{"mununu_missing_module":"1"},"ports":{"io":{"direction":"inout"},"oe":{"direction":"input"}}}}}"#;
+
+    /// Two stubs, `osc` and `pll`, each with its `clk_o` on `pclk`.
+    const TWO_STUB_DRIVERS_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[6],"D":[3],"Q":[4]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}},"u_osc":{"type":"osc","connections":{"clk_o":[6]}},"u_pll":{"type":"pll","connections":{"clk_o":[6],"ref_i":[2]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"pclk":{"hide_name":0,"bits":[6]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]}}}}}"#;
+    const TWO_STUB_DRIVERS_HIERARCHY: &str = r#"{"modules":{"osc":{"attributes":{"mununu_missing_module":"1"},"ports":{"clk_o":{"direction":"output"}}},"pll":{"attributes":{"mununu_missing_module":"1"},"ports":{"ref_i":{"direction":"input"},"clk_o":{"direction":"output"}}}}}"#;
+
+    /// `assign pclk = clk & en;` and stub `osc`'s `clk_o` on the same net.
+    const LOGIC_AND_STUB_DRIVERS_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"en":{"direction":"input","bits":[3]},"d":{"direction":"input","bits":[4]},"q":{"direction":"output","bits":[5]},"r":{"direction":"output","bits":[6]}},"cells":{"$0":{"type":"$and","port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[2],"B":[3],"Y":[7]}},"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[7],"D":[4],"Q":[5]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[4],"Q":[6]}},"u_osc":{"type":"osc","connections":{"clk_o":[7]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[4]},"en":{"hide_name":0,"bits":[3]},"pclk":{"hide_name":0,"bits":[7]},"q":{"hide_name":0,"bits":[5]},"r":{"hide_name":0,"bits":[6]}}}}}"#;
+    const LOGIC_AND_STUB_DRIVERS_HIERARCHY: &str = r#"{"modules":{"osc":{"attributes":{"mununu_missing_module":"1"},"ports":{"clk_o":{"direction":"output"}}}}}"#;
+
+    /// Two declared (empty) black boxes on `pclk`: two `$anyseq` cells on one bit.
+    const TWO_CUT_DRIVERS_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]}},"cells":{"$auto$cutpoint.cc:141:execute$1":{"type":"$anyseq","port_directions":{"Y":"output"},"connections":{"Y":[6]}},"$auto$cutpoint.cc:141:execute$4":{"type":"$anyseq","port_directions":{"Y":"output"},"connections":{"Y":[6]}},"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[6],"D":[3],"Q":[4]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"pclk":{"hide_name":0,"bits":[6]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]}}}}}"#;
+
+    /// Stub `pll` instantiated as `pll #(.DIV(4)) u_pll(…)`: the flat cell's type and the
+    /// snapshot's module are both the plain name `pll` (a stub is a black box, never
+    /// specialised per parameter set).
+    const PARAMETRISED_STUB_NETLIST: &str = r#"{"modules":{"top":{"ports":{"clk":{"direction":"input","bits":[2]},"d":{"direction":"input","bits":[3]},"q":{"direction":"output","bits":[4]},"r":{"direction":"output","bits":[5]}},"cells":{"$driver$q":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[6],"D":[3],"Q":[4]}},"$driver$r":{"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001"},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[3],"Q":[5]}},"u_pll":{"type":"pll","connections":{"clk_o":[6],"ref_i":[2]}}},"netnames":{"clk":{"hide_name":0,"bits":[2]},"d":{"hide_name":0,"bits":[3]},"pclk":{"hide_name":0,"bits":[6]},"q":{"hide_name":0,"bits":[4]},"r":{"hide_name":0,"bits":[5]}}}}}"#;
+    const PARAMETRISED_STUB_HIERARCHY: &str = r#"{"modules":{"pll":{"attributes":{"mununu_missing_module":"1"},"ports":{"ref_i":{"direction":"input"},"clk_o":{"direction":"output"}}}}}"#;
+
+    fn port_of(types: &[&str]) -> ClockRoot {
+        ClockRoot::BlackBoxPort(types.iter().map(|t| t.to_string()).collect())
+    }
+
+    fn several(types: &[&str]) -> ClockRoot {
+        ClockRoot::MultiDriven(types.iter().map(|t| t.to_string()).collect())
+    }
+
+    fn tied(value: &str, register: &str) -> ClockRoot {
+        ClockRoot::Constant {
+            value: value.into(),
+            register: register.into(),
+        }
+    }
+
+    /// mununu#1180 — REPRODUCER: a flop whose clock pin is tied to a constant is a domain, named
+    /// and refused. Fails on the parent, where the scan dropped a clock bit that is not a net:
+    /// one domain (`clk`), nothing refused, and the flop that never ticks lifted as if it did.
+    #[test]
+    fn x1180_a_flop_on_a_constant_clock_is_a_domain_and_is_refused() {
+        let domains = clock_domains(CONSTANT_LOW_CLOCK_NETLIST);
+        assert!(
+            domains.iter().any(|d| d.net == "1'b0" && d.cells == 1),
+            "the constant clock is a domain: {}",
+            describe_clock_domains(&domains)
+        );
+        let tied_only: Vec<ClockDomain> = domains
+            .iter()
+            .filter(|d| d.net == "1'b0")
+            .cloned()
+            .collect();
+        let err = refuse_merged_clock_domains(&tied_only, &YosysOptions::default())
+            .expect_err("a clock that never ticks is not the model's clock");
+        assert!(
+            err.message.contains("constant 0") && err.message.contains("`q`"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// mununu#1180 — the class's open rows, one per captured netlist, with the root the scan
+    /// gives the lift (which has the hierarchy snapshot) and the root without a snapshot (the
+    /// one-argument form: no stub directions, so a stub's port is one that may drive).
+    #[test]
+    fn x1180_every_open_clock_net_shape_is_classified_from_the_captured_netlists() {
+        let black_box = |t: &str| ClockRoot::BlackBox(t.into());
+        // (case, flat netlist, hierarchy, the net `q` is clocked on, root in the lift, root
+        // with no snapshot)
+        let cases: [(&str, &str, &str, &str, ClockRoot, ClockRoot); 10] = [
+            (
+                "constant low",
+                CONSTANT_LOW_CLOCK_NETLIST,
+                "",
+                "1'b0",
+                tied("0", "q"),
+                tied("0", "q"),
+            ),
+            (
+                "constant high, through a sub-instance",
+                CONSTANT_HIGH_CLOCK_NETLIST,
+                "",
+                "1'b1",
+                tied("1", "q"),
+                tied("1", "q"),
+            ),
+            (
+                "one stub drives, one stub reads",
+                STUB_DRIVER_AND_READER_NETLIST,
+                STUB_DRIVER_AND_READER_HIERARCHY,
+                "pclk",
+                black_box("pll"),
+                port_of(&["mon", "pll"]),
+            ),
+            (
+                "only a stub's input on the net",
+                STUB_READER_ONLY_NETLIST,
+                STUB_READER_ONLY_HIERARCHY,
+                "nclk",
+                ClockRoot::Undriven,
+                port_of(&["mon"]),
+            ),
+            (
+                "inout of a declared black box",
+                DECLARED_INOUT_BLACK_BOX_NETLIST,
+                DECLARED_INOUT_BLACK_BOX_HIERARCHY,
+                "pclk",
+                ClockRoot::Cut,
+                ClockRoot::Cut,
+            ),
+            (
+                "inout of a stub",
+                STUB_INOUT_NETLIST,
+                STUB_INOUT_HIERARCHY,
+                "pclk",
+                port_of(&["pad"]),
+                port_of(&["pad"]),
+            ),
+            (
+                "two stub outputs",
+                TWO_STUB_DRIVERS_NETLIST,
+                TWO_STUB_DRIVERS_HIERARCHY,
+                "pclk",
+                several(&["osc", "pll"]),
+                port_of(&["osc", "pll"]),
+            ),
+            (
+                "logic and a stub output",
+                LOGIC_AND_STUB_DRIVERS_NETLIST,
+                LOGIC_AND_STUB_DRIVERS_HIERARCHY,
+                "pclk",
+                several(&["$and", "osc"]),
+                // With no direction for `osc`'s port the one known driver is the root.
+                ClockRoot::Derived("$and".into()),
+            ),
+            (
+                "two declared black boxes",
+                TWO_CUT_DRIVERS_NETLIST,
+                "",
+                "pclk",
+                ClockRoot::Cut,
+                ClockRoot::Cut,
+            ),
+            (
+                "a parametrised stub",
+                PARAMETRISED_STUB_NETLIST,
+                PARAMETRISED_STUB_HIERARCHY,
+                "pclk",
+                black_box("pll"),
+                port_of(&["pll"]),
+            ),
+        ];
+        for (case, flat, hier, net, in_the_lift, no_snapshot) in cases {
+            for (what, domains, expected) in [
+                (
+                    "in the lift",
+                    clock_domains_with_hierarchy(flat, hier),
+                    &in_the_lift,
+                ),
+                ("with no snapshot", clock_domains(flat), &no_snapshot),
+            ] {
+                let text = describe_clock_domains(&domains);
+                let d = domains
+                    .iter()
+                    .find(|d| d.net == net)
+                    .unwrap_or_else(|| panic!("{case}, {what}: `{net}` is a domain: {text}"));
+                assert_eq!(&d.root, expected, "{case}, {what}: {text}");
+                assert_eq!(d.cells, 1, "{case}, {what}: {text}");
+                let clk = domains
+                    .iter()
+                    .find(|d| d.net == "clk")
+                    .unwrap_or_else(|| panic!("{case}, {what}: `clk` is a domain: {text}"));
+                assert_eq!(clk.root, ClockRoot::Input, "{case}, {what}: {text}");
+                assert_eq!(domains.len(), 2, "{case}, {what}: {text}");
+            }
+        }
+    }
+
+    /// mununu#1180 — which stub the scan names never follows the order of the cells: the same
+    /// two-stub netlist with the instances renamed so the reader sorts last still names the
+    /// driver (the parent kept the last cell read on the bit).
+    #[test]
+    fn x1180_the_root_does_not_follow_the_cell_order() {
+        for (first, second) in [("a_pll", "z_mon"), ("z_pll", "a_mon")] {
+            let flat = STUB_DRIVER_AND_READER_NETLIST
+                .replace("u_pll", first)
+                .replace("u_mon", second);
+            let domains = clock_domains_with_hierarchy(&flat, STUB_DRIVER_AND_READER_HIERARCHY);
+            let pclk = domains.iter().find(|d| d.net == "pclk").expect("pclk");
+            assert_eq!(pclk.root, ClockRoot::BlackBox("pll".into()), "{first}");
+        }
+        for (first, second) in [("a_osc", "z_pll"), ("z_osc", "a_pll")] {
+            let flat = TWO_STUB_DRIVERS_NETLIST
+                .replace("u_osc", first)
+                .replace("u_pll", second);
+            let domains = clock_domains_with_hierarchy(&flat, TWO_STUB_DRIVERS_HIERARCHY);
+            let pclk = domains.iter().find(|d| d.net == "pclk").expect("pclk");
+            assert_eq!(pclk.root, several(&["osc", "pll"]), "{first}");
+        }
+    }
+
+    /// mununu#1180 — the constant's domain names the first storage cell by name whatever the
+    /// cell order, counts every cell on it, keeps the two constants and the two edges apart,
+    /// and takes a memory port's clock too.
+    #[test]
+    fn x1180_a_constant_clock_domain_counts_its_cells_and_names_the_first() {
+        let json = r#"{"modules": {"top": {
+            "netnames": {"zq": {"hide_name": 0, "bits": [10]}, "aq": {"hide_name": 0, "bits": [11, 12]},
+                         "hq": {"hide_name": 0, "bits": [13]}, "nq": {"hide_name": 0, "bits": [14]}},
+            "cells": {
+                "f_z": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": ["0"], "D": [3], "Q": [10]}},
+                "f_a": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": ["0"], "D": [3, 3], "Q": [11, 12]}},
+                "f_h": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"}, "connections": {"CLK": ["1"], "D": [3], "Q": [13]}},
+                "f_n": {"type": "$dff", "parameters": {"CLK_POLARITY": "0"}, "connections": {"CLK": ["0"], "D": [3], "Q": [14]}},
+                "mem": {"type": "$mem_v2", "parameters": {"RD_CLK_ENABLE": "1", "RD_CLK_POLARITY": "1", "WR_CLK_ENABLE": "0", "WR_CLK_POLARITY": "1"},
+                        "connections": {"RD_CLK": ["x"], "WR_CLK": ["x"]}}
+            }
+        }}}"#;
+        let domains = clock_domains(json);
+        let got: Vec<(String, bool, usize, ClockRoot)> = domains
+            .iter()
+            .map(|d| (d.net.clone(), d.posedge, d.cells, d.root.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("1'b0".to_string(), false, 1, tied("0", "nq")),
+                ("1'b0".to_string(), true, 2, tied("0", "aq")),
+                ("1'b1".to_string(), true, 1, tied("1", "hq")),
+                ("1'bx".to_string(), true, 1, tied("x", "mem")),
+            ]
+        );
+        assert_eq!(
+            domains[1].subject(),
+            "the clock of `aq`",
+            "a constant is no net: the refusal points at a register"
+        );
+    }
+
+    /// mununu#1180 — each new root is a free source: refused by default in its own words with a
+    /// remedy, refused under the opt-in on a verb that drops the roots, lifted under the opt-in
+    /// where the root is reported.
+    #[test]
+    fn x1180_each_new_root_is_refused_in_its_own_words_unless_merged_and_reported() {
+        let cases: [(ClockRoot, &str, &[&str]); 3] = [
+            (
+                tied("0", "q"),
+                "1'b0",
+                &[
+                    "the clock of `q` is tied to constant 0, which has no edge",
+                    "connect the clock in the RTL",
+                ],
+            ),
+            (
+                port_of(&["mon", "pad"]),
+                "pclk",
+                &[
+                    "the clock net `pclk` is on a port of black box `mon`, `pad`",
+                    "does not say that any of them drives it",
+                    "provide the source of the cell that drives the clock",
+                ],
+            ),
+            (
+                several(&["$and", "osc"]),
+                "pclk",
+                &[
+                    "the clock net `pclk` is driven by more than one cell (`$and`, `osc`)",
+                    "leave one driver on the clock net",
+                ],
+            ),
+        ];
+        for (root, net, needles) in cases {
+            let domains = vec![ClockDomain {
+                net: net.into(),
+                posedge: true,
+                cells: 1,
+                root: root.clone(),
+            }];
+            assert!(domains[0].is_free_source(), "{root:?}");
+            assert_eq!(domains[0].derived_from(), None, "{root:?}");
+            let err = refuse_merged_clock_domains(&domains, &YosysOptions::default())
+                .expect_err("refused by default");
+            for needle in needles {
+                assert!(err.message.contains(needle), "{needle}: {}", err.message);
+            }
+            assert!(
+                err.message
+                    .contains("`--merge-clock-domains` on `sv verify-auto`"),
+                "{}",
+                err.message
+            );
+            let merged = YosysOptions {
+                merge_clock_domains: true,
+                ..Default::default()
+            };
+            let err = refuse_merged_clock_domains(&domains, &merged)
+                .expect_err("the opt-in on a verb that drops the roots is refused");
+            assert!(
+                err.message.contains(needles[0])
+                    && err.message.contains("only on `sv verify-auto`"),
+                "{}",
+                err.message
+            );
+            let reported = YosysOptions {
+                report_clock_roots: true,
+                ..merged
+            };
+            refuse_merged_clock_domains(&domains, &reported)
+                .expect("the opt-in where the root is reported accepts the lockstep model");
+        }
+    }
+
+    /// mununu#1180 — the open shapes through the real lift, from the sources the fixtures were
+    /// captured from: each is refused by default in the words of its root, and lifts under the
+    /// opt-in where the root is reported, with the root the table above expects "in the lift".
+    /// Pins the yosys shapes (a constant on the clock pin survives the lift; a stub keeps its
+    /// cell and its declaration reaches the hierarchy snapshot; a declared black box is cut).
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_every_open_clock_net_shape_is_classified_by_the_real_lift() {
+        const BODY: &str = "\
+  always @(posedge clk) r <= d;
+  always @(posedge pclk) q <= d;
+endmodule
+";
+        let stub = format!("(* {MISSING_MODULE_ATTR} *)");
+        let top = |ports: &str, wiring: &str| {
+            format!(
+                "module top(input clk, input d, output reg q, output reg r{ports});\n{wiring}{BODY}"
+            )
+        };
+        // (case, source, the net `q` is clocked on, its root, a phrase of the default refusal)
+        let cases: Vec<(&str, String, &str, ClockRoot, &str)> = vec![
+            (
+                "constant low",
+                top("", "  wire pclk = 1'b0;\n"),
+                "1'b0",
+                tied("0", "q"),
+                "is tied to constant 0, which has no edge",
+            ),
+            (
+                "one stub drives, one stub reads",
+                format!(
+                    "{stub}\nmodule pll(input ref_i, output clk_o);\nendmodule\n\
+                     {stub}\nmodule mon(input clk_i, output ok_o);\nendmodule\n{}",
+                    top(
+                        ", output ok",
+                        "  wire pclk;\n  pll u_pll(.ref_i(clk), .clk_o(pclk));\n  \
+                         mon u_mon(.clk_i(pclk), .ok_o(ok));\n"
+                    )
+                ),
+                "pclk",
+                ClockRoot::BlackBox("pll".into()),
+                "`pclk`",
+            ),
+            (
+                "only a stub's input on the net",
+                format!(
+                    "{stub}\nmodule mon(input clk_i, output ok_o);\nendmodule\n{}",
+                    top(
+                        ", output ok",
+                        "  wire pclk;\n  mon u_mon(.clk_i(pclk), .ok_o(ok));\n"
+                    )
+                ),
+                "pclk",
+                ClockRoot::Undriven,
+                "`pclk`",
+            ),
+            (
+                "inout of a declared black box",
+                format!(
+                    "module pad(inout io, input oe);\nendmodule\n{}",
+                    top(
+                        ", input oe",
+                        "  wire pclk;\n  pad u_pad(.io(pclk), .oe(oe));\n"
+                    )
+                ),
+                "pclk",
+                ClockRoot::Cut,
+                "`pclk`",
+            ),
+            (
+                "inout of a stub",
+                format!(
+                    "{stub}\nmodule pad(inout io, input oe);\nendmodule\n{}",
+                    top(
+                        ", input oe",
+                        "  wire pclk;\n  pad u_pad(.io(pclk), .oe(oe));\n"
+                    )
+                ),
+                "pclk",
+                port_of(&["pad"]),
+                "is on a port of black box `pad`",
+            ),
+            (
+                "two stub outputs",
+                format!(
+                    "{stub}\nmodule pll(input ref_i, output clk_o);\nendmodule\n\
+                     {stub}\nmodule osc(output clk_o);\nendmodule\n{}",
+                    top(
+                        "",
+                        "  wire pclk;\n  pll u_pll(.ref_i(clk), .clk_o(pclk));\n  \
+                         osc u_osc(.clk_o(pclk));\n"
+                    )
+                ),
+                "pclk",
+                several(&["osc", "pll"]),
+                "is driven by more than one cell (`osc`, `pll`)",
+            ),
+            (
+                "logic and a stub output",
+                format!(
+                    "{stub}\nmodule osc(output clk_o);\nendmodule\n{}",
+                    top(
+                        ", input en",
+                        "  wire pclk;\n  assign pclk = clk & en;\n  osc u_osc(.clk_o(pclk));\n"
+                    )
+                ),
+                "pclk",
+                several(&["$and", "osc"]),
+                "is driven by more than one cell (`$and`, `osc`)",
+            ),
+        ];
+        for (case, src, net, root, phrase) in cases {
+            let err = sv_to_btor2_with_blackboxes(&src, &YosysOptions::default())
+                .err()
+                .unwrap_or_else(|| panic!("{case}: refused by default"));
+            assert!(
+                err.message.contains(phrase) && err.message.contains("--merge-clock-domains"),
+                "{case}: {}",
+                err.message
+            );
+            let merged = sv_to_btor2_with_blackboxes(
+                &src,
+                &YosysOptions {
+                    merge_clock_domains: true,
+                    report_clock_roots: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{case}: the opt-in where the root is reported lifts it: {}",
+                    e.message
+                )
+            });
+            let text = describe_clock_domains(&merged.clock_domains);
+            let domain = merged
+                .clock_domains
+                .iter()
+                .find(|d| d.net == net)
+                .unwrap_or_else(|| panic!("{case}: `{net}` is a domain: {text}"));
+            assert_eq!(domain.root, root, "{case}: {text}");
         }
     }
 

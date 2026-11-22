@@ -68,7 +68,7 @@ Rust source: [`PropertyVerdict`](../../crates/mununu-core/src/verdict.rs#L22) �
 
 ## SvVerifyAutoResponse — top-level shape
 
-Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L2496).
+Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L2490).
 
 ```jsonc
 {
@@ -86,7 +86,7 @@ Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs
 
 ## PropertyVerdictView — per-property
 
-Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3204).
+Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3206).
 
 ```jsonc
 {
@@ -234,7 +234,7 @@ Every verdict-modifying decision (config pin, parameter override, cut point, res
 
 ## Unsupported assertions
 
-Rust source: [`UnsupportedAssertionView`](../../crates/mununu-core/src/api/models.rs#L2283). One entry per SVA that could not be translated:
+Rust source: [`UnsupportedAssertionView`](../../crates/mununu-core/src/api/models.rs#L2277). One entry per SVA that could not be translated:
 
 ```jsonc
 { "name": "some_property", "kind": "assert", "reason": "unbounded ##[m:$] delay in sequence antecedent" }

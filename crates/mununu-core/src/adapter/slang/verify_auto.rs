@@ -2685,60 +2685,122 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
     slot.items = engines_ran.iter().map(|e| format!("ran:{e}")).collect();
 }
 
+/// The kinds [`clock_root_notes`] emits: one per way a clock can be without a driver the model
+/// can follow. `build_notes` reads them to qualify the control-slice claim.
+pub(crate) const CLOCK_ROOT_NOTE_KINDS: &[&str] = &[
+    "clock-rooted-at-black-box",
+    "clock-undriven",
+    "clock-constant",
+    "clock-multi-driven",
+];
+
 /// mununu#1148 — one note per clock domain whose root the model ticks every step without a
 /// driver it can read. SOUNDNESS: right for an independent source (a PLL behind a black box or
-/// a cut); for a black-boxed or stubbed clock gate or divider, or a net nothing drives, the
-/// lockstep model is neither an over- nor an under-approximation of the real design, so no
-/// verdict on the flops it clocks transfers on its own — a soundness caveat, like
-/// `blackbox-cut`. Pure over the domains: the seam `sv verify-auto` consumes.
+/// a cut); for a black-boxed or stubbed clock gate or divider, a net nothing drives, a clock
+/// tied to a constant or a net with several drivers (mununu#1180), the lockstep model is
+/// neither an over- nor an under-approximation of the real design, so no verdict on the flops
+/// it clocks transfers on its own — a soundness caveat, like `blackbox-cut`. Pure over the
+/// domains: the seam `sv verify-auto` consumes.
 pub(crate) fn clock_root_notes(
     domains: &[crate::adapter::yosys::ClockDomain],
 ) -> Vec<VerificationNote> {
-    use crate::adapter::yosys::ClockRoot;
+    use crate::adapter::yosys::{ClockRoot, quoted_list};
+    // Why no verdict transfers, per way the source is missing.
+    const SOURCE_UNKNOWN: &str = "The clock's real source is not in the lifted design, so the \
+        scan cannot tell an independent clock (a PLL — the lockstep model is right) from a cell \
+        that gates or divides its input, or from a net nothing drives (the flops never tick). \
+        In the last two cases the model is neither an over- nor an under-approximation of the \
+        design, and no verdict on the flops this clock drives transfers on its own";
+    const NO_EDGE: &str = "A constant has no edge, so the storage cells on it keep their value \
+        in the design, while the model updates them on every step: that is neither an over- \
+        nor an under-approximation of the design, and no verdict on those cells transfers on \
+        its own";
+    const SEVERAL_DRIVERS: &str = "The lifted netlist has more than one driver on this net and \
+        does not say which the design resolves to, so the scan cannot tell an independent \
+        clock (the lockstep model is right) from a gated or divided one, or from a conflict. \
+        The model is then neither an over- nor an under-approximation of the design, and no \
+        verdict on the flops this clock drives transfers on its own";
     domains
         .iter()
         .filter_map(|d| {
             // One exhaustive match: a new root kind is a compile error here, not a note with
-            // another kind's remedy.
-            let (kind, source, cell, remedy) = match &d.root {
+            // another kind's remedy. `(kind, what the clock is, why, items[1], remedy)`.
+            let (kind, what, why, cell, remedy) = match &d.root {
                 ClockRoot::Input | ClockRoot::Derived(_) => return None,
                 ClockRoot::BlackBox(t) => (
                     "clock-rooted-at-black-box",
-                    format!("the output of black box `{t}`"),
+                    format!(
+                        "clock `{}` is driven by the output of black box `{t}`",
+                        d.net
+                    ),
+                    SOURCE_UNKNOWN,
                     t.clone(),
                     "Provide the source of the cell that drives the clock, or model its gating \
                      as a clock enable on the root clock.",
                 ),
+                ClockRoot::BlackBoxPort(types) => (
+                    "clock-rooted-at-black-box",
+                    format!(
+                        "clock `{}` is on a port of black box {} (an `inout` port, or a module \
+                         with no declaration: it may drive the clock)",
+                        d.net,
+                        quoted_list(types)
+                    ),
+                    SOURCE_UNKNOWN,
+                    types.join(", "),
+                    "Provide the source of the cell that drives the clock, or connect the \
+                     clock in the RTL.",
+                ),
                 ClockRoot::Cut => (
                     "clock-rooted-at-black-box",
-                    "a cut net (the output of a declared or empty black box, or a cut point)"
-                        .to_string(),
+                    format!(
+                        "clock `{}` is driven by a cut net (the output of a declared or empty \
+                         black box, or a cut point)",
+                        d.net
+                    ),
+                    SOURCE_UNKNOWN,
                     "cut net".to_string(),
                     "Provide the black box's source, or remove the cut point from the clock net.",
                 ),
                 ClockRoot::Undriven => (
                     "clock-undriven",
-                    "nothing: the net has no driver".to_string(),
+                    format!(
+                        "clock `{}` is driven by nothing: the net has no driver",
+                        d.net
+                    ),
+                    SOURCE_UNKNOWN,
                     String::new(),
                     "Connect the clock in the RTL.",
+                ),
+                ClockRoot::Constant { value, register } => (
+                    "clock-constant",
+                    format!("the clock of `{register}` is tied to constant {value}"),
+                    NO_EDGE,
+                    register.clone(),
+                    "Connect the clock in the RTL.",
+                ),
+                ClockRoot::MultiDriven(types) => (
+                    "clock-multi-driven",
+                    format!(
+                        "clock `{}` is driven by more than one cell ({})",
+                        d.net,
+                        quoted_list(types)
+                    ),
+                    SEVERAL_DRIVERS,
+                    types.join(", "),
+                    "Leave one driver on the clock net in the RTL.",
                 ),
             };
             Some(VerificationNote {
                 kind: kind.into(),
                 level: NoteLevel::SoundnessCaveat,
                 summary: format!(
-                    "clock `{}` is driven by {source} and clocks {} storage cell(s); the model \
-                     ticks it on every step",
-                    d.net, d.cells
+                    "{what} and clocks {} storage cell(s); the model ticks it on every step",
+                    d.cells
                 ),
                 detail: format!(
-                    "The clock's real source is not in the lifted design, so the scan cannot \
-                     tell an independent clock (a PLL — the lockstep model is right) from a \
-                     cell that gates or divides its input, or from a net nothing drives (the \
-                     flops never tick). In the last two cases the model is neither an over- nor \
-                     an under-approximation of the design, and no verdict on the flops this \
-                     clock drives transfers on its own; the lift accepted it because \
-                     `--merge-clock-domains` was given. {remedy}"
+                    "{why}; the lift accepted it because `--merge-clock-domains` was given. \
+                     {remedy}"
                 ),
                 items: vec![d.net.clone(), cell, d.cells.to_string()],
                 property: None,
@@ -2884,6 +2946,31 @@ fn build_notes(
                 .map(|f| f.alternation_depth() >= 2)
                 .unwrap_or(false)
         });
+        // mununu#1180 — a clock the lifted design holds no driver for (a `--cutpoint` on a
+        // clock net is one way to get there) is not a free input of the model: the model ticks
+        // it on every step. SOUNDNESS: that is neither an over- nor an under-approximation, so
+        // the "HOLDS transfers" claim below does not reach the storage cells on such a clock;
+        // the clock's own note (kept from the lift) says why, and this note points at it.
+        let driverless_clocks: Vec<String> = report
+            .notes
+            .iter()
+            .filter(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
+            .map(|n| {
+                let net = n.items.first().map(String::as_str).unwrap_or_default();
+                format!("`{net}` (note `{}`)", n.kind)
+            })
+            .collect();
+        let clock_caveat = if driverless_clocks.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ⚠ This does NOT extend to the storage cells clocked on {}: a clock with no \
+                 driver in the lifted design — a cut clock net is one — is not freed, the model \
+                 ticks it on every step, which is neither an over- nor an under-approximation; \
+                 no verdict on those cells transfers on its own.",
+                driverless_clocks.join(", ")
+            )
+        };
         let numu_caveat = if has_alternating {
             " ⚠ But for an ALTERNATING recoverability property (`AG EF good`, νμ) a HOLDS under this \
               cut is sound for the abstract (cutpointed) model ONLY — it does NOT automatically transfer \
@@ -2905,7 +2992,7 @@ fn build_notes(
                  datapath fanin drops out of the cone (this is what lets `exact-symbolic` fit a wide \
                  control FSM). Because freeing a net only ADDS transitions, for a SAFETY / universal \
                  property a definite HOLDS transfers to the concrete RTL (safety + over-approx = \
-                 sound).{numu_caveat} A definite VIOLATED is sound only when the counterexample is \
+                 sound).{clock_caveat}{numu_caveat} A definite VIOLATED is sound only when the counterexample is \
                  guard-independent — the canonical case being an ORPHANED FSM state (in-degree 0), \
                  which no freed guard can make reachable, so `AG EF <orphaned-state>` stays soundly \
                  VIOLATED. Treat any other VIOLATED under cut points as possibly spurious and re-check \
@@ -25003,6 +25090,12 @@ mod clock_root_note_tests {
         // other verb) is refused naming where it works; the reporting verb's options lift it.
         for root in [
             ClockRoot::BlackBox("prim_clock_gating".into()),
+            ClockRoot::BlackBoxPort(vec!["pad".into()]),
+            ClockRoot::MultiDriven(vec!["osc".into(), "pll".into()]),
+            ClockRoot::Constant {
+                value: "0".into(),
+                register: "q".into(),
+            },
             ClockRoot::Cut,
             ClockRoot::Undriven,
         ] {
@@ -25058,6 +25151,128 @@ mod clock_root_note_tests {
             "{}",
             notes[2].summary
         );
+    }
+
+    /// mununu#1180 — the three roots the scan now tells apart, each with the kind, the items and
+    /// the words a consumer reads; the kinds are the ones `CLOCK_ROOT_NOTE_KINDS` lists.
+    #[test]
+    fn x1180_each_new_clock_root_has_its_own_note() {
+        let notes = clock_root_notes(&[
+            domain(
+                "pclk",
+                ClockRoot::BlackBoxPort(vec!["mon".into(), "pad".into()]),
+            ),
+            domain(
+                "1'b0",
+                ClockRoot::Constant {
+                    value: "0".into(),
+                    register: "q".into(),
+                },
+            ),
+            domain(
+                "mclk",
+                ClockRoot::MultiDriven(vec!["$and".into(), "osc".into()]),
+            ),
+        ]);
+        let rows: Vec<(&str, Vec<&str>)> = notes
+            .iter()
+            .map(|n| {
+                (
+                    n.kind.as_str(),
+                    n.items.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("clock-rooted-at-black-box", vec!["pclk", "mon, pad", "3"]),
+                ("clock-constant", vec!["1'b0", "q", "3"]),
+                ("clock-multi-driven", vec!["mclk", "$and, osc", "3"]),
+            ]
+        );
+        assert!(notes.iter().all(|n| n.level == NoteLevel::SoundnessCaveat));
+        assert!(
+            notes
+                .iter()
+                .all(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
+        );
+        assert!(
+            notes[0]
+                .summary
+                .starts_with("clock `pclk` is on a port of black box `mon`, `pad`"),
+            "{}",
+            notes[0].summary
+        );
+        assert!(
+            notes[1]
+                .summary
+                .starts_with("the clock of `q` is tied to constant 0 and clocks 3 storage cell(s)")
+                && notes[1].detail.contains("keep their value in the design")
+                && notes[1].detail.ends_with("Connect the clock in the RTL."),
+            "{} / {}",
+            notes[1].summary,
+            notes[1].detail
+        );
+        assert!(
+            notes[2]
+                .summary
+                .starts_with("clock `mclk` is driven by more than one cell (`$and`, `osc`)")
+                && notes[2]
+                    .detail
+                    .ends_with("Leave one driver on the clock net in the RTL."),
+            "{} / {}",
+            notes[2].summary,
+            notes[2].detail
+        );
+    }
+
+    /// mununu#1180 — a cut on a clock net: the control-slice note's "a definite HOLDS
+    /// transfers" stops at the storage cells on a clock with no driver, and says so naming the
+    /// clock and its note. With no such clock the note reads as it did.
+    #[test]
+    fn x1180_the_control_slice_claim_stops_at_a_clock_with_no_driver() {
+        let cut = ["gclk".to_string()];
+        let slice = |report: &AutoVerifyReport| -> String {
+            build_notes(report, "", &[], &[], &[], &cut, &NotePosture::Exact)
+                .into_iter()
+                .find(|n| n.kind == "control-slice")
+                .expect("a cut net gives the control-slice note")
+                .detail
+        };
+        let plain = slice(&AutoVerifyReport::default());
+        assert!(plain.contains("a definite HOLDS transfers"), "{plain}");
+        assert!(!plain.contains("does NOT extend"), "{plain}");
+        for root in [
+            ClockRoot::Cut,
+            ClockRoot::BlackBox("pll".into()),
+            ClockRoot::BlackBoxPort(vec!["pad".into()]),
+            ClockRoot::MultiDriven(vec!["osc".into(), "pll".into()]),
+            ClockRoot::Constant {
+                value: "0".into(),
+                register: "q".into(),
+            },
+            ClockRoot::Undriven,
+        ] {
+            let mut report = AutoVerifyReport::default();
+            let notes = clock_root_notes(&[domain("gclk", root.clone())]);
+            let kind = notes[0].kind.clone();
+            report.notes.extend(notes);
+            let detail = slice(&report);
+            assert!(
+                detail.contains(&format!(
+                    "This does NOT extend to the storage cells clocked on `gclk` (note `{kind}`)"
+                )),
+                "{root:?}: {detail}"
+            );
+        }
+        // An input or a derived clock has no such note, and the claim is unqualified.
+        let mut report = AutoVerifyReport::default();
+        report.notes.extend(clock_root_notes(&[
+            domain("clk", ClockRoot::Input),
+            domain("gated", ClockRoot::Derived("$and".into())),
+        ]));
+        assert_eq!(slice(&report), plain);
     }
 
     /// The report's notes rebuild keeps the note (a kind it does not regenerate), so a note

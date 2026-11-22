@@ -147,8 +147,11 @@ pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport,
     };
     let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
         .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))?;
-    let mut report =
-        crate::adapter::cdc_lint::cdc_lint(&lifted.flat_netlist_json, Some(&lifted.btor2))?;
+    let mut report = crate::adapter::cdc_lint::cdc_lint(
+        &lifted.flat_netlist_json,
+        &lifted.clock_domains,
+        Some(&lifted.btor2),
+    )?;
     for c in &mut report.crossings {
         for step in &mut c.path {
             *step = step.replace("(work.sv:", &format!("({primary_name}:"));

@@ -49,7 +49,7 @@ use crate::adapter::btor2::pin::pin_inputs_to_constants;
 use crate::adapter::btor2::reset_init::inject_reset_init;
 use crate::adapter::fsm_scan::detect_resets;
 use crate::adapter::reach_portfolio::decide_reach_portfolio;
-use crate::adapter::yosys::{ClockDomain, clock_domains, net_names};
+use crate::adapter::yosys::{ClockDomain, net_names};
 use crate::verdict::PropertyVerdict;
 
 /// What a crossing is, structurally (see the module docs for the table).
@@ -125,24 +125,44 @@ impl CdcReport {
 
 /// mununu#1148 — one note per domain whose clock the lifted design holds no driver for: the lint
 /// classifies its crossings as from an independent clock, which is right for a PLL and wrong for
-/// a black-boxed clock gate or divider (then the two "domains" are one clock, gated). Exhaustive
-/// over `ClockRoot`, so a new root kind is a compile error here.
+/// a black-boxed clock gate or divider (then the two "domains" are one clock, gated). A clock
+/// tied to a constant (mununu#1180) is no domain of the lint at all — its cells never update and
+/// the walk reads their outputs as unclocked — and the note says that instead. Exhaustive over
+/// `ClockRoot`, so a new root kind is a compile error here.
 pub(crate) fn clock_root_notes(domains: &[ClockDomain]) -> Vec<String> {
-    use crate::adapter::yosys::ClockRoot;
+    use crate::adapter::yosys::{ClockRoot, quoted_list};
     domains
         .iter()
         .filter_map(|d| {
-            let source = match &d.root {
+            let what = match &d.root {
                 ClockRoot::Input | ClockRoot::Derived(_) => return None,
-                ClockRoot::BlackBox(t) => format!("the output of black box `{t}`"),
+                ClockRoot::Constant { value, register } => {
+                    return Some(format!(
+                        "the clock of `{register}` is tied to constant {value} ({} storage \
+                         cell(s) on it): a constant has no edge, so they never update; the lint \
+                         reads their outputs as unclocked and reports no crossing from or to \
+                         them (connect the clock in the RTL)",
+                        d.cells
+                    ));
+                }
+                ClockRoot::BlackBox(t) => format!("driven by the output of black box `{t}`"),
+                ClockRoot::BlackBoxPort(types) => format!(
+                    "on a port of black box {} (an `inout` port, or a module with no \
+                     declaration: it may drive the clock)",
+                    quoted_list(types)
+                ),
+                ClockRoot::MultiDriven(types) => {
+                    format!("driven by more than one cell ({})", quoted_list(types))
+                }
                 ClockRoot::Cut => {
-                    "a cut net (the output of a declared or empty black box, or a cut point)"
+                    "driven by a cut net (the output of a declared or empty black box, or a cut \
+                     point)"
                         .to_string()
                 }
-                ClockRoot::Undriven => "nothing (the net has no driver)".to_string(),
+                ClockRoot::Undriven => "driven by nothing (the net has no driver)".to_string(),
             };
             Some(format!(
-                "clock `{}` is driven by {source}: crossings from or to it are classified as from \
+                "clock `{}` is {what}: crossings from or to it are classified as from \
                  an independent clock, which holds for a PLL and not for a gated or divided copy \
                  of another domain's clock (provide the cell's source to see which)",
                 d.net
@@ -151,16 +171,23 @@ pub(crate) fn clock_root_notes(domains: &[ClockDomain]) -> Vec<String> {
         .collect()
 }
 
-/// Run the lint over a flattened netlist (`flat_json`) and, for the gray-step query, the BTOR2 the
-/// same lift produced (`btor2`, lifted with merged clock domains; `None` skips the query and
-/// leaves multi-bit buses `unknown`).
-pub fn cdc_lint(flat_json: &str, btor2: Option<&str>) -> Result<CdcReport, String> {
+/// Run the lint over a flattened netlist (`flat_json`) with the clock domains the lift read from
+/// it (`domains`: [`SvLiftResult::clock_domains`](crate::adapter::yosys::SvLiftResult) — the
+/// lift's scan has the hierarchy snapshot, where a stub's port directions are, so the roots the
+/// notes name are the ones the lift decided on) and, for the gray-step query, the BTOR2 the same
+/// lift produced (`btor2`, lifted with merged clock domains; `None` skips the query and leaves
+/// multi-bit buses `unknown`).
+pub fn cdc_lint(
+    flat_json: &str,
+    domains: &[ClockDomain],
+    btor2: Option<&str>,
+) -> Result<CdcReport, String> {
     let root: Value =
         serde_json::from_str(flat_json).map_err(|e| format!("cdc-lint: netlist JSON: {e}"))?;
     let module = top_module(&root).ok_or("cdc-lint: the netlist has no top module")?;
     let net = Netlist::new(module);
     let mut report = CdcReport {
-        domains: clock_domains(flat_json),
+        domains: domains.to_vec(),
         ..Default::default()
     };
     report.notes.push(
@@ -1119,6 +1146,11 @@ mod tests {
         )
     }
 
+    /// The lint over a hand netlist, with the domains read from the same netlist.
+    fn lint(json: &str) -> CdcReport {
+        cdc_lint(json, &crate::adapter::yosys::clock_domains(json), None).unwrap()
+    }
+
     fn dff(name: &str, clk: i64, d: &str, q: &str) -> String {
         format!(
             r#""{name}": {{"type": "$dff", "parameters": {{"CLK_POLARITY": "1"}},
@@ -1158,8 +1190,39 @@ mod tests {
             d("pll", ClockRoot::Cut),
             d("gclk", ClockRoot::BlackBox("prim_clock_gating".into())),
             d("lost", ClockRoot::Undriven),
+            d("pclk", ClockRoot::BlackBoxPort(vec!["pad".into()])),
+            d(
+                "mclk",
+                ClockRoot::MultiDriven(vec!["$and".into(), "osc".into()]),
+            ),
+            d(
+                "1'b0",
+                ClockRoot::Constant {
+                    value: "0".into(),
+                    register: "q".into(),
+                },
+            ),
         ]);
-        assert_eq!(notes.len(), 3, "{notes:#?}");
+        assert_eq!(notes.len(), 6, "{notes:#?}");
+        assert!(
+            notes[3].starts_with("clock `pclk` is on a port of black box `pad`"),
+            "{}",
+            notes[3]
+        );
+        assert!(
+            notes[4].starts_with("clock `mclk` is driven by more than one cell (`$and`, `osc`)"),
+            "{}",
+            notes[4]
+        );
+        // mununu#1180 — a constant clock is no domain of the lint: its note says what the lint
+        // does with the cells, not that their crossings are from an independent clock.
+        assert!(
+            notes[5]
+                .starts_with("the clock of `q` is tied to constant 0 (1 storage cell(s) on it)")
+                && notes[5].contains("reports no crossing from or to them"),
+            "{}",
+            notes[5]
+        );
         assert!(
             notes[0].starts_with("clock `pll` is driven by a cut net"),
             "{}",
@@ -1175,7 +1238,8 @@ mod tests {
             "{}",
             notes[2]
         );
-        assert!(notes.iter().all(|n| n.contains("independent clock")));
+        assert!(notes[..5].iter().all(|n| n.contains("independent clock")));
+        assert!(!notes[5].contains("independent clock"), "{}", notes[5]);
     }
 
     #[test]
@@ -1192,7 +1256,7 @@ mod tests {
         .join(",");
         let nets = r#""ra": {"bits": [8]}, "rb": {"bits": [9]}, "m": {"bits": [11]},
                       "s": {"bits": [12]}, "bad": {"bits": [7]}"#;
-        let r = cdc_lint(&netlist(&cells, nets), None).unwrap();
+        let r = lint(&netlist(&cells, nets));
         assert_eq!(
             kinds(&r),
             vec![
@@ -1219,7 +1283,7 @@ mod tests {
         ]
         .join(",");
         let nets = r#""ra": {"bits": [8]}, "m": {"bits": [11]}, "y": {"bits": [12]}"#;
-        let r = cdc_lint(&netlist(&cells, nets), None).unwrap();
+        let r = lint(&netlist(&cells, nets));
         assert_eq!(kinds(&r), vec![("unsynchronized", "violated")], "{r:#?}");
     }
 
@@ -1239,7 +1303,7 @@ mod tests {
         .join(",");
         let nets = r#""st": {"bits": [8, 9]}, "m0": {"bits": [20]}, "s0": {"bits": [21]},
                       "m1": {"bits": [22]}, "s1": {"bits": [23]}"#;
-        let r = cdc_lint(&netlist(&cells, nets), None).unwrap();
+        let r = lint(&netlist(&cells, nets));
         assert_eq!(kinds(&r), vec![("multi-bit-bus", "unknown")], "{r:#?}");
         assert_eq!(r.crossings[0].source, "st");
         assert_eq!(r.crossings[0].destination, "m0, m1");
@@ -1248,7 +1312,7 @@ mod tests {
     #[test]
     fn one_clock_has_no_crossing() {
         let cells = [dff("ra", 2, "4", "8"), dff("m", 2, "8", "11")].join(",");
-        let r = cdc_lint(&netlist(&cells, r#""ra": {"bits": [8]}"#), None).unwrap();
+        let r = lint(&netlist(&cells, r#""ra": {"bits": [8]}"#));
         assert!(r.crossings.is_empty());
         assert_eq!(r.worst(), PropertyVerdict::Holds);
     }
