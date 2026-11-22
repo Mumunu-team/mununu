@@ -1,6 +1,6 @@
 # Consumer briefing — mununu 0.5.1: `--frontend sv2v` keeps the slang fallback (2026-10)
 
-> Source of truth: [`SvFrontend`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L80) — surface: (CLI+API)
+> Source of truth: [`SvFrontend`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L81) — surface: (CLI+API)
 > Superseded 2026-11-04: the slang-only lift removed `--frontend` and `lift.frontend`; see the N1 briefing.
 
 **Audience:** everyone migrating to 0.5 this week. **Pin 0.5.1, not 0.5.0.** A fix to the 0.5 clean break ([`2026-10-mununu-0.5-migration.md`](2026-10-mununu-0.5-migration.md)).

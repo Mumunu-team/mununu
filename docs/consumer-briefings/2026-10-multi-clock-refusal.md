@@ -1,6 +1,6 @@
 # Consumer briefing — a multi-clock design is refused at lift time; `--merge-clock-domains` opts in (2026-10)
 
-> Source of truth: [`clock_domains`](../../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify`, `sv verify-liveness`, `sv verify-liveness-all`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`; their `/api/v1/sv/*` routes)
+> Source of truth: [`clock_domains_with_hierarchy`](../../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify`, `sv verify-liveness`, `sv verify-liveness-all`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`; their `/api/v1/sv/*` routes)
 
 **Audience:** rosf, monono, mununu-ui and anyone who lifts SystemVerilog with mununu. Fixes mununu#758.
 
