@@ -1803,8 +1803,8 @@ pub struct SvLiftRequest {
     /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
     /// Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which
     /// then ticks on every step. Only `sv/verify-auto` reports the merged domains; a clock with
-    /// no driver in the design (a black box, a cut net, undriven) lifts under it on that route
-    /// alone, whose report names the root.
+    /// no driver in the design (a black box, a cut net, undriven) lifts under it only on
+    /// `sv/verify-auto` and `sv/cdc-lint`, whose reports name the root.
     #[serde(default)]
     pub merge_clock_domains: bool,
 }

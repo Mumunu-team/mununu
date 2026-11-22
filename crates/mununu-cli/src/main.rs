@@ -2576,7 +2576,7 @@ struct SvLiftArgs {
     /// caveat on `sv verify-auto`; the other verbs report nothing). Also lets through a design
     /// clocked only by a derived (gated, divided, muxed) clock, which then ticks on every step;
     /// a clock with no driver in the design (a black box, a cut net, undriven) lifts under it
-    /// only on `sv verify-auto`, whose report names the root.
+    /// only on `sv verify-auto` and `sv cdc-lint`, whose reports name the root.
     #[arg(long = "merge-clock-domains")]
     merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves

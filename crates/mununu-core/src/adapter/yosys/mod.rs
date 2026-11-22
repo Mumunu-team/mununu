@@ -1139,10 +1139,10 @@ pub(crate) fn refuse_merged_clock_domains(
                 kind: AdapterErrorKind::UnsupportedConstruct,
                 message: format!(
                     "adapter/yosys: the clock net `{}` has no driver in the lifted design; \
-                     `--merge-clock-domains` lifts such a clock only on `sv verify-auto`, whose \
-                     report names the root in a note (`sv cdc-lint` lints it too) — this verb \
-                     drops the clock domains, so the lockstep model would ship with nothing said \
-                     about it (a mununu limitation). Clock domains: {}.",
+                     `--merge-clock-domains` lifts such a clock only on `sv verify-auto` and \
+                     `sv cdc-lint`, whose reports name the root in a note — this verb drops the \
+                     clock domains, so the lockstep model would ship with nothing said about it \
+                     (a mununu limitation). Clock domains: {}.",
                     d.net,
                     describe_clock_domains(domains)
                 ),
@@ -4335,7 +4335,9 @@ endmodule
                 panic!("{name}: the opt-in alone (a verb that drops the roots) is refused")
             });
             assert!(
-                opt_in_only.message.contains("only on `sv verify-auto`"),
+                opt_in_only
+                    .message
+                    .contains("only on `sv verify-auto` and `sv cdc-lint`, whose reports name"),
                 "{name}: {}",
                 opt_in_only.message
             );
