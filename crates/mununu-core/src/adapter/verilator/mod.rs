@@ -260,6 +260,15 @@ pub fn compile_verilator(
     tb_cpp_content: &str,
     workdir: &Path,
 ) -> Result<PathBuf, AdapterError> {
+    // mununu#1176 — Verilator's build refuses such a directory; say so before writing into it.
+    // A caller that takes its directory from [`VerilatorTempDir`] never gets here.
+    if let Some(why) = build_dir_refusal(workdir) {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!("adapter/verilator: {why}"),
+            location: None,
+        });
+    }
     let tb_cpp_path = workdir.join("tb.cpp");
     std::fs::write(&tb_cpp_path, tb_cpp_content).map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
@@ -346,9 +355,56 @@ fn run_and_check(mut cmd: Command, bin_label: &str, context: &str) -> Result<(),
     Ok(())
 }
 
+/// mununu#1176 — why Verilator's `make` build cannot run in `dir`, when it cannot.
+///
+/// Verilator's own makefile stops on a build directory whose path has whitespace
+/// (`verilated.mk`: "GNU Make cannot build in directories containing spaces, build elsewhere";
+/// measured with Verilator 5.051 in `mununu-sva`, 2026-11-22). The test is make's
+/// `$(words $(CURDIR))`, over the directory make itself reports — the resolved path — so running
+/// `make` from inside the directory, or naming every file relative to it, changes nothing. The
+/// text names the limit and whose it is; each caller adds the remedy its own surface has.
+pub fn build_dir_refusal(dir: &Path) -> Option<String> {
+    // The resolved path is what make sees. A directory that does not exist yet is judged by its
+    // absolute spelling; with neither (the working directory is unreadable) there is nothing to
+    // judge here and `make` reports its own failure through the caller's error path.
+    let resolved = std::fs::canonicalize(dir).ok().or_else(|| {
+        if dir.is_absolute() {
+            Some(dir.to_path_buf())
+        } else {
+            std::env::current_dir().ok().map(|cwd| cwd.join(dir))
+        }
+    })?;
+    let shown = resolved.display().to_string();
+    shown.chars().any(char::is_whitespace).then(|| {
+        format!(
+            "Verilator's `make` build does not run in a directory whose path has whitespace \
+             (`{shown}`) — a limit of Verilator's build, not of the design"
+        )
+    })
+}
+
+/// mununu#1176 — the directory mununu creates its own Verilator work directories under (the
+/// reset simulation's, the HTTP replay's): the lift's staging root
+/// ([`crate::adapter::staging_root`]: `MUNUNU_LIFT_STAGING_ROOT`, else the system temp
+/// directory), refused when Verilator could not build under it. The refusal names the variable
+/// that moves it.
+pub(crate) fn scratch_root() -> Result<PathBuf, String> {
+    let root = crate::adapter::staging_root()
+        .map_err(|e| format!("the working directory cannot be read ({e})"))?;
+    match build_dir_refusal(&root) {
+        Some(why) => Err(format!(
+            "{why}; set `MUNUNU_LIFT_STAGING_ROOT` to a directory whose path has none"
+        )),
+        None => Ok(root),
+    }
+}
+
 /// R-S2b.2 (2026-06-10) — per-call work directory for Verilator
 /// compile + simulation. Mirrors `yosys::TempDir` (private to that
 /// module per the "avoid pulling in another dep" convention).
+///
+/// Created under [`scratch_root`] (mununu#1176): `MUNUNU_LIFT_STAGING_ROOT`, else the system
+/// temp directory; a root Verilator cannot build under is an error naming the variable.
 ///
 /// Set `MUNUNU_KEEP_VERILATOR_TMP=1` to preserve the directory
 /// after drop (useful when diagnosing a Verilator compile failure).
@@ -358,7 +414,7 @@ pub struct VerilatorTempDir {
 }
 
 impl VerilatorTempDir {
-    /// Create a new per-call work directory under `$TMPDIR`. The
+    /// Create a new per-call work directory under [`scratch_root`]. The
     /// directory name embeds pid + thread id + sequence + nanos so
     /// parallel tests in the same process do not collide.
     pub fn new() -> Result<Self, AdapterError> {
@@ -373,7 +429,11 @@ impl VerilatorTempDir {
         let pid = std::process::id();
         let tid = format!("{:?}", std::thread::current().id());
         let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
-        let mut base = std::env::temp_dir();
+        let mut base = scratch_root().map_err(|why| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!("adapter/verilator: {why}"),
+            location: None,
+        })?;
         base.push(format!("mununu-verilator-{pid}-{tid_digits}-{seq}-{nanos}"));
         std::fs::create_dir_all(&base).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -1212,6 +1272,70 @@ mod tests {
         );
     }
 
+    /// mununu#1176 REPRODUCER — the Verilator work directory follows the staging root the lift
+    /// uses, and a root whose path has whitespace is refused before a directory is made, naming
+    /// the variable that moves it. Before: the directory went under the system temporary
+    /// directory whatever the variable said, and Verilator's `make` failed in it with a message
+    /// about `$(CURDIR)`.
+    #[test]
+    fn x1176_a_verilator_work_directory_is_never_made_under_a_path_with_whitespace() {
+        let root = std::env::temp_dir().join("mununu x1176 root");
+        let _env = crate::adapter::env_var::override_for_test("MUNUNU_LIFT_STAGING_ROOT", &root);
+        let err = match VerilatorTempDir::new() {
+            Ok(d) => panic!(
+                "a work directory was made at {} although the staging root has whitespace",
+                d.path().display()
+            ),
+            Err(e) => e.message,
+        };
+        assert!(err.contains("whitespace"), "{err}");
+        assert!(err.contains("`MUNUNU_LIFT_STAGING_ROOT`"), "{err}");
+        assert!(!root.exists(), "nothing was created under the refused root");
+    }
+
+    /// mununu#1176 — the variable moves the work directory (it used to cover the lift only).
+    #[test]
+    fn x1176_the_staging_root_variable_moves_the_verilator_work_directory() {
+        let root = std::env::temp_dir().join(format!("mununu-x1176-root-{}", std::process::id()));
+        if build_dir_refusal(&root).is_some() {
+            // A host whose temporary directory itself has whitespace: the refusal test above
+            // is the one that applies there.
+            return;
+        }
+        let _env = crate::adapter::env_var::override_for_test("MUNUNU_LIFT_STAGING_ROOT", &root);
+        let d = VerilatorTempDir::new().expect("a work directory under the root");
+        assert!(d.path().starts_with(&root), "{}", d.path().display());
+        drop(d);
+        std::fs::remove_dir_all(&root).expect("the root this test made");
+    }
+
+    /// mununu#1176 — whitespace anywhere in the FULL path counts: a relative directory is read
+    /// under the working directory, a link through its target (`make` builds in the resolved
+    /// directory), and any whitespace character is one.
+    #[test]
+    fn x1176_a_build_directory_is_refused_for_whitespace_anywhere_in_its_full_path() {
+        let base = std::env::temp_dir();
+        for name in ["tb out", "tb\tout", "a b/tb"] {
+            let why = build_dir_refusal(&base.join(name)).expect(name);
+            assert!(why.contains("a limit of Verilator's build"), "{why}");
+        }
+        assert!(build_dir_refusal(Path::new("tb out")).is_some(), "relative");
+        #[cfg(unix)]
+        {
+            assert_eq!(build_dir_refusal(Path::new("/mununu-x1176/plain/tb")), None);
+            let real = base.join(format!("mununu x1176 real {}", std::process::id()));
+            let link = base.join(format!("mununu-x1176-link-{}", std::process::id()));
+            if build_dir_refusal(&link).is_none() {
+                std::fs::create_dir_all(&real).expect("real");
+                std::os::unix::fs::symlink(&real, &link).expect("link");
+                let through = build_dir_refusal(&link);
+                std::fs::remove_file(&link).expect("unlink");
+                std::fs::remove_dir_all(&real).expect("rmdir");
+                assert!(through.is_some(), "a link to a spaced directory is refused");
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires the mununu-sva image (verilator + make); run by the e2e sweep"]
     fn e2e_compile_verilator_produces_runnable_binary_on_trivial_module() {
@@ -1237,6 +1361,38 @@ mod tests {
             "binary path {} must exist",
             bin_path.display()
         );
+        let status = Command::new(&bin_path)
+            .status()
+            .expect("spawn compiled binary");
+        assert!(
+            status.success(),
+            "compiled binary must exit 0; got {status}"
+        );
+    }
+
+    /// mununu#1176 — the SOURCE may sit under a path with whitespace: only the build directory
+    /// is `make`'s. The source reaches Verilator as one argument, and what Verilator writes
+    /// about it into the build directory still builds.
+    #[test]
+    #[ignore = "requires the mununu-sva image (verilator + make); run by the e2e sweep"]
+    fn e2e_compile_verilator_takes_a_source_under_a_directory_with_whitespace() {
+        let bin = locate_verilator().expect("verilator must be installed for this test");
+        let tmp = VerilatorTempDir::new().expect("tempdir");
+        let src_dir = scratch_root()
+            .expect("a root without whitespace")
+            .join(format!("mununu x1176 src {}", std::process::id()));
+        std::fs::create_dir_all(&src_dir).expect("source directory");
+        let sv_path = src_dir.join("trivial.sv");
+        std::fs::write(&sv_path, "module trivial(input wire clk); endmodule\n").expect("write sv");
+        let tb =
+            "#include \"Vtrivial.h\"\nint main(int,char**){ Vtrivial m; m.eval(); return 0; }\n";
+        let opts = VerilatorOptions {
+            top: Some("trivial".to_string()),
+            ..VerilatorOptions::default()
+        };
+        let built = compile_verilator(&bin.path, &opts, &sv_path, tb, tmp.path());
+        std::fs::remove_dir_all(&src_dir).expect("the source directory this test made");
+        let bin_path = built.expect("a source under a spaced directory compiles");
         let status = Command::new(&bin_path)
             .status()
             .expect("spawn compiled binary");

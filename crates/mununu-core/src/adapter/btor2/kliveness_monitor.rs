@@ -388,6 +388,10 @@ pub fn kliveness_ladder(
         {
             member_notes.push(format!("{m} at {label}: {why}"));
         }
+        // mununu#1175 — a bound found reachable (or a contradiction) on a path the simulator
+        // did not confirm: no verdict rests on it (a reachable bound only moves the ladder),
+        // but `{label} reachable` reaches the abstention note, and so does this.
+        let unconfirmed = unconfirmed_at(label, &outcome);
         match outcome.verdict {
             ReachVerdict::Unreachable => {
                 return KlivenessLadder::Holds {
@@ -395,11 +399,19 @@ pub fn kliveness_ladder(
                     members: outcome.unreachable_by,
                 };
             }
-            ReachVerdict::Reachable => tried.push(format!("{label} reachable")),
+            ReachVerdict::Reachable => {
+                tried.push(format!("{label} reachable"));
+                member_notes.extend(unconfirmed);
+            }
             ReachVerdict::Contradiction => {
-                return KlivenessLadder::Failed(format!(
+                let mut note = format!(
                     "kliveness: the members CONTRADICT each other on the {label} bound (soundness alarm)"
-                ));
+                );
+                for line in unconfirmed {
+                    note.push_str("; ");
+                    note.push_str(&line);
+                }
+                return KlivenessLadder::Failed(note);
             }
             ReachVerdict::Unknown => {
                 tried.push(format!("{label} undecided"));
@@ -411,6 +423,19 @@ pub fn kliveness_ladder(
         tried,
         member_notes,
     }
+}
+
+/// mununu#1175 — the members whose path to the `label` bound the concrete simulator did not
+/// confirm, one line each, in the ladder's `<member> at <bound>: …` shape.
+fn unconfirmed_at(
+    label: &str,
+    outcome: &crate::adapter::reach_portfolio::ReachOutcome,
+) -> Vec<String> {
+    outcome
+        .unconfirmed_notes()
+        .into_iter()
+        .map(|line| format!("at {label}, {line}"))
+        .collect()
 }
 
 fn err(message: String) -> AdapterError {
@@ -635,6 +660,32 @@ mod tests {
             crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
         );
         assert!(!matches!(r, KlivenessLadder::Holds { .. }), "{r:?}");
+    }
+
+    /// mununu#1175 — a bound the members found reachable on a path the simulator did not
+    /// confirm is said at its width (the ladder's `<bound> reachable` reaches the abstention
+    /// note of an undecided row); a bound reached on confirmed paths adds nothing.
+    #[test]
+    fn x1175_a_bound_reached_on_an_unconfirmed_path_says_so_at_its_width() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let outcome = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["ic3"],
+            trace_replay_failed: vec![("ic3", "a 130-bit cell".to_string())],
+            ..Default::default()
+        };
+        let lines = unconfirmed_at("k=15", &outcome);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("at k=15, ic3: ") && lines[0].contains("a 130-bit cell"),
+            "{lines:?}"
+        );
+        let confirmed = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["native"],
+            ..Default::default()
+        };
+        assert!(unconfirmed_at("k=15", &confirmed).is_empty());
     }
 
     #[test]

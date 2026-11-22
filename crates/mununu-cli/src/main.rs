@@ -2451,7 +2451,9 @@ struct SvVerifyAutoArgs {
     /// Write a Verilator replay testbench for every counterexample to DIR/<property>/
     /// (`tb.cpp` + `Makefile`; `make -C DIR/<property>` builds and runs it). It resets the design,
     /// drives the trace's inputs, compares every register the trace names after each clock edge,
-    /// and runs the design's assertions under `--assert`.
+    /// and runs the design's assertions under `--assert`. Verilator's build does not run in a
+    /// directory whose full path has whitespace, and the Makefile takes source paths made of
+    /// ASCII letters, digits and `_` `-` `.` `/`; a row whose testbench was not written says why.
     #[arg(long = "emit-testbench", value_name = "DIR")]
     emit_testbench: Option<PathBuf>,
     /// The clock port the replay testbench toggles (default: the first of `clk`, `clk_i`,
@@ -3769,18 +3771,7 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
         .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
     let findings = fsm_encoding_scan(&content, args.max_width)?;
 
-    let registers: Vec<serde_json::Value> = findings
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "register": f.register,
-                "kind": f.kind.as_str(),
-                "legal_encodings": f.legal_encodings,
-                "outcome": f.verdict.as_str(),
-                "illegal_encoding_reachable": f.is_finding(),
-            })
-        })
-        .collect();
+    let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
@@ -3799,6 +3790,23 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
     let worst = worst_verdict(findings.iter().map(|f| PropertyVerdict::as_str(f.verdict)));
     ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
+}
+
+/// One register's illegal-encoding result as JSON — the same shape as the API's
+/// `FsmRegisterFinding`: `notes` (mununu#1175, a path the simulator did not confirm) only when
+/// there is one.
+fn fsm_register_json(f: &mununu_core::adapter::fsm_scan::FsmFinding) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "register": f.register,
+        "kind": f.kind.as_str(),
+        "legal_encodings": f.legal_encodings,
+        "outcome": f.verdict.as_str(),
+        "illegal_encoding_reachable": f.is_finding(),
+    });
+    if !f.notes.is_empty() {
+        row["notes"] = serde_json::json!(f.notes);
+    }
+    row
 }
 
 /// The liveness inventory as JSON — the same shape as the API's `FsmLivenessView`.
@@ -4188,7 +4196,7 @@ fn btor2_verify_liveness(args: Btor2LivenessOneArgs) -> Result<(), String> {
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
-    let summary = with_undecided_notes(summary, &outcome);
+    let summary = with_member_notes(summary, &outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
@@ -4283,7 +4291,7 @@ fn btor2_verify_liveness_under_fairness(
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
-    let summary = with_undecided_notes(summary, &outcome);
+    let summary = with_member_notes(summary, &outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
@@ -4292,13 +4300,14 @@ fn btor2_verify_liveness_under_fairness(
     Ok(())
 }
 
-/// Track V (V2) — add `notes` (why the row is undecided) to a `btor2 verify-liveness` summary; a
-/// decided row's summary is returned unchanged.
-fn with_undecided_notes(
+/// Add `notes` to a `btor2 verify-liveness` summary: why the row is undecided (Track V, V2), and
+/// on any row the members whose path the concrete simulator did not confirm (mununu#1175). A row
+/// with nothing to say is returned unchanged.
+fn with_member_notes(
     mut summary: serde_json::Value,
     outcome: &mununu_core::adapter::reach_portfolio::ReachOutcome,
 ) -> serde_json::Value {
-    let notes = mununu_core::adapter::liveness_rescue::undecided_notes(outcome);
+    let notes = mununu_core::adapter::liveness_rescue::member_notes(outcome);
     if !notes.is_empty() {
         summary["notes"] = serde_json::json!(notes);
     }
@@ -4323,7 +4332,7 @@ fn per_response_decided_by(
                 .chain(o.unreachable_by.iter())
                 .map(|e| e.to_string())
                 .collect(),
-            notes: mununu_core::adapter::liveness_rescue::undecided_notes(o),
+            notes: mununu_core::adapter::liveness_rescue::member_notes(o),
         })
         .collect()
 }
@@ -4425,6 +4434,11 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                 .then(|| mununu_core::api::models::Trace::attack(o.depth, &o.attack)),
             "trace_by": o.trace_by,
             "trace_unavailable_reason": o.trace_unavailable_reason,
+            "trace_replay_failed": o
+                .trace_replay_failed
+                .iter()
+                .map(mununu_core::api::models::TraceReplayFailureView::from)
+                .collect::<Vec<_>>(),
         });
         println!(
             "{}",
@@ -5266,7 +5280,7 @@ fn render_faults(faults: &[mununu_core::trace::TraceFault]) -> String {
 
 fn render_verify_auto_text(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
-    replays: &std::collections::BTreeMap<String, CliReplay>,
+    replays: &std::collections::BTreeMap<String, CliReplayRow>,
 ) {
     println!(
         "verify-auto: {} propert{} verified, {} unsupported assertion(s)",
@@ -5375,6 +5389,12 @@ fn render_verify_auto_text(
                 r.determinism().tag(),
                 r.one_line()
             );
+        }
+        // mununu#1175 — a row decided on a path the concrete simulator did not confirm must not
+        // read like a replayed one: one line per member, on the row's own lines (`--json` has
+        // the same rows under `portfolio.trace_replay_failed`).
+        for unconfirmed in p.portfolio.iter().flat_map(|a| &a.trace_replay_failed) {
+            println!("        unconfirmed path: {}", unconfirmed.note());
         }
         // J3 — a verdict carried from a killed run's breadcrumb must not read like a fresh one:
         // it names the build and says what did not travel with it.
@@ -5550,7 +5570,13 @@ fn render_verify_auto_text(
             }
         }
         // 2026-10-29 — the replay, on the row, with the keys `--json` uses (`trace.replay.*`).
-        if let Some(r) = replays.get(&p.name) {
+        if let Some(CliReplayRow::NotWritten(t)) = replays.get(&p.name) {
+            println!(
+                "        replay testbench: not written — {}",
+                t.not_generated.as_deref().unwrap_or("no reason recorded")
+            );
+        }
+        if let Some(CliReplayRow::Written(r)) = replays.get(&p.name) {
             println!(
                 "        replay dir: {} ({} checks{}); open: gtkwave replay.vcd replay.gtkw",
                 r.dir.display(),
@@ -5632,7 +5658,7 @@ fn note_level_glyph(level: mununu_core::adapter::slang::verify_auto::NoteLevel) 
 fn render_verify_auto_json(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
     expectations: &Option<mununu_core::adapter::slang::expectations::ExpectationResult>,
-    replays: &std::collections::BTreeMap<String, CliReplay>,
+    replays: &std::collections::BTreeMap<String, CliReplayRow>,
 ) -> Result<(), String> {
     // mununu#536 — serialize the SAME type the HTTP API returns, via the one shared conversion
     // (`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`).
@@ -5652,8 +5678,15 @@ fn render_verify_auto_json(
     // files are on disk here, their contents travel too so one document reads the same on both
     // surfaces.
     for row in &mut view.properties {
-        let Some(r) = replays.get(&row.name) else {
-            continue;
+        let r = match replays.get(&row.name) {
+            Some(CliReplayRow::Written(r)) => r,
+            Some(CliReplayRow::NotWritten(t)) => {
+                if let Some(trace) = row.trace.as_mut() {
+                    trace.replay = Some(t.clone());
+                }
+                continue;
+            }
+            None => continue,
         };
         if let Some(trace) = row.trace.as_mut() {
             trace.replay = Some(mununu_core::trace::TraceReplay {
@@ -5666,6 +5699,7 @@ fn render_verify_auto_json(
                 gtkw: Some(r.gtkw.clone()),
                 dir: Some(r.dir.display().to_string()),
                 result: r.result.clone(),
+                not_generated: None,
             });
         }
     }
@@ -7518,7 +7552,7 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
             .chain(outcome.unreachable_by.iter())
             .map(|e| e.to_string())
             .collect(),
-        notes: mununu_core::adapter::liveness_rescue::undecided_notes(&outcome),
+        notes: mununu_core::adapter::liveness_rescue::member_notes(&outcome),
         lift_notes: mununu_core::api::models::lift_note_views(&lift_notes),
     };
     print_typed_report(&report)?;
@@ -7668,18 +7702,7 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
         result: findings,
     } = core_sv_check_fsm(&read_sv_lift(&args.lift)?, args.max_width)?;
 
-    let registers: Vec<serde_json::Value> = findings
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "register": f.register,
-                "kind": f.kind.as_str(),
-                "legal_encodings": f.legal_encodings,
-                "outcome": f.verdict.as_str(),
-                "illegal_encoding_reachable": f.is_finding(),
-            })
-        })
-        .collect();
+    let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
         "file": file,
         "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
@@ -10281,14 +10304,21 @@ struct CliReplay {
     result: Option<mununu_core::trace::ReplayResultView>,
 }
 
+/// One row's answer to `--emit-testbench`: the files, or why a row with a path to replay has
+/// none (mununu#1176 — the entry `--json` prints as `trace.replay`, `not_generated` set).
+enum CliReplayRow {
+    Written(CliReplay),
+    NotWritten(mununu_core::trace::TraceReplay),
+}
+
 fn emit_replay_testbenches(
     dir: &Path,
     args: &SvVerifyAutoArgs,
     sources: &[(String, String)],
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
-) -> Result<std::collections::BTreeMap<String, CliReplay>, String> {
+) -> Result<std::collections::BTreeMap<String, CliReplayRow>, String> {
     use mununu_core::adapter::verilator::replay::{
-        ReplayDesign, counterexample_testbench, gtkwave_save, run_replay,
+        ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save, has_path, run_replay,
     };
     let mut emitted = std::collections::BTreeMap::new();
     let clock = match &args.tb_clock {
@@ -10325,17 +10355,45 @@ fn emit_replay_testbenches(
             .unwrap_or("top")
             .to_string()
     });
+    let design = ReplayDesign {
+        top: &top,
+        clock: &clock,
+        reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
+        sources: &paths,
+    };
+    // mununu#1176 — whether a bench can be generated at all depends on the design's names, not
+    // on a trace: asked once, and told on every row that has a path to replay. The lift stages
+    // the sources under names of its own, so a design under `my project/` gets this far.
+    let refusal = bench_refusal(&design).map(|r| {
+        r.message(
+            "copy the sources under a path with only those characters and run again (a link \
+             is not enough: the path is resolved before it is written)",
+        )
+    });
+    // Verilator's own build refuses a directory whose path has whitespace. The files are
+    // written either way; under `--replay` the row says why the bench did not run and what to
+    // pass instead.
+    let dir_refusal = mununu_core::adapter::verilator::build_dir_refusal(dir)
+        .map(|why| format!("{why}; pass `--emit-testbench` a directory whose full path has none"));
     let mut written = 0usize;
+    let mut not_written = 0usize;
     for p in &report.properties {
         let Some(cex) = &p.counterexample else {
             continue;
         };
-        let design = ReplayDesign {
-            top: &top,
-            clock: &clock,
-            reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
-            sources: &paths,
-        };
+        if let Some(why) = &refusal {
+            if has_path(cex) {
+                emitted.insert(
+                    p.name.clone(),
+                    CliReplayRow::NotWritten(mununu_core::trace::TraceReplay::without_bench(
+                        why,
+                        args.replay,
+                    )),
+                );
+                not_written += 1;
+            }
+            continue;
+        }
         let Some(bench) = counterexample_testbench(&design, cex) else {
             continue;
         };
@@ -10371,7 +10429,10 @@ fn emit_replay_testbenches(
         // `--replay`: build and run it now; everything `make` printed goes to replay.log, the
         // verdict to the row.
         let result = args.replay.then(|| {
-            let run = run_replay(&out, true);
+            let run = match &dir_refusal {
+                Some(why) => Err(why.clone()),
+                None => run_replay(&out, true),
+            };
             if let Ok(r) = &run {
                 let _ = std::fs::write(out.join("replay.log"), &r.output);
             }
@@ -10379,16 +10440,25 @@ fn emit_replay_testbenches(
         });
         emitted.insert(
             p.name.clone(),
-            CliReplay {
+            CliReplayRow::Written(CliReplay {
                 dir: out,
                 bench,
                 gtkw,
                 result,
-            },
+            }),
         );
         written += 1;
     }
-    if written == 0 {
+    match (&refusal, &dir_refusal) {
+        (Some(why), _) if not_written > 0 => {
+            eprintln!("replay testbench: not written for {not_written} counterexample(s) — {why}")
+        }
+        (None, Some(why)) if written > 0 && !args.replay => {
+            eprintln!("replay testbench: `make` will not build there — {why}")
+        }
+        _ => {}
+    }
+    if written == 0 && not_written == 0 {
         eprintln!("replay testbench: no counterexample with a path to replay");
     }
     let _ = sources;

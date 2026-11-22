@@ -22,6 +22,13 @@
           },
           "type": "array"
         },
+        "notes": {
+          "description": "mununu#1175 — per encoding counted as reached on a path the concrete simulator did not confirm: `\"encoding <v>: <member>: …\"`. Absent otherwise.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "register": {
           "type": "string"
         },
@@ -84,6 +91,13 @@
             "format": "uint64",
             "minimum": 0.0,
             "type": "integer"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "description": "mununu#1175 — each member whose path to an illegal encoding the concrete simulator did not confirm, saying whether the finding rests on it alone. Absent otherwise.",
+          "items": {
+            "type": "string"
           },
           "type": "array"
         },

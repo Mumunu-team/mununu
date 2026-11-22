@@ -18,7 +18,7 @@
           "type": "integer"
         },
         "notes": {
-          "description": "Abstention reasons, when a rung abstained.",
+          "description": "Abstention reasons, when a rung abstained; and (mununu#1175) each l2s member whose lasso the concrete simulator did not confirm, on a `\"violated\"` row.",
           "items": {
             "type": "string"
           },
@@ -119,7 +119,7 @@
       "type": "array"
     },
     "notes": {
-      "description": "Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget abstention (`\"<member> refused: …\"` / `\"<member>: …\"`), and the k-liveness fallback's note. Empty — and omitted — on a decided row.",
+      "description": "Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget abstention (`\"<member> refused: …\"` / `\"<member>: …\"`), and the k-liveness fallback's note. mununu#1175 — and, on any row, each member whose path the concrete simulator did not confirm (`\"<member>: the path it found was not confirmed on the concrete simulator (…)\"`), saying whether the result rests on that member alone. Empty — and omitted — otherwise.",
       "items": {
         "type": "string"
       },
