@@ -35,8 +35,10 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | a next-less state with no symbol and no alias | sampled under its synthesized name | mununu#1086 |
 | a synthesized name that collides with a design cell | the atom is refused, the collision named | mununu#1086 follow-up |
 | any of the above with inputs-in-the-state opted out | the atom is refused by the fan-in guard | mununu#476 |
+| an undriven net, or a clock net read as data, in the cone of an existential or branching property (a cover, an `EF`, an `AG EF`) | the HOLDS is withheld: `existential-holds-over-free-leaves`, `existential-holds-over-clock-as-data` | mununu#1126 |
+| a verdict recorded before that on such a cone (the corpus ledger's `usbdev_linkstate` row, an `AG EF` over a missing module's outputs) | the entry carries the real module, so the row is HOLDS on a model with no undriven net in the cone; the ledger's failure message carries the report's reason | mununu#1192 |
 
-**Enumerating test:** none recorded. **Open:** unqualified existential `holds` over a clock-as-data or undriven net (mununu#1126).
+**Enumerating test:** none recorded. **Open:** none recorded.
 
 ### `clock-net-driver`
 
