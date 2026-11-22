@@ -103,6 +103,8 @@ const REACH: &[(&str, &[&str])] = &[
         ],
     ),
     ("src/adapter/slang/verify_auto.rs", &["sv verify-auto"]),
+    // The report text `verify_auto.rs` produces, moved out of it: the same callers, the same verb.
+    ("src/adapter/slang/verify_auto_text.rs", &["sv verify-auto"]),
     ("src/adapter/xstate/mod.rs", &["verify"]),
     ("src/adapter/tlsf/parser.rs", &["verify"]),
     (

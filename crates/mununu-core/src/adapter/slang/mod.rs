@@ -33,6 +33,7 @@ pub mod prim_stubs;
 pub(crate) mod report_consistency;
 pub mod translate;
 pub mod verify_auto;
+pub(crate) mod verify_auto_text;
 
 /// Handle to a discovered slang binary + its parsed version (diagnostic only;
 /// mununu does not gate on version). Mirrors [`crate::adapter::cvc5::Cvc5Bin`].
