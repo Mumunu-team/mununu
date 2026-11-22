@@ -623,7 +623,17 @@ fn artifacts_from_cached(
         ),
         location: None,
     })?;
-    let clock_domains = clock_domains_with_hierarchy(&hit.flat_netlist_json, &hit.hier_json);
+    // mununu#1198 — a stored netlist the scan cannot read is not "no storage cell on any
+    // clock": the hit is refused before the multi-clock refusal is asked anything, under the
+    // opt-in too (its `clock-domains-merged` note is written from these domains).
+    let clock_domains = clock_domains_with_hierarchy(&hit.flat_netlist_json, &hit.hier_json)
+        .map_err(|damage| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: crate::adapter::owner::mununu_defect(&format!(
+                "adapter/yosys: the lift cache entry's flattened netlist snapshot cannot be used                  ({damage}); the cache lookup treats such an entry as a miss, so the clock check                  was reached without a netlist to run on"
+            )),
+            location: None,
+        })?;
     refuse_merged_clock_domains(&clock_domains, yopts, opt_in)?;
     Ok(SvFlattenArtifacts {
         btor2: hit.btor2,
@@ -1071,7 +1081,8 @@ fn run_sv_flatten_btor2_concrete(
     // clock-domain scan) are written by every script `build_script` renders. One that is
     // missing after yosys succeeded is a lift that went wrong, not an empty design: read as
     // empty, it switched off the multi-clock refusal and the black-box scan silently, and the
-    // lift cache stored that (mununu#957). A lift error instead — never cached.
+    // lift cache stored that (mununu#957). So did one that was there and was not a netlist —
+    // truncated, or JSON of another shape (mununu#1198). A lift error instead — never cached.
     let hier_json = read_lift_snapshot(&plan.hier_json_path, "hierarchy")?;
 
     // The BTOR2 model has ONE implicit clock: every `next` fires on it. A design whose flops sit
@@ -1079,7 +1090,14 @@ fn run_sv_flatten_btor2_concrete(
     // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
     let flat_netlist_json =
         read_lift_snapshot(&clock_json_path(&plan.btor_path), "flattened netlist")?;
-    let clock_domains = clock_domains_with_hierarchy(&flat_netlist_json, &hier_json);
+    let clock_domains =
+        clock_domains_with_hierarchy(&flat_netlist_json, &hier_json).map_err(|damage| {
+            lift_snapshot_error(
+                &clock_json_path(&plan.btor_path),
+                "flattened netlist",
+                &damage.to_string(),
+            )
+        })?;
     refuse_merged_clock_domains(&clock_domains, yopts, opt_in)?;
 
     Ok(SvFlattenArtifacts {
@@ -1100,12 +1118,68 @@ fn run_sv_flatten_btor2_concrete(
 }
 
 /// A JSON snapshot the lift's script writes, read back; missing or empty is a lift error that
-/// names the file (mununu#957).
+/// names the file (mununu#957), and so is one that is not a netlist ([`snapshot_modules`],
+/// mununu#1198): every reader downstream answers "nothing found" for a text it cannot parse.
 fn read_lift_snapshot(path: &Path, what: &str) -> Result<String, AdapterError> {
     match std::fs::read_to_string(path) {
-        Ok(text) if !text.trim().is_empty() => Ok(text),
-        Ok(_) => Err(lift_snapshot_error(path, what, "it is empty")),
+        Ok(text) if text.trim().is_empty() => Err(lift_snapshot_error(path, what, "it is empty")),
+        Ok(text) => match snapshot_modules(&text) {
+            Ok(_) => Ok(text),
+            Err(damage) => Err(lift_snapshot_error(path, what, &damage.to_string())),
+        },
         Err(e) => Err(lift_snapshot_error(path, what, &e.to_string())),
+    }
+}
+
+/// mununu#1198 — why a snapshot the lift's script wrote with `write_json` cannot be read as a
+/// netlist. yosys writes an object whose `modules` is an object holding at least the top
+/// module, and every module in it carries a `cells` object (empty for a module with no cell).
+/// A text that is anything else was truncated or damaged after yosys wrote it, or is not what
+/// yosys wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotDamage {
+    /// Not JSON (a truncated file, an empty one); the parser's message.
+    NotJson(String),
+    /// JSON with no `modules` object, or with an empty one.
+    NoModules,
+    /// The named module has no `cells` object.
+    ModuleWithoutCells(String),
+}
+
+impl std::fmt::Display for SnapshotDamage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotDamage::NotJson(e) => write!(f, "it is not JSON: {e}"),
+            SnapshotDamage::NoModules => f.write_str("it holds no module"),
+            SnapshotDamage::ModuleWithoutCells(module) => {
+                write!(f, "its module `{module}` has no list of cells")
+            }
+        }
+    }
+}
+
+/// The `modules` of a `write_json` snapshot (module name → body), or why the text is not one.
+/// The one test of "is this a netlist" for the fresh lift ([`read_lift_snapshot`]), the lift
+/// cache's lookup and the clock scan ([`clock_domains_with_hierarchy`]), so the three cannot
+/// disagree on a text (mununu#1198).
+pub(crate) fn snapshot_modules(
+    text: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, SnapshotDamage> {
+    let root = serde_json::from_str::<serde_json::Value>(text)
+        .map_err(|e| SnapshotDamage::NotJson(e.to_string()))?;
+    let modules = match root {
+        serde_json::Value::Object(mut root) => match root.remove("modules") {
+            Some(serde_json::Value::Object(modules)) if !modules.is_empty() => modules,
+            _ => return Err(SnapshotDamage::NoModules),
+        },
+        _ => return Err(SnapshotDamage::NoModules),
+    };
+    match modules
+        .iter()
+        .find(|(_, body)| !body.get("cells").is_some_and(|c| c.is_object()))
+    {
+        Some((name, _)) => Err(SnapshotDamage::ModuleWithoutCells(name.clone())),
+        None => Ok(modules),
     }
 }
 
@@ -1972,7 +2046,7 @@ pub fn name_staged_primary(sources: &mut [crate::trace::CellSource], primary: &s
 /// mununu#1180), so the lift and the lint call [`clock_domains_with_hierarchy`].
 #[cfg(test)]
 pub(crate) fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
-    clock_domains_with_hierarchy(flat_json, "")
+    clock_domains_with_hierarchy(flat_json, "").expect("the test's netlist is a snapshot")
 }
 
 /// The clock domains of a flattened netlist, read with the lift's hierarchy snapshot (`write_json` before `delete
@@ -1980,14 +2054,17 @@ pub(crate) fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
 /// the stub whose `output` the clock net is on is the driver and one that only reads the net is
 /// not (mununu#1180; measured 2026-11-22 — the snapshot keeps the stub module with its ports,
 /// the flattened netlist keeps the cell under the same type name, parametrised or not). An
-/// empty or unreadable snapshot leaves every direction unknown.
-pub fn clock_domains_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<ClockDomain> {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(flat_json) else {
-        return Vec::new();
-    };
-    let Some(modules) = root.get("modules").and_then(|m| m.as_object()) else {
-        return Vec::new();
-    };
+/// empty or unreadable hierarchy snapshot leaves every direction unknown.
+///
+/// `Ok` with no domain is a design with no storage cell. A flattened netlist that is not one
+/// ([`snapshot_modules`]) is an `Err`: it answered with no domain too until mununu#1198, so a
+/// truncated snapshot read as a combinational design and the multi-clock refusal was skipped
+/// with nothing said.
+pub fn clock_domains_with_hierarchy(
+    flat_json: &str,
+    hier_json: &str,
+) -> Result<Vec<ClockDomain>, SnapshotDamage> {
+    let modules = snapshot_modules(flat_json)?;
     let declared = declared_port_directions(hier_json);
     // A yosys parameter is a binary string, most significant bit first.
     let param_bit = |cell: &serde_json::Value, name: &str, i: usize| -> Option<bool> {
@@ -2038,6 +2115,7 @@ pub fn clock_domains_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<Clo
                 (None, None) => {}
             }
         };
+        // `snapshot_modules` returned no module without its `cells`.
         let Some(cells) = body.get("cells").and_then(|c| c.as_object()) else {
             continue;
         };
@@ -2088,7 +2166,7 @@ pub fn clock_domains_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<Clo
             fires_on(bit, edge, &register);
         }
     }
-    count
+    Ok(count
         .into_iter()
         .map(|((net, posedge), cells)| ClockDomain {
             root: roots
@@ -2099,7 +2177,7 @@ pub fn clock_domains_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<Clo
             posedge,
             cells,
         })
-        .collect()
+        .collect())
 }
 
 /// mununu#1180 — module → (port → `input` / `output` / `inout`) for every module the hierarchy
@@ -2552,6 +2630,19 @@ fn translate_sv_per_module_impl(
         ),
         location: None,
     })?;
+    // mununu#1198 — a snapshot that is not a netlist is said to be one: read on, it is "no
+    // non-blackbox modules" below, which names the design for what the snapshot lacks.
+    if let Err(damage) = snapshot_modules(&hier_body) {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: crate::adapter::owner::mununu_defect(&format!(
+                "adapter/yosys: the per-module discovery pass succeeded but its hierarchy \
+                 snapshot {} cannot be used ({damage})",
+                hier_json_path.display()
+            )),
+            location: None,
+        });
+    }
     let hier_body = collapse_slang_instance_modules(&hier_body);
     let submodules = enumerate_submodules(&hier_body, yopts.top.as_deref());
     if submodules.is_empty() {
@@ -4369,18 +4460,177 @@ mod tests {
         assert!(trace_aliases("not json").is_empty());
     }
 
-    /// One clock is one domain, and a snapshot that does not parse reports none.
-    #[test]
-    fn clock_domains_single_clock_and_garbage() {
-        let json = r#"{"modules": {"top": {"netnames": {"clk": {"hide_name": 0, "bits": [2]}},
+    /// One flop on one clock: the netlist the snapshot cases below damage.
+    const ONE_CLOCK_NETLIST: &str = r#"{"modules": {"top": {"netnames": {"clk": {"hide_name": 0, "bits": [2]}},
             "cells": {"q": {"type": "$sdff", "parameters": {"CLK_POLARITY": "1"},
                             "connections": {"CLK": [2]}}}}}}"#;
-        assert_eq!(clock_domains(json).len(), 1);
-        assert!(clock_domains("not json").is_empty());
+
+    /// A design with no storage cell: one `$and`.
+    const COMBINATIONAL_NETLIST: &str = r#"{"modules": {"top": {"netnames": {},
+            "cells": {"g": {"type": "$and", "parameters": {},
+                            "connections": {"A": [2], "B": [3], "Y": [4]}}}}}}"#;
+
+    /// One damaged snapshot: its name, its text, and the test for the damage it is.
+    type DamagedSnapshot = (&'static str, String, fn(&SnapshotDamage) -> bool);
+
+    /// What a snapshot can be when it is not a netlist, with the damage each one is: a
+    /// truncated write, an empty file (a missing one read as nothing), JSON of another shape.
+    fn damaged_snapshots() -> Vec<DamagedSnapshot> {
+        fn not_json(d: &SnapshotDamage) -> bool {
+            matches!(d, SnapshotDamage::NotJson(_))
+        }
+        fn no_modules(d: &SnapshotDamage) -> bool {
+            matches!(d, SnapshotDamage::NoModules)
+        }
+        fn no_cells(d: &SnapshotDamage) -> bool {
+            matches!(d, SnapshotDamage::ModuleWithoutCells(m) if m == "top")
+        }
+        vec![
+            (
+                "truncated",
+                ONE_CLOCK_NETLIST[..ONE_CLOCK_NETLIST.len() / 2].to_string(),
+                not_json,
+            ),
+            ("empty", String::new(), not_json),
+            ("not JSON", "not json".to_string(), not_json),
+            ("an array", "[]".to_string(), no_modules),
+            (
+                "no `modules`",
+                r#"{"creator": "Yosys"}"#.to_string(),
+                no_modules,
+            ),
+            (
+                "`modules` is not an object",
+                r#"{"modules": []}"#.to_string(),
+                no_modules,
+            ),
+            ("no module", r#"{"modules": {}}"#.to_string(), no_modules),
+            (
+                "a module with no `cells`",
+                r#"{"modules": {"top": {"netnames": {}}}}"#.to_string(),
+                no_cells,
+            ),
+        ]
+    }
+
+    /// mununu#1198 — what the clock scan is given, enumerated: a netlist with a storage cell
+    /// is its domains, a netlist with none is no domain, and a text that is not a netlist is
+    /// an error of its kind. The parent answered the last one with no domain, which reads as
+    /// the combinational design beside it.
+    #[test]
+    fn x1198_the_clock_scan_tells_a_damaged_snapshot_from_a_design_with_no_storage_cell() {
+        let scan = |flat: &str| clock_domains_with_hierarchy(flat, "");
+        assert_eq!(scan(ONE_CLOCK_NETLIST).map(|d| d.len()), Ok(1));
+        assert_eq!(scan(COMBINATIONAL_NETLIST), Ok(Vec::new()));
+        for (case, text, is_the_damage) in damaged_snapshots() {
+            match scan(&text) {
+                Err(damage) => assert!(is_the_damage(&damage), "{case}: {damage:?}"),
+                Ok(domains) => panic!("{case}: read as a netlist with domains {domains:?}"),
+            }
+            // The fresh lift's door and the cache's lookup ask the same question.
+            assert_eq!(snapshot_modules(&text).err(), scan(&text).err(), "{case}");
+        }
+    }
+
+    /// mununu#1198 — the fresh lift reads both snapshots through one door: a netlist is
+    /// returned as written, and a missing file, an empty one and every damaged text is a lift
+    /// error (mununu#957 covered the first two).
+    #[test]
+    fn x1198_the_lift_refuses_a_snapshot_that_is_not_a_netlist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clocks.json");
+        assert!(
+            read_lift_snapshot(&path, "flattened netlist").is_err(),
+            "missing"
+        );
+        for netlist in [ONE_CLOCK_NETLIST, COMBINATIONAL_NETLIST] {
+            std::fs::write(&path, netlist).expect("write");
+            assert_eq!(
+                read_lift_snapshot(&path, "flattened netlist")
+                    .map_err(|e| e.message)
+                    .as_deref(),
+                Ok(netlist)
+            );
+        }
+        for (case, text, _) in damaged_snapshots() {
+            std::fs::write(&path, &text).expect("write");
+            let err = read_lift_snapshot(&path, "flattened netlist")
+                .expect_err(&format!("{case}: not a netlist"));
+            assert_eq!(err.kind, AdapterErrorKind::ParseError, "{case}");
+        }
+    }
+
+    /// mununu#1198 — REPRODUCER at the seam the issue names: a cache hit whose stored netlist
+    /// was truncated is an error, with and without the opt-in. The parent returned the lift
+    /// with no clock domain: the two-clock design below lifted on one clock with nothing said,
+    /// and under `--merge-clock-domains` with no domain to report.
+    #[test]
+    fn x1198_a_cache_hit_with_a_damaged_netlist_is_not_a_lift_with_no_clock() {
+        const TWO_CLOCKS: &str = r#"{"modules": {"top": {
+            "ports": {"clk_a": {"direction": "input", "bits": [2]}, "clk_b": {"direction": "input", "bits": [3]}},
+            "netnames": {"clk_a": {"hide_name": 0, "bits": [2]}, "clk_b": {"hide_name": 0, "bits": [3]}},
+            "cells": {
+                "q1": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                       "connections": {"CLK": [2], "D": [5], "Q": [6]}},
+                "q2": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                       "connections": {"CLK": [3], "D": [6], "Q": [7]}}
+            }
+        }}}"#;
+        let hit = |flat: &str| lift_cache::CachedLift {
+            btor2: String::new(),
+            hier_json: String::new(),
+            flat_netlist_json: flat.to_string(),
+            staged_primary: String::new(),
+            frontend_used: lift_cache::frontend_tag(SvFrontend::Slang).to_string(),
+            backend_retry: None,
+        };
+        let merged = YosysOptions {
+            merge_clock_domains: true,
+            ..Default::default()
+        };
+        // The intact netlist: refused by default as two domains, lifted under the opt-in with
+        // both to report.
+        let refused = artifacts_from_cached(
+            hit(TWO_CLOCKS),
+            &YosysOptions::default(),
+            MergeOptIn::Offered,
+        )
+        .err()
+        .expect("two clocks are refused by default");
+        assert_eq!(refused.kind, AdapterErrorKind::UnsupportedConstruct);
+        let lifted = artifacts_from_cached(hit(TWO_CLOCKS), &merged, MergeOptIn::Offered)
+            .unwrap_or_else(|e| panic!("the opt-in lifts two clocks: {}", e.message));
+        assert_eq!(lifted.clock_domains.len(), 2);
+        // The same netlist cut short, and every other damage.
+        let mut damaged = damaged_snapshots();
+        damaged.push((
+            "two clocks, truncated",
+            TWO_CLOCKS[..TWO_CLOCKS.len() - 40].to_string(),
+            |_| true,
+        ));
+        for (case, text, _) in damaged {
+            for (posture, yopts) in [
+                ("default", YosysOptions::default()),
+                ("opt-in", merged.clone()),
+            ] {
+                match artifacts_from_cached(hit(&text), &yopts, MergeOptIn::Offered) {
+                    Err(e) => assert_eq!(e.kind, AdapterErrorKind::ParseError, "{case}, {posture}"),
+                    Ok(a) => panic!(
+                        "{case}, {posture}: lifted with clock domains {:?}",
+                        a.clock_domains
+                    ),
+                }
+            }
+        }
     }
 
     use super::*;
     use crate::controllability::BoundaryDirection;
+
+    /// The scan on a fixture that is a netlist.
+    fn scan_with_hierarchy(flat_json: &str, hier_json: &str) -> Vec<ClockDomain> {
+        clock_domains_with_hierarchy(flat_json, hier_json).expect("the fixture is a netlist")
+    }
 
     /// The product lift's script for `sources` — `read_slang_cmd` + `build_script`, composed
     /// as `plan_lift` composes them; no staging, no tool.
@@ -4728,7 +4978,7 @@ endmodule
     /// root. Fails on the parent, which reads `gclk` as a root clock and says nothing.
     #[test]
     fn x1148_a_clock_rooted_at_a_black_box_output_is_named_in_the_description() {
-        let domains = clock_domains_with_hierarchy(
+        let domains = scan_with_hierarchy(
             MISSING_MODULE_CLOCK_GATE_NETLIST,
             MISSING_MODULE_CLOCK_GATE_HIERARCHY,
         );
@@ -4746,7 +4996,7 @@ endmodule
     /// included).
     #[test]
     fn the_two_black_box_shapes_are_free_roots_not_derived_domains() {
-        let stub = clock_domains_with_hierarchy(
+        let stub = scan_with_hierarchy(
             MISSING_MODULE_CLOCK_GATE_NETLIST,
             MISSING_MODULE_CLOCK_GATE_HIERARCHY,
         );
@@ -5025,7 +5275,7 @@ endmodule
         }}}"#;
         // `pll_wrap` is declared (its `o` is an output); `pad_wrap` is not.
         let hier = r#"{"modules": {"pll_wrap": {"ports": {"i": {"direction": "input"}, "o": {"direction": "output"}}}}}"#;
-        let domains = clock_domains_with_hierarchy(json, hier);
+        let domains = scan_with_hierarchy(json, hier);
         let root = |net: &str| {
             domains
                 .iter()
@@ -5281,11 +5531,7 @@ endmodule
         ];
         for (case, flat, hier, net, in_the_lift, no_snapshot) in cases {
             for (what, domains, expected) in [
-                (
-                    "in the lift",
-                    clock_domains_with_hierarchy(flat, hier),
-                    &in_the_lift,
-                ),
+                ("in the lift", scan_with_hierarchy(flat, hier), &in_the_lift),
                 ("with no snapshot", clock_domains(flat), &no_snapshot),
             ] {
                 let text = describe_clock_domains(&domains);
@@ -5323,7 +5569,7 @@ endmodule
         for (what, domains) in [
             (
                 "in the lift",
-                clock_domains_with_hierarchy(&flat, STUB_INOUT_HIERARCHY),
+                scan_with_hierarchy(&flat, STUB_INOUT_HIERARCHY),
             ),
             ("with no snapshot", clock_domains(&flat)),
         ] {
@@ -5389,7 +5635,7 @@ endmodule
             let flat = STUB_DRIVER_AND_READER_NETLIST
                 .replace("u_pll", first)
                 .replace("u_mon", second);
-            let domains = clock_domains_with_hierarchy(&flat, STUB_DRIVER_AND_READER_HIERARCHY);
+            let domains = scan_with_hierarchy(&flat, STUB_DRIVER_AND_READER_HIERARCHY);
             let pclk = domains.iter().find(|d| d.net == "pclk").expect("pclk");
             assert_eq!(pclk.root, ClockRoot::BlackBox("pll".into()), "{first}");
         }
@@ -5397,7 +5643,7 @@ endmodule
             let flat = TWO_STUB_DRIVERS_NETLIST
                 .replace("u_osc", first)
                 .replace("u_pll", second);
-            let domains = clock_domains_with_hierarchy(&flat, TWO_STUB_DRIVERS_HIERARCHY);
+            let domains = scan_with_hierarchy(&flat, TWO_STUB_DRIVERS_HIERARCHY);
             let pclk = domains.iter().find(|d| d.net == "pclk").expect("pclk");
             assert_eq!(pclk.root, several(&["osc", "pll"]), "{first}");
         }

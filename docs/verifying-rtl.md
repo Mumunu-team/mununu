@@ -1094,6 +1094,13 @@ The report then holds, beside the verb's own fields (the `detail` is cut here):
 Until 2026-11-22 only `sv verify-auto` and `sv cdc-lint` reported the merge: the other verbs took
 the flag, lifted the lockstep model and returned a verdict with nothing about it (mununu#1181).
 
+The domains are counted on the snapshot, so a snapshot that is not a netlist is not a design with
+no clock. The lift fails, naming the file and what is wrong with it (truncated, not JSON, no
+module), and says it is a mununu defect: the lift's own script wrote the file. Under
+`MUNUNU_LIFT_CACHE_DIR` a stored entry with such a snapshot is a cache miss, and the design is
+lifted again. Before mununu#1198 the scan read such a text as a design with no storage cell, and a
+cache hit on it lifted a multi-clock design with no refusal and no note.
+
 An operation that lifts SystemVerilog and does not take the flag (`sv discover`, `sv cegar` on the
 command line, `POST /translate` with `sv-yosys`, `verify project`, `context import`) refuses such
 a design too. Its refusal says that the operation has no opt-in, and names the verbs that have
