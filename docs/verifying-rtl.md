@@ -723,7 +723,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1758) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1324) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1812) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1324) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -1088,6 +1088,11 @@ The report then holds, beside the verb's own fields (the `detail` is cut here):
 
 Until 2026-11-22 only `sv verify-auto` and `sv cdc-lint` reported the merge: the other verbs took
 the flag, lifted the lockstep model and returned a verdict with nothing about it (mununu#1181).
+
+An operation that lifts SystemVerilog and does not take the flag (`sv discover`, `sv cegar` on the
+command line, `POST /translate` with `sv-yosys`, `verify project`, `context import`) refuses such
+a design too. Its refusal says that the operation has no opt-in, and names the verbs that have
+one.
 
 What drives a clock net is classified by one walk (mununu#1148, mununu#1180), and every kind but
 a top-level input (an `inout` counts) is an abstraction decision. A **`$`-cell** (a gating `$and`,
@@ -2115,7 +2120,7 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3383) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3495) — surface: (CLI+API+UI)
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3437) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3549) — surface: (CLI+API+UI)
 
 `sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
 yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
@@ -2199,7 +2204,7 @@ cells, so the verdicts are over the same design — and reports it as the `lift-
 `diagnostics.lift_retry`. Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L769) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3436) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L772) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3490) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L92) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions

@@ -6876,117 +6876,122 @@ endmodule
         serde_json::from_value(body).expect("a request the route accepts")
     }
 
-    fn body<T: serde::Serialize>(route: &str, response: ApiResult<Json<T>>) -> Value {
-        let Json(response) = response.unwrap_or_else(|e| panic!("{route}: {e:?}"));
-        serde_json::to_value(&response).expect("a response serialises")
+    /// What a route answered: its serialised response, or the text of its refusal.
+    type Answer = Result<Value, String>;
+
+    /// The text a client reads in a refusal: the message, and the details when there are any.
+    fn refusal_text(error: ApiError) -> String {
+        match error {
+            ApiError::BadRequest {
+                message,
+                details: Some(details),
+            } => format!("{message}\n{details}"),
+            other => other.to_string(),
+        }
+    }
+
+    fn body<T: serde::Serialize>(response: ApiResult<Json<T>>) -> Answer {
+        let Json(response) = response.map_err(refusal_text)?;
+        Ok(serde_json::to_value(&response).expect("a response serialises"))
     }
 
     /// One row per `sv` route that lifts and is not `sv/verify-auto` (whose `notes` carried the
     /// caveat before) or `sv/cdc-lint` (which lists the domains it lints): the route's name and
-    /// its response to `lift`.
-    fn every_route(lift: &Value) -> Vec<(&'static str, Value)> {
+    /// its answer to `lift`.
+    fn every_route(lift: &Value) -> Vec<(&'static str, Answer)> {
         let mut rows = Vec::new();
-        let mut row = |route: &'static str, response: Value| rows.push((route, response));
+        let mut row = |route: &'static str, answer: Answer| rows.push((route, answer));
         row(
             "sv/verify-liveness (request / grant)",
-            body(
-                "sv/verify-liveness",
-                sv_verify_liveness_handler_impl(request(
-                    lift,
-                    json!({ "request": "seen == 1", "grant": "st == 2" }),
-                )),
-            ),
+            body(sv_verify_liveness_handler_impl(request(
+                lift,
+                json!({ "request": "seen == 1", "grant": "st == 2" }),
+            ))),
         );
         row(
             "sv/verify-liveness (responses)",
-            body(
-                "sv/verify-liveness (responses)",
-                sv_verify_liveness_handler_impl(request(
-                    lift,
-                    json!({ "responses": ["seen == 1 => st == 2"] }),
-                )),
-            ),
+            body(sv_verify_liveness_handler_impl(request(
+                lift,
+                json!({ "responses": ["seen == 1 => st == 2"] }),
+            ))),
         );
         row(
             "sv/verify-recoverability",
-            body(
-                "sv/verify-recoverability",
-                sv_verify_recoverability_handler_impl(request(
-                    lift,
-                    json!({ "target": "st == 0" }),
-                )),
-            ),
+            body(sv_verify_recoverability_handler_impl(request(
+                lift,
+                json!({ "target": "st == 0" }),
+            ))),
         );
         row(
             "sv/verify-recoverability (refine)",
-            body(
-                "sv/verify-recoverability (refine)",
-                sv_verify_recoverability_handler_impl(request(
-                    lift,
-                    json!({ "target": "st == 0", "refine": true }),
-                )),
-            ),
+            body(sv_verify_recoverability_handler_impl(request(
+                lift,
+                json!({ "target": "st == 0", "refine": true }),
+            ))),
         );
         row(
             "sv/check-fsm",
-            body(
-                "sv/check-fsm",
-                sv_check_fsm_handler_impl(request(lift, json!({}))),
-            ),
+            body(sv_check_fsm_handler_impl(request(lift, json!({})))),
         );
         row(
             "sv/check-fsm (liveness)",
-            body(
-                "sv/check-fsm (liveness)",
-                sv_check_fsm_handler_impl(request(lift, json!({ "liveness": true }))),
-            ),
+            body(sv_check_fsm_handler_impl(request(
+                lift,
+                json!({ "liveness": true }),
+            ))),
         );
         row(
             "sv/lint",
-            body("sv/lint", sv_lint_handler_impl(request(lift, json!({})))),
+            body(sv_lint_handler_impl(request(lift, json!({})))),
         );
         row(
             "sv/mutate (list)",
-            body(
-                "sv/mutate (list)",
-                sv_mutate_handler_impl(request(lift, json!({ "list": true }))),
-            ),
+            body(sv_mutate_handler_impl(request(
+                lift,
+                json!({ "list": true }),
+            ))),
         );
         row(
             "sv/mutate (run)",
-            body(
-                "sv/mutate (run)",
-                sv_mutate_handler_impl(request(
-                    lift,
-                    json!({ "mutation": "stick:st", "engine": "exact-symbolic" }),
-                )),
-            ),
+            body(sv_mutate_handler_impl(request(
+                lift,
+                json!({ "mutation": "stick:st", "engine": "exact-symbolic" }),
+            ))),
         );
         row(
             "sv/cegar",
-            body(
-                "sv/cegar",
-                sv_cegar_handler_impl(request(
-                    lift,
-                    json!({
-                        "formula": "nu X. < true > X",
-                        "predicates": [{ "name": "st_zero", "register": "st", "value": 0 }],
-                        "max_iterations": 2,
-                    }),
-                )),
-            ),
+            body(sv_cegar_handler_impl(request(
+                lift,
+                json!({
+                    "formula": "nu X. < true > X",
+                    "predicates": [{ "name": "st_zero", "register": "st", "value": 0 }],
+                    "max_iterations": 2,
+                }),
+            ))),
         );
         // `sv/plan` has no blocking body of its own: these are its three steps.
         let plan_request: SvVerifyAutoRequest = request(lift, json!({}));
-        let (sources, yopts, opts) =
-            sv_verify_auto_inputs(&plan_request).unwrap_or_else(|e| panic!("sv/plan: {e:?}"));
-        let plan = crate::planner::plan_auto(&sources, &yopts, &opts)
-            .unwrap_or_else(|e| panic!("sv/plan: {}", e.message));
-        row(
-            "sv/plan",
-            serde_json::to_value(SvPlanResponse::from(&plan)).expect("a plan serialises"),
-        );
+        let plan = sv_verify_auto_inputs(&plan_request)
+            .map_err(refusal_text)
+            .and_then(|(sources, yopts, opts)| {
+                crate::planner::plan_auto(&sources, &yopts, &opts).map_err(|e| e.message)
+            })
+            .map(|plan| {
+                serde_json::to_value(SvPlanResponse::from(&plan)).expect("a plan serialises")
+            });
+        row("sv/plan", plan);
         rows
+    }
+
+    /// The same rows where every route is expected to lift: a refusal fails the test.
+    fn every_response(lift: &Value) -> Vec<(&'static str, Value)> {
+        every_route(lift)
+            .into_iter()
+            .map(|(route, answer)| {
+                let response = answer.unwrap_or_else(|refusal| panic!("{route}: {refusal}"));
+                (route, response)
+            })
+            .collect()
     }
 
     /// REPRODUCER and the class's enumerating test at the API. A two-clock design lifted under
@@ -6998,7 +7003,7 @@ endmodule
     #[test]
     #[ignore = "requires yosys-slang + z3 (mununu-sva docker image); run with --ignored"]
     fn e2e_x1181_every_sv_route_reports_the_merged_clock_domains() {
-        let merged = every_route(&lift_of(TWO_CLOCKS, true));
+        let merged = every_response(&lift_of(TWO_CLOCKS, true));
         let silent: Vec<&str> = merged
             .iter()
             .filter(|(_, response)| {
@@ -7021,7 +7026,7 @@ endmodule
             "input logic clk_a,",
         );
         for merge in [false, true] {
-            for (route, response) in every_route(&lift_of(&one_clock, merge)) {
+            for (route, response) in every_response(&lift_of(&one_clock, merge)) {
                 assert!(
                     response.get("lift_notes").is_none(),
                     "{route} (merge_clock_domains: {merge}): a design on one input clock has \
@@ -7031,19 +7036,33 @@ endmodule
         }
     }
 
-    /// The refusal the opt-in answers is unchanged: without it the lift every route shares
-    /// refuses the two-clock design and names the flag (read here through `sv/lint`).
+    /// The refusal the opt-in answers is unchanged on every route of the table: without the
+    /// opt-in each refuses the two-clock design, counting the domains and naming the flag its
+    /// own request takes (`lift.merge_clock_domains`).
     #[test]
     #[ignore = "requires yosys-slang (mununu-sva docker image); run with --ignored"]
     fn e2e_x1181_without_the_opt_in_a_two_clock_design_is_still_refused() {
-        let refused = sv_lint_handler_impl(request(&lift_of(TWO_CLOCKS, false), json!({})));
-        let message = match refused {
-            Err(ApiError::BadRequest { message, .. }) => message,
-            other => panic!("expected a refusal, got {:?}", other.map(|Json(r)| r)),
-        };
-        assert!(
-            message.contains("2 clock domains") && message.contains("--merge-clock-domains"),
-            "{message}"
-        );
+        let rows = every_route(&lift_of(TWO_CLOCKS, false));
+        assert_eq!(rows.len(), 11, "the routes and modes of the reporting test");
+        for (route, answer) in rows {
+            let refusal = match answer {
+                Err(refusal) => refusal,
+                Ok(response) => {
+                    panic!("{route}: lifted two clock domains without the opt-in: {response:#}")
+                }
+            };
+            assert!(
+                refusal.contains("2 clock domains")
+                    && refusal.contains("--merge-clock-domains")
+                    && refusal.contains("lift.merge_clock_domains"),
+                "{route}: {refusal}"
+            );
+            // Each of these routes takes `lift.merge_clock_domains`: none is told it has no
+            // opt-in (the wording of the lifts that return the model alone).
+            assert!(
+                !refusal.contains(crate::adapter::yosys::MERGE_NOT_OFFERED_HERE),
+                "{route}: {refusal}"
+            );
+        }
     }
 }

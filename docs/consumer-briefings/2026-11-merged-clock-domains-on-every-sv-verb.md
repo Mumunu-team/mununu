@@ -38,8 +38,10 @@
 
   | refusal | the end, before | the end, now |
   |---|---|---|
-  | more than one clock domain; a derived clock | `… accepts … explicitly — sv verify-auto then reports it (clock-domains-merged), the other verbs report nothing (a mununu limitation).` | `… accepts … explicitly, and the report then says so in a clock-domains-merged note.` |
-  | a clock with no driver | `--merge-clock-domains on sv verify-auto accepts the lockstep model explicitly and names the root in a note — on the other sv verbs the flag does not lift such a clock, since they drop the roots (a mununu limitation).` | `--merge-clock-domains on the sv verbs accepts the lockstep model explicitly, and the report then names the root in a note.` |
+  | more than one clock domain; a derived clock | `… accepts … explicitly — sv verify-auto then reports it (clock-domains-merged), the other verbs report nothing (a mununu limitation).` | `--merge-clock-domains on sv verify-auto / sv verify-liveness / sv verify-liveness-all / sv verify-recoverability / sv check-fsm / sv lint / sv mutate (API lift.merge_clock_domains) accepts … explicitly, and the report then says so in a clock-domains-merged note.` |
+  | a clock with no driver | `--merge-clock-domains on sv verify-auto accepts the lockstep model explicitly and names the root in a note — on the other sv verbs the flag does not lift such a clock, since they drop the roots (a mununu limitation).` | the same list of verbs, then `… accepts the lockstep model explicitly, and the report then names the root in a note.` |
+
+  An operation that lifts SystemVerilog and does not take the flag — `sv discover`, `sv cegar` on the command line, `POST /translate` with `sv-yosys`, `verify project`, `context import` — refuses the same designs, and there the sentence starts `this operation has no opt-in to lift the design as it is (a mununu limitation); elsewhere, --merge-clock-domains on sv verify-auto / …`. Before, those operations ended with the sentence of the verbs that take the flag.
 
 - **`sv mutate --list`: a lift failure reads `sv mutate --list: SV → BTOR2 (yosys-slang): <message>`** (CLI and API). Before, it read `sv mutate --list: <message>`. The verb now lifts through the entry the other verbs use, which adds the stage name.
 
@@ -62,13 +64,13 @@
 ## Provenance
 
 - **Found by:** the cross-host review of the fix of mununu#1148, reading the code: the flag is on eight verbs and only one read the clock domains the lift returns (mununu#1181). That fix contained the worst case by refusing a driverless clock on the verbs that could not report it; this one removes the containment by making every verb report.
-- **Tests:** `e2e_x1181_every_sv_route_reports_the_merged_clock_domains` (the reproducer, in the `mununu-sva` image: every route and mode on a two-clock design, and a one-clock design that must carry no `lift_notes`; fails on the parent, where no route carried it), `e2e_x1181_without_the_opt_in_a_two_clock_design_is_still_refused`, `x1181_every_merged_shape_has_the_caveat_and_every_free_root_its_note`, `x1181_verify_auto_and_the_other_verbs_word_the_merge_the_same`, `x1181_every_model_only_lift_refuses_the_merge_opt_in`, and the policy tests `every_lift_that_can_merge_clock_domains_reports_them` and `every_pinned_report_of_a_lifting_sv_verb_has_optional_lift_notes`.
+- **Tests:** `e2e_x1181_every_sv_route_reports_the_merged_clock_domains` (the reproducer, in the `mununu-sva` image: every route and mode on a two-clock design, and a one-clock design that must carry no `lift_notes`; fails on the parent, where no route carried it), `e2e_x1181_without_the_opt_in_a_two_clock_design_is_still_refused`, `x1181_every_merged_shape_has_the_caveat_and_every_free_root_its_note`, `x1181_verify_auto_and_the_other_verbs_word_the_merge_the_same`, `x1181_every_model_only_lift_refuses_the_merge_opt_in`, `x1181_a_clock_refusal_names_the_opt_in_where_the_caller_can_take_it`, `e2e_x1181_a_model_only_lift_says_it_has_no_merge_opt_in`, and the policy tests `every_lift_that_can_merge_clock_domains_reports_them`, `the_clock_refusal_names_every_verb_that_takes_the_merge_flag` and `every_pinned_report_of_a_lifting_sv_verb_has_optional_lift_notes`.
 - **Schemas:** nine files under [`docs/api-schemas/`](../api-schemas/) gain the optional `lift_notes` property; the request schema's description of `merge_clock_domains` is reworded.
 - **Class:** `clock-net-driver` in [`docs/defect-classes.md`](../defect-classes.md), the row "which verbs carry the note".
 
 ## Not covered here
 
-- `sv cegar` on the command line takes none of the shared lift arguments, so the flag cannot reach it; the route does (mununu#1190, open).
+- `sv cegar` on the command line takes none of the shared lift arguments, so the flag cannot reach it; the route does (mununu#1190, open). Its refusal says so, as above.
 - The per-module lift (`sv emit-btor2-per-module`, `verify project` with `multi_module = true`) does not look at the clocks at all (mununu#1191, open).
 - The lift's other decisions — a module cut because it has no body, a cut point, a parameter override, a retried lift — are still reported by `sv verify-auto` alone (mununu#1189, open). `lift_notes` is where they will go.
 - A plan with no property to plan stops before the lift, so it has no `lift_notes`.

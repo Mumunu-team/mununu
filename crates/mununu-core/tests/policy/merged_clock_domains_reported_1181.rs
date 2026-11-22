@@ -8,9 +8,13 @@
 //!    returns the clock domains with the model (`sv_to_btor2_with_blackboxes`) or refuses the
 //!    opt-in before it lifts (`refuse_merge_without_domains`). A new entry that returns the model
 //!    alone and does not refuse fails here.
+//!    Each also tells the lift whether its caller can take the opt-in (`MergeOptIn`), which
+//!    decides how a default refusal words the flag: the reporting entry says it is offered,
+//!    the others that it is not. An entry that says the wrong one fails here.
 //! 2. **At the callers**: every file that calls `sv_to_btor2_with_blackboxes` is listed in
-//!    [`CALLERS`] with the calls that carry the domains into its report. A new caller fails here
-//!    until it is listed with them.
+//!    [`CALLERS`] with the calls that carry the domains into its report, and how many times its
+//!    product code makes each. A new caller fails here until it is listed with them; so does
+//!    one of two identical calls going away.
 //!
 //! It replaces `clock_roots_reported_1148`, which listed the setters of the retired
 //! `YosysOptions::report_clock_roots`. As there, a reporter is looked for as a CALL, never as a
@@ -48,10 +52,20 @@ const SCANNED: &[&[&str]] = &[
     &["crates", "mununu-cli", "src"],
 ];
 
+/// One call of a [`CALLERS`] chain: `(file, the text of the call, how many times the file's
+/// product code makes it)`.
+type ReportingCall = (&'static str, &'static str, usize);
+
+/// What an entry passes the lift when its caller can take the opt-in, and when it cannot.
+const OPT_IN_OFFERED: &str = "MergeOptIn::Offered";
+const OPT_IN_NOT_OFFERED: &str = "MergeOptIn::NotOffered";
+
 /// `(a file that calls the reporting entry, the calls that carry the domains into its report)`.
-/// Each call is `(file, the text of the call)`. A file with two callers lists both chains: the
-/// scan is per file, so it does not tell which caller a chain belongs to.
-const CALLERS: &[(&str, &[(&str, &str)])] = &[
+/// Each call is `(file, the text of the call, how many times the file's product code makes
+/// it)`. A file with two callers lists both chains: the scan is per file, so it does not tell
+/// which caller a chain belongs to — the count is what tells that one of two callers with the
+/// same call text stopped making it.
+const CALLERS: &[(&str, &[ReportingCall])] = &[
     (
         // `lift_sv` → `prepare_model`: the merged domains and the root notes of `sv verify-auto`
         // (and of `sv plan` / `sv mutate`, which read them off that report).
@@ -60,18 +74,22 @@ const CALLERS: &[(&str, &[(&str, &str)])] = &[
             (
                 "crates/mununu-core/src/adapter/slang/verify_auto.rs",
                 "merged_clock_domain_descriptions(&clock_domains)",
+                1,
             ),
             (
                 "crates/mununu-core/src/adapter/slang/verify_auto.rs",
                 ".extend(clock_root_notes(&clock_domains))",
+                1,
             ),
             (
                 "crates/mununu-core/src/planner/entry.rs",
                 "clock_notes_of_report(&baseline)",
+                1,
             ),
             (
                 "crates/mununu-core/src/planner/entry.rs",
                 "clock_notes_of_report(&m.report)",
+                1,
             ),
         ],
     ),
@@ -81,15 +99,19 @@ const CALLERS: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "crates/mununu-core/src/adapter/sv_verify.rs",
+                // `lift_named` and `lift_with_notes_under`.
                 "lift_notes: lift_clock_notes(&lifted.clock_domains)",
+                2,
             ),
             (
                 "crates/mununu-core/src/adapter/sv_verify.rs",
                 "cdc_lint::cdc_lint(",
+                1,
             ),
             (
                 "crates/mununu-core/src/adapter/cdc_lint.rs",
                 ".extend(clock_root_notes(&report.domains))",
+                1,
             ),
         ],
     ),
@@ -206,9 +228,30 @@ fn callers(sources: &[(String, String)]) -> Vec<String> {
     found
 }
 
-/// Whether the product code of `src` makes the call `call`.
-fn makes_the_call(src: &str, call: &str) -> bool {
-    product_code(src).contains(call)
+/// The entries of the lift in `code` that tell it the wrong thing about the opt-in: the
+/// reporting entry is the one whose callers take the flag; an entry that returns the model
+/// alone refuses the flag, so its default refusal must not offer it.
+fn entries_that_misstate_the_opt_in(code: &str) -> Vec<String> {
+    top_level_fns(code)
+        .into_iter()
+        .filter(|(name, body)| {
+            LIFT_FNS.iter().any(|lift| calls(body, lift) > 0) && !LIFT_FNS.contains(&name.as_str())
+        })
+        .filter(|(name, body)| {
+            let (says, must_not_say) = if name == REPORTING_ENTRY {
+                (OPT_IN_OFFERED, OPT_IN_NOT_OFFERED)
+            } else {
+                (OPT_IN_NOT_OFFERED, OPT_IN_OFFERED)
+            };
+            !body.contains(says) || body.contains(must_not_say)
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// How many times the product code of `src` makes the call `call`.
+fn times_called(src: &str, call: &str) -> usize {
+    product_code(src).matches(call).count()
 }
 
 #[test]
@@ -234,6 +277,14 @@ fn every_lift_that_can_merge_clock_domains_reports_them() {
          does not call `{REFUSAL}`: under the merge opt-in its verdicts would say nothing about \
          the merged clocks. Return the domains (as `{REPORTING_ENTRY}` does) or refuse the opt-in"
     );
+    assert_eq!(
+        entries_that_misstate_the_opt_in(&lift_code),
+        Vec::<String>::new(),
+        "an entry of the SystemVerilog lift tells the lift the wrong thing about the merge \
+         opt-in: `{REPORTING_ENTRY}` passes `{OPT_IN_OFFERED}` (its callers take the flag), \
+         every other entry `{OPT_IN_NOT_OFFERED}` (it refuses the flag, so a default refusal \
+         that offered it would name a fix its caller does not have)"
+    );
 
     // 2. At the callers: each is listed with the calls that report the domains.
     let sources: Vec<(String, String)> = SCANNED
@@ -254,13 +305,15 @@ fn every_lift_that_can_merge_clock_domains_reports_them() {
          merged them, and must put them in its report; list it in CALLERS with the calls that do"
     );
     for (caller, chain) in CALLERS {
-        for (file, call) in *chain {
+        for (file, call, times) in *chain {
             let path = under(&root, &file.split('/').collect::<Vec<_>>());
             let src = std::fs::read_to_string(path).expect("a reporter file");
-            assert!(
-                makes_the_call(&src, call),
-                "{caller} calls `{REPORTING_ENTRY}`, and {file} no longer makes the call `{call}` \
-                 that carries the clock domains into its report"
+            assert_eq!(
+                times_called(&src, call),
+                *times,
+                "{caller} calls `{REPORTING_ENTRY}`, and {file} does not make the call `{call}` \
+                 that carries the clock domains into its report the {times} time(s) listed: a \
+                 lift stopped reporting, or a new one reports and is not counted"
             );
         }
     }
@@ -299,25 +352,26 @@ fn every_pinned_report_of_a_lifting_sv_verb_has_optional_lift_notes() {
 }
 
 /// The scan fails on what it exists to catch (negative control): an entry that lifts and
-/// neither returns the domains nor refuses; a caller the list does not name; and a reporter
-/// that is named — in a definition, in a comment — without being called.
+/// neither returns the domains nor refuses; an entry that offers an opt-in it refuses; a caller
+/// the list does not name; a reporter that is named — in a definition, in a comment — without
+/// being called; and one of two identical reporting calls going away.
 #[test]
 fn a_lift_entry_that_drops_the_domains_and_an_unlisted_caller_are_seen() {
     let lift = "\
-fn run_sv_flatten_btor2(c: &str, y: &YosysOptions) -> R {
-    run_sv_flatten_btor2_with(c, y, None)
+fn run_sv_flatten_btor2(c: &str, y: &YosysOptions, o: MergeOptIn) -> R {
+    run_sv_flatten_btor2_with(c, y, None, o)
 }
-fn run_sv_flatten_btor2_with(c: &str, y: &YosysOptions, k: K) -> R {
-    run_sv_flatten_btor2_concrete(c, y)
+fn run_sv_flatten_btor2_with(c: &str, y: &YosysOptions, k: K, o: MergeOptIn) -> R {
+    run_sv_flatten_btor2_concrete(c, y, o)
 }
-fn run_sv_flatten_btor2_concrete(c: &str, y: &YosysOptions) -> R { todo() }
+fn run_sv_flatten_btor2_concrete(c: &str, y: &YosysOptions, o: MergeOptIn) -> R { todo() }
 pub fn sv_to_btor2(c: &str, y: &YosysOptions) -> Result<String, E> {
     refuse_merge_without_domains(y)?;
-    run_sv_flatten_btor2(c, y).map(|a| a.btor2)
+    run_sv_flatten_btor2(c, y, MergeOptIn::NotOffered).map(|a| a.btor2)
 }
 fn refuse_merge_without_domains(y: &YosysOptions) -> Result<(), E> { Ok(()) }
 pub fn sv_to_btor2_with_blackboxes(c: &str, y: &YosysOptions) -> Result<SvLiftResult, E> {
-    let a = run_sv_flatten_btor2(c, y)?;
+    let a = run_sv_flatten_btor2(c, y, MergeOptIn::Offered)?;
     Ok(SvLiftResult { clock_domains: a.clock_domains })
 }
 ";
@@ -329,12 +383,31 @@ pub fn sv_to_btor2_with_blackboxes(c: &str, y: &YosysOptions) -> Result<SvLiftRe
     let dropped = format!(
         "{lift}pub fn sv_register_names(c: &str, y: &YosysOptions) -> Result<Vec<String>, E> {{\n    \
          // refuse_merge_without_domains(y)?; was here\n    \
-         let a = run_sv_flatten_btor2_with(c, y, None)?;\n    Ok(a.names)\n}}\n"
+         let a = run_sv_flatten_btor2_with(c, y, None, MergeOptIn::NotOffered)?;\n    \
+         Ok(a.names)\n}}\n"
     );
     assert_eq!(
         entries_that_drop_the_domains(&product_code(&dropped)),
         vec!["sv_register_names".to_string()],
         "an entry that lifts through an inner stage and only mentions the refusal in a comment"
+    );
+
+    assert_eq!(
+        entries_that_misstate_the_opt_in(lift),
+        Vec::<String>::new(),
+        "the reporting entry offers the opt-in and the entry that refuses it does not"
+    );
+    let offers_what_it_refuses = lift.replace("MergeOptIn::NotOffered", "MergeOptIn::Offered");
+    assert_eq!(
+        entries_that_misstate_the_opt_in(&offers_what_it_refuses),
+        vec!["sv_to_btor2".to_string()],
+        "an entry that refuses the opt-in and has its default refusal offer it"
+    );
+    let reporter_that_denies = lift.replace("MergeOptIn::Offered", "MergeOptIn::NotOffered");
+    assert_eq!(
+        entries_that_misstate_the_opt_in(&reporter_that_denies),
+        vec!["sv_to_btor2_with_blackboxes".to_string()],
+        "the reporting entry telling its callers the flag is elsewhere"
     );
 
     let product =
@@ -359,13 +432,28 @@ pub fn sv_to_btor2_with_blackboxes(c: &str, y: &YosysOptions) -> Result<SvLiftRe
                             // the notes come from report.notes.extend(clock_root_notes(&report.domains));\n\
                             pub(crate) fn clock_root_notes(d: &[D]) -> Vec<String> { vec![] }\n";
     assert!(named_not_called.contains("clock_root_notes"));
-    assert!(!makes_the_call(
-        named_not_called,
-        ".extend(clock_root_notes(&report.domains))"
-    ));
+    assert_eq!(
+        times_called(
+            named_not_called,
+            ".extend(clock_root_notes(&report.domains))"
+        ),
+        0
+    );
     let called = "fn f() { report.notes.extend(clock_root_notes(&report.domains)); }\n";
-    assert!(makes_the_call(
-        called,
-        ".extend(clock_root_notes(&report.domains))"
-    ));
+    assert_eq!(
+        times_called(called, ".extend(clock_root_notes(&report.domains))"),
+        1
+    );
+
+    // Two lifts with the same reporting call: when one drops its notes the text still occurs,
+    // and only the count says so.
+    let both = "fn lift_named() -> L { L { lift_notes: notes_of(&lifted) } }\n\
+                fn lift_under() -> L { L { lift_notes: notes_of(&lifted) } }\n";
+    let one_dropped = "fn lift_named() -> L { L { lift_notes: Vec::new() } }\n\
+                       fn lift_under() -> L { L { lift_notes: notes_of(&lifted) } }\n";
+    assert_eq!(times_called(both, "lift_notes: notes_of(&lifted)"), 2);
+    assert_eq!(
+        times_called(one_dropped, "lift_notes: notes_of(&lifted)"),
+        1
+    );
 }

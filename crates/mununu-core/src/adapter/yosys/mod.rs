@@ -440,8 +440,9 @@ pub(crate) fn strip_port_net_types(src: &str) -> String {
 fn run_sv_flatten_btor2(
     content: &str,
     yopts: &YosysOptions,
+    opt_in: MergeOptIn,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
-    run_sv_flatten_btor2_with(content, yopts, LiftCache::from_env().as_ref())
+    run_sv_flatten_btor2_with(content, yopts, LiftCache::from_env().as_ref(), opt_in)
 }
 
 /// [`run_sv_flatten_btor2`] against an explicit lift cache (`None` = off) — N0.2. A hit returns
@@ -452,6 +453,7 @@ fn run_sv_flatten_btor2_with(
     content: &str,
     yopts: &YosysOptions,
     cache: Option<&LiftCache>,
+    opt_in: MergeOptIn,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
     let key: Result<Option<LiftCacheKey>, String> = match cache {
         None => Ok(None),
@@ -471,9 +473,9 @@ fn run_sv_flatten_btor2_with(
         && let Some(hit) = c.lookup(k)
     {
         tracing::info!(target: "mununu::lift_cache", index = k.index(), "lift cache hit");
-        return artifacts_from_cached(hit, yopts);
+        return artifacts_from_cached(hit, yopts, opt_in);
     }
-    let mut artifacts = run_sv_flatten_btor2_concrete(content, yopts)?;
+    let mut artifacts = run_sv_flatten_btor2_concrete(content, yopts, opt_in)?;
     artifacts.cache = match &key {
         Ok(None) => LiftCacheOutcome::Off,
         Ok(Some(_)) => LiftCacheOutcome::Miss,
@@ -606,6 +608,7 @@ fn lift_manifest(
 fn artifacts_from_cached(
     hit: CachedLift,
     yopts: &YosysOptions,
+    opt_in: MergeOptIn,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
     let frontend_used = frontend_from_tag(&hit.frontend_used).ok_or_else(|| AdapterError {
         kind: AdapterErrorKind::ParseError,
@@ -621,7 +624,7 @@ fn artifacts_from_cached(
         location: None,
     })?;
     let clock_domains = clock_domains_with_hierarchy(&hit.flat_netlist_json, &hit.hier_json);
-    refuse_merged_clock_domains(&clock_domains, yopts)?;
+    refuse_merged_clock_domains(&clock_domains, yopts, opt_in)?;
     Ok(SvFlattenArtifacts {
         btor2: hit.btor2,
         hier_json: hit.hier_json,
@@ -943,6 +946,7 @@ fn oracle_read_cmds(sources: &[PathBuf], extra_include_dirs: &[PathBuf]) -> Vec<
 fn run_sv_flatten_btor2_concrete(
     content: &str,
     yopts: &YosysOptions,
+    opt_in: MergeOptIn,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
     let yosys = locate_yosys()?;
     let tmp = TempDir::new("mununu-yosys")?;
@@ -1076,7 +1080,7 @@ fn run_sv_flatten_btor2_concrete(
     let flat_netlist_json =
         read_lift_snapshot(&clock_json_path(&plan.btor_path), "flattened netlist")?;
     let clock_domains = clock_domains_with_hierarchy(&flat_netlist_json, &hier_json);
-    refuse_merged_clock_domains(&clock_domains, yopts)?;
+    refuse_merged_clock_domains(&clock_domains, yopts, opt_in)?;
 
     Ok(SvFlattenArtifacts {
         btor2,
@@ -1118,12 +1122,57 @@ fn lift_snapshot_error(path: &Path, what: &str, why: &str) -> AdapterError {
     }
 }
 
+/// Whether the surface behind a lift offers its caller `--merge-clock-domains`. It decides how
+/// the last sentence of a clock refusal starts ([`merge_opt_in_remedy`]): a remedy names a fix
+/// that exists where the refusal is read, or says there is none there (failure-paths rule 5,
+/// mununu#1106).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergeOptIn {
+    /// [`sv_to_btor2_with_blackboxes`]: every verb and route that lifts through it takes the
+    /// flag (API `lift.merge_clock_domains`) and reports the domains.
+    Offered,
+    /// The entries that return the model alone ([`sv_to_btor2`], [`sv_discover_state_cells`],
+    /// [`translate_sv`]): `sv discover`, `sv cegar` on the command line, `POST /translate`
+    /// with `sv-yosys`, `verify project`, `context import`. None of them takes the flag, and
+    /// the entries refuse it ([`refuse_merge_without_domains`]).
+    NotOffered,
+}
+
+/// What a clock refusal says first on a surface that does not take `--merge-clock-domains`
+/// ([`MergeOptIn::NotOffered`]): there is no such fix here, and whose limit that is
+/// (failure-paths rule 5). The sentence naming the verbs that do take the flag follows it.
+pub(crate) const MERGE_NOT_OFFERED_HERE: &str =
+    "this operation has no opt-in to lift the design as it is (a mununu limitation); elsewhere, ";
+
+/// The last sentence of a clock refusal: where the opt-in is. `accepts` is what the flag
+/// accepts and `report` what the report then does. Follows a `; `.
+///
+/// The verbs are written out in the text, not joined from a list, so that the policy tests read
+/// them from the source: `every_flag_a_message_names_is_on_the_verb_that_produced_it` checks
+/// that each verb named here takes the flag, and
+/// `the_clock_refusal_names_every_verb_that_takes_the_merge_flag` that none is left out.
+/// `sv cdc-lint` takes the flag and is not named: the lint reads the clock domains with or
+/// without it, so it never refuses.
+fn merge_opt_in_remedy(opt_in: MergeOptIn, accepts: &str, report: &str) -> String {
+    let here = match opt_in {
+        MergeOptIn::Offered => "",
+        MergeOptIn::NotOffered => MERGE_NOT_OFFERED_HERE,
+    };
+    format!(
+        "{here}`--merge-clock-domains` on `sv verify-auto` / `sv verify-liveness` / \
+         `sv verify-liveness-all` / `sv verify-recoverability` / `sv check-fsm` / `sv lint` / \
+         `sv mutate` (API `lift.merge_clock_domains`) accepts {accepts} explicitly, and the \
+         report then {report}."
+    )
+}
+
 /// The multi-clock refusal: more than one domain is an error unless
 /// [`YosysOptions::merge_clock_domains`] accepts the under-approximation. Applied to a fresh
 /// lift and to a cache hit alike (N0.2), since the cache stores the netlist, not the decision.
 pub(crate) fn refuse_merged_clock_domains(
     domains: &[ClockDomain],
     yopts: &YosysOptions,
+    opt_in: MergeOptIn,
 ) -> Result<(), AdapterError> {
     if yopts.merge_clock_domains {
         // mununu#1181 — the opt-in accepts every shape below, on every verb that takes it: the
@@ -1142,12 +1191,15 @@ pub(crate) fn refuse_merged_clock_domains(
                  gated, divided or muxed clock); the model has one implicit clock that ticks on \
                  every step, so lifting it would ignore the logic that gates or divides the \
                  clock and every verdict could be wrong. Clock domains: {}. Model the gating as \
-                 a clock enable (`if (en) q <= d;` on the root clock); `--merge-clock-domains` \
-                 on the `sv` verbs accepts the lockstep model explicitly, and the report then \
-                 says so in a `clock-domains-merged` note.",
+                 a clock enable (`if (en) q <= d;` on the root clock); {}",
                 d.net,
                 d.derived_from().unwrap_or("logic"),
-                describe_clock_domains(domains)
+                describe_clock_domains(domains),
+                merge_opt_in_remedy(
+                    opt_in,
+                    "the lockstep model",
+                    "says so in a `clock-domains-merged` note"
+                )
             ),
             location: None,
         });
@@ -1166,12 +1218,11 @@ pub(crate) fn refuse_merged_clock_domains(
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
                 "adapter/yosys: {} is {what}; {why}, so no verdict on the {} storage cell(s) it \
-                 clocks would transfer on its own. Clock domains: {}. {remedy}; \
-                 `--merge-clock-domains` on the `sv` verbs accepts the lockstep model \
-                 explicitly, and the report then names the root in a note.",
+                 clocks would transfer on its own. Clock domains: {}. {remedy}; {}",
                 d.subject(),
                 d.cells,
-                describe_clock_domains(domains)
+                describe_clock_domains(domains),
+                merge_opt_in_remedy(opt_in, "the lockstep model", "names the root in a note")
             ),
             location: None,
         });
@@ -1183,11 +1234,14 @@ pub(crate) fn refuse_merged_clock_domains(
                 "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
                  clock, so lifting it would step every domain together and hide every crossing \
                  defect. Run `mununu sv cdc-lint` to classify the crossings, or verify each \
-                 domain on its own; `--merge-clock-domains` on the `sv` verbs accepts that \
-                 under-approximation explicitly, and the report then says so in a \
-                 `clock-domains-merged` note.",
+                 domain on its own; {}",
                 domains.len(),
-                describe_clock_domains(domains)
+                describe_clock_domains(domains),
+                merge_opt_in_remedy(
+                    opt_in,
+                    "that under-approximation",
+                    "says so in a `clock-domains-merged` note"
+                )
             ),
             location: None,
         });
@@ -1309,7 +1363,7 @@ pub fn sv_discover_state_cells(
 ) -> Result<Vec<SvStateCell>, AdapterError> {
     use super::btor2::ast::Node;
     refuse_merge_without_domains(yopts)?;
-    let artifacts = run_sv_flatten_btor2(content, yopts)?;
+    let artifacts = run_sv_flatten_btor2(content, yopts, MergeOptIn::NotOffered)?;
     let file = super::btor2::parser::parse(&artifacts.btor2).map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
         message: format!("adapter/yosys: discover could not parse the BTOR2: {e}"),
@@ -1344,7 +1398,7 @@ pub fn translate_sv(
         hier_json,
         staged_primary,
         ..
-    } = run_sv_flatten_btor2(content, yopts)?;
+    } = run_sv_flatten_btor2(content, yopts, MergeOptIn::NotOffered)?;
 
     // Document B task B1: capture the top module's port directions
     // from the pre-flatten hierarchy snapshot, feed them through the
@@ -1454,7 +1508,7 @@ pub fn translate_sv(
 /// takes the opt-in lifts with [`sv_to_btor2_with_blackboxes`] and reports the domains.
 pub fn sv_to_btor2(content: &str, yopts: &YosysOptions) -> Result<String, AdapterError> {
     refuse_merge_without_domains(yopts)?;
-    run_sv_flatten_btor2(content, yopts).map(|a| a.btor2)
+    run_sv_flatten_btor2(content, yopts, MergeOptIn::NotOffered).map(|a| a.btor2)
 }
 
 /// mununu#1181 — the refusal of every lift entry that returns a model and not its clock domains
@@ -1498,7 +1552,7 @@ pub fn sv_to_btor2_with_blackboxes(
     content: &str,
     yopts: &YosysOptions,
 ) -> Result<SvLiftResult, AdapterError> {
-    let artifacts = run_sv_flatten_btor2(content, yopts)?;
+    let artifacts = run_sv_flatten_btor2(content, yopts, MergeOptIn::Offered)?;
     Ok(SvLiftResult {
         btor2: artifacts.btor2,
         blackboxed_modules: blackboxed_module_names(&artifacts.hier_json),
@@ -4719,7 +4773,8 @@ endmodule
         );
         for domains in [&stub, &cut] {
             assert!(
-                refuse_merged_clock_domains(domains, &YosysOptions::default()).is_err(),
+                refuse_merged_clock_domains(domains, &YosysOptions::default(), MergeOptIn::Offered)
+                    .is_err(),
                 "two domains are still two domains"
             );
             let only_gated: Vec<ClockDomain> = domains
@@ -4727,8 +4782,12 @@ endmodule
                 .filter(|d| d.net == "gclk")
                 .cloned()
                 .collect();
-            let err = refuse_merged_clock_domains(&only_gated, &YosysOptions::default())
-                .expect_err("a free root is refused like a derived clock unless merged");
+            let err = refuse_merged_clock_domains(
+                &only_gated,
+                &YosysOptions::default(),
+                MergeOptIn::Offered,
+            )
+            .expect_err("a free root is refused like a derived clock unless merged");
             assert!(
                 err.message.contains("`gclk`") && err.message.contains("--merge-clock-domains"),
                 "{}",
@@ -4746,7 +4805,7 @@ endmodule
                 merge_clock_domains: true,
                 ..Default::default()
             };
-            refuse_merged_clock_domains(&only_gated, &merged)
+            refuse_merged_clock_domains(&only_gated, &merged, MergeOptIn::Offered)
                 .expect("the opt-in accepts the lockstep model");
         }
     }
@@ -4783,6 +4842,147 @@ endmodule
                 err.message
             );
         }
+    }
+
+    /// One domain per refused shape of the clock scan: every root kind the lift refuses on its
+    /// own, and two input clocks. The match is exhaustive over `ClockRoot`, so a new root kind
+    /// is a compile error here until it has a row.
+    fn every_refused_clock_shape() -> Vec<(&'static str, Vec<ClockDomain>)> {
+        let on = |net: &str, root: ClockRoot| ClockDomain {
+            net: net.into(),
+            posedge: true,
+            cells: 1,
+            root,
+        };
+        let roots = [
+            ClockRoot::Input,
+            ClockRoot::Derived("$and".into()),
+            ClockRoot::Undriven,
+            tied("0", "q"),
+            ClockRoot::BlackBox("pll".into()),
+            port_of(&["pad"]),
+            several(&["$and", "osc"]),
+            ClockRoot::Cut,
+        ];
+        let mut shapes = vec![(
+            "two input clocks",
+            vec![on("clk_a", ClockRoot::Input), on("clk_b", ClockRoot::Input)],
+        )];
+        for root in roots {
+            let name = match &root {
+                // One input clock is the shape that lifts: no row.
+                ClockRoot::Input => continue,
+                ClockRoot::Derived(_) => "a derived clock",
+                ClockRoot::Undriven => "an undriven clock",
+                ClockRoot::Constant { .. } => "a constant clock",
+                ClockRoot::BlackBox(_) => "a black box's output",
+                ClockRoot::BlackBoxPort(_) => "a port of a black box",
+                ClockRoot::MultiDriven(_) => "several drivers",
+                ClockRoot::Cut => "a cut net",
+            };
+            shapes.push((name, vec![on("pclk", root)]));
+        }
+        shapes
+    }
+
+    /// mununu#1181 — a clock refusal names the opt-in in the terms of the surface that reads it
+    /// (failure-paths rule 5). Every refused shape, on both kinds of entry: behind a verb that
+    /// takes the flag the last sentence names the flag, the verbs it is on and its API field;
+    /// behind an entry that returns the model alone (`sv discover`, `sv cegar` on the command
+    /// line, `/translate`, `verify project`, `context import`), which has no such flag, it says
+    /// first that this operation has none, and nothing else differs. Which verbs the sentence
+    /// names is checked against the verbs' definitions by the policy tests
+    /// `every_flag_a_message_names_is_on_the_verb_that_produced_it` (each one takes the flag)
+    /// and `the_clock_refusal_names_every_verb_that_takes_the_merge_flag` (none is left out).
+    #[test]
+    fn x1181_a_clock_refusal_names_the_opt_in_where_the_caller_can_take_it() {
+        let shapes = every_refused_clock_shape();
+        assert_eq!(shapes.len(), 8, "two input clocks and seven refused roots");
+        for (shape, domains) in shapes {
+            let refusal = |opt_in| {
+                refuse_merged_clock_domains(&domains, &YosysOptions::default(), opt_in)
+                    .err()
+                    .unwrap_or_else(|| panic!("{shape}: lifted without the opt-in"))
+                    .message
+            };
+            let offered = refusal(MergeOptIn::Offered);
+            let not_offered = refusal(MergeOptIn::NotOffered);
+            for message in [&offered, &not_offered] {
+                assert!(
+                    message.contains("`--merge-clock-domains`")
+                        && message.contains("`lift.merge_clock_domains`"),
+                    "{shape}: {message}"
+                );
+            }
+            assert!(
+                !offered.contains(MERGE_NOT_OFFERED_HERE),
+                "{shape}: a verb that takes the flag was told it has no opt-in: {offered}"
+            );
+            assert_eq!(
+                not_offered.matches(MERGE_NOT_OFFERED_HERE).count(),
+                1,
+                "{shape}: a surface without the flag is told so, once: {not_offered}"
+            );
+            // The two differ in that clause alone: what is wrong, the design-side remedy and
+            // where the flag is do not depend on who asked.
+            assert_eq!(
+                not_offered.replace(MERGE_NOT_OFFERED_HERE, ""),
+                offered,
+                "{shape}"
+            );
+            let merged = YosysOptions {
+                merge_clock_domains: true,
+                ..Default::default()
+            };
+            refuse_merged_clock_domains(&domains, &merged, MergeOptIn::Offered)
+                .unwrap_or_else(|e| panic!("{shape}: refused under the opt-in: {}", e.message));
+        }
+    }
+
+    /// mununu#1181 — the same through the real entries: each of the three that return the model
+    /// alone refuses a two-clock design saying this operation has no opt-in, and the entry the
+    /// verbs lift through does not say so. Pins which entry passes which [`MergeOptIn`]. Needs
+    /// yosys ⇒ mununu-sva image.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_x1181_a_model_only_lift_says_it_has_no_merge_opt_in() {
+        const TWO_CLOCKS: &str = "\
+module cdc (input logic clk_src, input logic clk_dst, input logic d, output logic q);
+  logic a, b;
+  always_ff @(posedge clk_src) a <= d;
+  always_ff @(posedge clk_dst) b <= a;
+  always_ff @(posedge clk_dst) q <= b;
+endmodule
+";
+        let yopts = YosysOptions::default();
+        let model_only = [
+            ("sv_to_btor2", sv_to_btor2(TWO_CLOCKS, &yopts).err()),
+            (
+                "sv_discover_state_cells",
+                sv_discover_state_cells(TWO_CLOCKS, &yopts).err(),
+            ),
+            (
+                "translate_sv",
+                translate_sv(TWO_CLOCKS, &AdapterOptions::default(), &yopts).err(),
+            ),
+        ];
+        for (entry, err) in model_only {
+            let message = err
+                .unwrap_or_else(|| panic!("{entry} lifted two clock domains as one"))
+                .message;
+            assert!(message.contains("2 clock domains"), "{entry}: {message}");
+            assert!(
+                message.contains(MERGE_NOT_OFFERED_HERE)
+                    && message.contains("`--merge-clock-domains`"),
+                "{entry} has no merge flag and does not say so: {message}"
+            );
+        }
+        let reporting = sv_to_btor2_with_blackboxes(TWO_CLOCKS, &yopts)
+            .err()
+            .expect("refused without the opt-in")
+            .message;
+        assert!(reporting.contains("`--merge-clock-domains`"), "{reporting}");
+        assert!(!reporting.contains(MERGE_NOT_OFFERED_HERE), "{reporting}");
     }
 
     /// mununu#1148 / mununu#1180 — every kind of root the walk returns, on one hand netlist: an
@@ -4978,8 +5178,9 @@ endmodule
             .filter(|d| d.net == "1'b0")
             .cloned()
             .collect();
-        let err = refuse_merged_clock_domains(&tied_only, &YosysOptions::default())
-            .expect_err("a clock that never ticks is not the model's clock");
+        let err =
+            refuse_merged_clock_domains(&tied_only, &YosysOptions::default(), MergeOptIn::Offered)
+                .expect_err("a clock that never ticks is not the model's clock");
         assert!(
             err.message.contains("constant 0") && err.message.contains("`q`"),
             "{}",
@@ -5130,7 +5331,7 @@ endmodule
             assert_eq!(domains.len(), 1, "{what}: {text}");
             assert_eq!(domains[0].root, ClockRoot::Input, "{what}: {text}");
             assert_eq!(domains[0].cells, 2, "{what}: {text}");
-            refuse_merged_clock_domains(&domains, &YosysOptions::default())
+            refuse_merged_clock_domains(&domains, &YosysOptions::default(), MergeOptIn::Offered)
                 .unwrap_or_else(|e| panic!("{what}: an input clock lifts: {}", e.message));
         }
     }
@@ -5154,7 +5355,7 @@ endmodule
             ..Default::default()
         };
         let root_on_a_hit = |hier: &str| {
-            let artifacts = artifacts_from_cached(hit(hier), &reported)
+            let artifacts = artifacts_from_cached(hit(hier), &reported, MergeOptIn::Offered)
                 .unwrap_or_else(|e| panic!("the opt-in lifts a hit: {}", e.message));
             assert_eq!(artifacts.cache, LiftCacheOutcome::Hit);
             artifacts
@@ -5169,8 +5370,12 @@ endmodule
         );
         assert_eq!(root_on_a_hit(""), Some(port_of(&["pll"])));
         assert!(
-            artifacts_from_cached(hit(PARAMETRISED_STUB_HIERARCHY), &YosysOptions::default())
-                .is_err(),
+            artifacts_from_cached(
+                hit(PARAMETRISED_STUB_HIERARCHY),
+                &YosysOptions::default(),
+                MergeOptIn::Offered,
+            )
+            .is_err(),
             "a hit is refused by default as a fresh lift is"
         );
     }
@@ -5276,14 +5481,17 @@ endmodule
             }];
             assert!(domains[0].is_free_source(), "{root:?}");
             assert_eq!(domains[0].derived_from(), None, "{root:?}");
-            let err = refuse_merged_clock_domains(&domains, &YosysOptions::default())
-                .expect_err("refused by default");
+            let err = refuse_merged_clock_domains(
+                &domains,
+                &YosysOptions::default(),
+                MergeOptIn::Offered,
+            )
+            .expect_err("refused by default");
             for needle in needles {
                 assert!(err.message.contains(needle), "{needle}: {}", err.message);
             }
             assert!(
-                err.message
-                    .contains("`--merge-clock-domains` on the `sv` verbs accepts the lockstep"),
+                err.message.contains("`--merge-clock-domains`"),
                 "{}",
                 err.message
             );
@@ -5291,7 +5499,7 @@ endmodule
                 merge_clock_domains: true,
                 ..Default::default()
             };
-            refuse_merged_clock_domains(&domains, &merged)
+            refuse_merged_clock_domains(&domains, &merged, MergeOptIn::Offered)
                 .expect("the opt-in accepts the lockstep model");
         }
     }
@@ -5477,7 +5685,9 @@ endmodule
             cells: 2,
             root: ClockRoot::Derived("$and".into()),
         }];
-        let Err(e) = refuse_merged_clock_domains(&gated, &YosysOptions::default()) else {
+        let Err(e) =
+            refuse_merged_clock_domains(&gated, &YosysOptions::default(), MergeOptIn::Offered)
+        else {
             panic!("a lone gated clock must not lift as the model's clock");
         };
         assert!(
@@ -5491,12 +5701,15 @@ endmodule
             merge_clock_domains: true,
             ..Default::default()
         };
-        assert!(refuse_merged_clock_domains(&gated, &merged).is_ok());
+        assert!(refuse_merged_clock_domains(&gated, &merged, MergeOptIn::Offered).is_ok());
         let rooted = vec![ClockDomain {
             root: ClockRoot::Input,
             ..gated[0].clone()
         }];
-        assert!(refuse_merged_clock_domains(&rooted, &YosysOptions::default()).is_ok());
+        assert!(
+            refuse_merged_clock_domains(&rooted, &YosysOptions::default(), MergeOptIn::Offered)
+                .is_ok()
+        );
     }
 
     /// Roadmap B2 end to end: every flop on `gclk = clk & en` used to lift with `next(c) = c + 1`
@@ -7668,7 +7881,9 @@ mod lift_cache_tests {
             top: Some("m".into()),
             ..Default::default()
         };
-        let Err(err) = run_sv_flatten_btor2_with("module m; endmodule\n", &yopts, None) else {
+        let Err(err) =
+            run_sv_flatten_btor2_with("module m; endmodule\n", &yopts, None, MergeOptIn::Offered)
+        else {
             panic!("a lift with no snapshots is refused");
         };
         assert!(err.message.contains("snapshot"), "{}", err.message);
@@ -7818,9 +8033,11 @@ mod lift_cache_tests {
             top: Some("m".into()),
             ..Default::default()
         };
-        let first = run_sv_flatten_btor2_with(src, &yopts, Some(&cache)).expect("lifts");
+        let first = run_sv_flatten_btor2_with(src, &yopts, Some(&cache), MergeOptIn::Offered)
+            .expect("lifts");
         assert_eq!(first.cache, LiftCacheOutcome::Miss);
-        let second = run_sv_flatten_btor2_with(src, &yopts, Some(&cache)).expect("lifts");
+        let second = run_sv_flatten_btor2_with(src, &yopts, Some(&cache), MergeOptIn::Offered)
+            .expect("lifts");
         assert_eq!(second.cache, LiftCacheOutcome::Hit);
         assert_eq!(second.btor2, first.btor2);
         assert_eq!(second.hier_json, first.hier_json);
@@ -7832,16 +8049,18 @@ mod lift_cache_tests {
         // the staging directory, which is why this compared modulo it until 2026-11-04), so an
         // uncached lift and a hit are byte-identical; what tells them apart is `cache`.
         let changed = src.replace("q <= d", "q <= ~d");
-        let third = run_sv_flatten_btor2_with(&changed, &yopts, Some(&cache)).expect("lifts");
+        let third = run_sv_flatten_btor2_with(&changed, &yopts, Some(&cache), MergeOptIn::Offered)
+            .expect("lifts");
         assert_eq!(third.cache, LiftCacheOutcome::Miss);
         assert_ne!(third.btor2, first.btor2);
-        let off = run_sv_flatten_btor2_with(src, &yopts, None).expect("lifts");
+        let off = run_sv_flatten_btor2_with(src, &yopts, None, MergeOptIn::Offered).expect("lifts");
         assert_eq!(off.cache, LiftCacheOutcome::Off);
         assert_eq!(off.btor2, first.btor2);
         // An unusable cache directory is a bypass, never a failure.
         std::fs::write(dir.path().join("file"), b"").expect("write");
         let blocked = LiftCache::at(dir.path().join("file"));
-        let bypassed = run_sv_flatten_btor2_with(src, &yopts, Some(&blocked)).expect("lifts");
+        let bypassed = run_sv_flatten_btor2_with(src, &yopts, Some(&blocked), MergeOptIn::Offered)
+            .expect("lifts");
         assert!(
             matches!(bypassed.cache, LiftCacheOutcome::Miss),
             "a store failure is logged, the lift is a miss: {:?}",
