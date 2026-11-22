@@ -626,21 +626,29 @@ fn outcome_verdict(o: &VerifyOutcome) -> LedgerVerdict {
 
 /// The monotone-refinement check. Returns `Some(new_definite)` when a recorded `⊥`
 /// flipped UP to a definite verdict (an improvement to record in the ledger); panics
-/// on any lattice violation (a definite verdict that flipped or regressed).
+/// on any lattice violation (a definite verdict that flipped or regressed). `detail` is the
+/// report's own reason for a `⊥` ([`outcome_detail`]; empty for a definite verdict): the
+/// message carries it, so a row that fell to `⊥` says why in the sweep's log (mununu#1192).
 #[must_use]
 fn assert_monotone(
     design: &str,
     property: &str,
     recorded: LedgerVerdict,
     current: LedgerVerdict,
+    detail: &str,
 ) -> Option<LedgerVerdict> {
     match recorded {
         LedgerVerdict::True | LedgerVerdict::False => {
+            let why = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" The report's reason: {detail}")
+            };
             assert_eq!(
                 current, recorded,
                 "MONOTONE VIOLATION: {design}.{property} recorded definite {recorded:?} but is now \
                  {current:?} — a definite verdict must be preserved exactly (a True↔False flip is a \
-                 soundness bug; a definite→⊥ is a precision regression)."
+                 soundness bug; a definite→⊥ is a precision regression).{why}"
             );
             None
         }
@@ -989,31 +997,92 @@ fn run_corpus_verdicts(
             (
                 *needle,
                 outcome_verdict(&prop.outcome),
-                outcome_detail(&prop.outcome),
+                outcome_detail(&prop.outcome, prop.bottom_reason.as_ref()),
             )
         })
         .collect()
 }
 
 /// A one-line cause for a non-definite outcome (empty for a definite Holds/Violated) — the
-/// "why is this ⊥" the census surfaces so the mitigation path is actionable.
-fn outcome_detail(o: &VerifyOutcome) -> String {
+/// "why is this ⊥" the census and the ledger's failure message surface so the mitigation path
+/// is actionable. An `Unknown` carries the report's `bottom_reason` when it has one: the cell
+/// count alone read "Unknown (0 cells)" for a verdict withheld over a missing module
+/// (mununu#1192).
+fn outcome_detail(
+    o: &VerifyOutcome,
+    reason: Option<&mununu_core::adapter::slang::verify_auto::BottomReason>,
+) -> String {
     match o {
         VerifyOutcome::Holds | VerifyOutcome::Violated { .. } => String::new(),
-        VerifyOutcome::Unknown { unknown_cells } => format!("Unknown ({unknown_cells} cells)"),
+        VerifyOutcome::Unknown { unknown_cells } => match reason {
+            Some(r) => format!(
+                "Unknown ({unknown_cells} cells) — {}: {}",
+                r.tag(),
+                r.one_line()
+            ),
+            None => format!("Unknown ({unknown_cells} cells)"),
+        },
         VerifyOutcome::Skipped { reason } => format!("Skipped: {reason}"),
     }
+}
+
+/// mununu#1192 — a recorded definite verdict that falls to `⊥` fails with the report's reason
+/// in the message, and an `Unknown` with a `bottom_reason` renders its tag and its remedy.
+/// Pure (no lift), so it runs on every host: the ledger itself runs only in the image, and a
+/// failure there has to be readable from the sweep's log alone.
+#[test]
+fn x1192_a_ledger_row_that_falls_to_bottom_says_why() {
+    use mununu_core::adapter::slang::verify_auto::BottomReason;
+    let reason = BottomReason::ExistentialHoldsOverFreeLeaves {
+        leaves: vec!["input_31".to_string(), "input_45".to_string()],
+    };
+    let detail = outcome_detail(&VerifyOutcome::Unknown { unknown_cells: 0 }, Some(&reason));
+    // The tag and the report's own sentence, whatever its words are; the nets are data.
+    assert!(
+        detail.contains(reason.tag())
+            && detail.contains(&reason.one_line())
+            && detail.contains("input_31, input_45"),
+        "{detail}"
+    );
+    assert_eq!(
+        outcome_detail(&VerifyOutcome::Unknown { unknown_cells: 3 }, None),
+        "Unknown (3 cells)"
+    );
+    assert_eq!(outcome_detail(&VerifyOutcome::Holds, Some(&reason)), "");
+    let failure = std::panic::catch_unwind(|| {
+        let _ = assert_monotone(
+            "usbdev_linkstate",
+            "(link_state_q == 0)",
+            LedgerVerdict::True,
+            LedgerVerdict::Indefinite,
+            &detail,
+        );
+    })
+    .expect_err("a recorded True that is now ⊥ is a violation");
+    let message = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("usbdev_linkstate.(link_state_q == 0)") && message.contains(&detail),
+        "{message}"
+    );
+    // A definite row that kept its verdict has no reason to print, and none is invented.
+    assert_eq!(
+        assert_monotone("d", "p", LedgerVerdict::True, LedgerVerdict::True, ""),
+        None
+    );
 }
 
 /// Run one corpus design and enforce the monotone ledger on every recorded property.
 /// Returns the list of ⊥→definite improvements (empty in steady state).
 fn check_corpus_design(d: &CorpusDesign) -> Vec<(String, LedgerVerdict)> {
     let mut improvements = Vec::new();
-    for ((needle, current, _), (_, recorded)) in run_corpus_verdicts(d, Engine::ExactSymbolic)
+    for ((needle, current, detail), (_, recorded)) in run_corpus_verdicts(d, Engine::ExactSymbolic)
         .into_iter()
         .zip(d.ledger)
     {
-        if let Some(up) = assert_monotone(d.name, needle, *recorded, current) {
+        if let Some(up) = assert_monotone(d.name, needle, *recorded, current, &detail) {
             improvements.push((format!("{}.{needle}", d.name), up));
         }
     }
@@ -1262,18 +1331,23 @@ const CORPUS: &[CorpusDesign] = &[
         ledger: &[("(state_q == 0)", LedgerVerdict::True)],
     },
     // usbdev_linkstate — 6-state USB link FSM (LinkDisconnected=0). AG EF LinkDisconnected —
-    // HOLDS via COI (the link is always disconnectable; the 12-bit timers are pruned).
+    // HOLDS (the link is always disconnectable).
     CorpusDesign {
         name: "usbdev_linkstate",
         dir: "dc_opentitan_usbdev_linkstate",
-        // `prim_filter.sv` is an EMPTY-module stub (ports, no body, no `(* blackbox *)`): its
-        // output stays undriven — the free input `read_verilog` left for the module this entry
-        // never carried — since sv-elab refuses an undefined module (2026-11-04)
+        // mununu#1192 — `prim_filter.sv` is the upstream module, byte-exact from the entry's
+        // pinned commit (the design instantiates it with `AsyncOn = 0`, so it pulls in nothing
+        // else). Until 2026-11-22 it was a ports-only `(* mununu_missing_module *)` stub whose
+        // two outputs were free at every cycle, and the recorded True was an `AG EF` HOLDS
+        // over those free leaves — the verdict mununu#1126 withholds
+        // (`existential-holds-over-free-leaves`), since "reachable" may rest on a run the real
+        // filter never produces. With the real filter the cone reads no undriven net and the
+        // exact engine (full-state ROBDD) decides HOLDS on a model the verdict transfers from.
         files: &["usbdev_linkstate.sv", "prim_assert.sv", "prim_filter.sv"],
         top: "usbdev_linkstate",
         annotations: &["nu Y. ((mu X. ((link_state_q == 0) or <> X)) and [] Y)"], // LinkDisconnected = 0
         config: &[("rst_ni", 1)],
-        ledger: &[("(link_state_q == 0)", LedgerVerdict::True)], // HOLDS via COI (link always disconnectable)
+        ledger: &[("(link_state_q == 0)", LedgerVerdict::True)], // HOLDS; the cone reads no undriven net
     },
     // aes_cipher_control_fsm — 7-state AES cipher-core FSM (CIPHER_CTRL_IDLE=6'b001001=9).
     // AG EF CIPHER_CTRL_IDLE — VIOLATED via COI (the aes_reg_pkg datapath is pruned).
