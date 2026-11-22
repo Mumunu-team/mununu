@@ -1,6 +1,6 @@
 # Consumer briefing — the k-liveness proof fallback for response liveness (Track V, 2026-11)
 
-> Source of truth: [`response_kliveness`](../../crates/mununu-core/src/adapter/liveness_rescue.rs#L603), [`emit_response_kliveness_monitor`](../../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L124), [`undecided_notes`](../../crates/mununu-core/src/adapter/liveness_rescue.rs#L573) — surface: CLI+API (`btor2 verify-liveness` with `--request/--grant`, `--fairness` or `--response`; `sv verify-liveness`; `POST /api/v1/btor2/verify-liveness` and `POST /api/v1/sv/verify-liveness` in their response forms).
+> Source of truth: [`response_kliveness`](../../crates/mununu-core/src/adapter/liveness_rescue.rs#L612), [`emit_response_kliveness_monitor`](../../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L124), [`member_notes`](../../crates/mununu-core/src/adapter/liveness_rescue.rs#L579) (`undecided_notes` until mununu#1175) — surface: CLI+API (`btor2 verify-liveness` with `--request/--grant`, `--fairness` or `--response`; `sv verify-liveness`; `POST /api/v1/btor2/verify-liveness` and `POST /api/v1/sv/verify-liveness` in their response forms).
 
 > **Audience:** anyone calling the response-liveness verbs (`AG(request → AF grant)`, with or without `GF` fairness, or a conjunction of responses) on the CLI or the HTTP API.
 >

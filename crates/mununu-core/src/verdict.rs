@@ -154,6 +154,11 @@ pub struct DiscoveredAssumption {
     pub non_vacuous: bool,
     /// The engine that discovered it, for provenance.
     pub engine: String,
+    /// mununu#1175 — what the reader should know about the non-vacuity gate's own evidence: one
+    /// line per reach-portfolio member whose path (to the target, or out of it) the concrete
+    /// simulator did not confirm. Absent when every path was confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl PropertyVerdict {
@@ -235,6 +240,7 @@ mod tests {
                 kind: AssumptionKind::ResetEventually,
                 non_vacuous: true,
                 engine: "native-bmc".into(),
+                notes: Vec::new(),
             }],
             bot_diagnosis: None,
         };

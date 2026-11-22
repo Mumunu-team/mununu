@@ -43,7 +43,7 @@ directory is named after.
 | `examples/verify/dc_opentitan_prim_fifo_sync/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 6 Apache-2.0 files; 1 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
 | `examples/verify/dc_opentitan_prim_packer_fifo/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 1 Apache-2.0 files; 1 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
 | `examples/verify/dc_opentitan_rom_ctrl_fsm/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 12 Apache-2.0 files (1 local lift-only variants, listed in the pin file); 1 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
-| `examples/verify/dc_opentitan_usbdev_linkstate/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 1 Apache-2.0 files; 2 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
+| `examples/verify/dc_opentitan_usbdev_linkstate/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 2 Apache-2.0 files; 1 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
 | `examples/verify/ip_opentitan_csrng/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 68 Apache-2.0 files (4 local lift-only variants, listed in the pin file); 4 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
 | `examples/verify/ip_opentitan_edn/source` | lowRISC/opentitan | `558921ccc8ae` | Apache-2.0 | 60 Apache-2.0 files (4 local lift-only variants, listed in the pin file); 4 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
 | `examples/verify/m0_opentitan_prim_arbiter/source` | lowRISC/opentitan | `d71121d8452f` | Apache-2.0 | 7 Apache-2.0 files; 1 first-party (stubs, sidecars) | `UPSTREAM_COMMIT.txt` |
