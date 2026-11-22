@@ -2457,7 +2457,9 @@ struct SvVerifyAutoArgs {
     #[arg(long = "emit-testbench", value_name = "DIR")]
     emit_testbench: Option<PathBuf>,
     /// The clock port the replay testbench toggles (default: the first of `clk`, `clk_i`,
-    /// `clock`, `i_clk`, `aclk`, `clk_sys` the primary source declares).
+    /// `clock`, `i_clk`, `aclk`, `clk_sys` the primary source declares). A port name is a
+    /// letter or `_`, then letters, digits and `_`; with another value no testbench is written
+    /// and each row says why.
     #[arg(long = "tb-clock", value_name = "PORT", requires = "emit_testbench")]
     tb_clock: Option<String>,
     /// With `--emit-testbench`: build and run each testbench under Verilator (`make`, then
@@ -10318,7 +10320,8 @@ fn emit_replay_testbenches(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
 ) -> Result<std::collections::BTreeMap<String, CliReplayRow>, String> {
     use mununu_core::adapter::verilator::replay::{
-        ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save, has_path, run_replay,
+        BenchRemedies, ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save,
+        has_path, run_replay,
     };
     let mut emitted = std::collections::BTreeMap::new();
     let clock = match &args.tb_clock {
@@ -10363,12 +10366,15 @@ fn emit_replay_testbenches(
     };
     // mununu#1176 — whether a bench can be generated at all depends on the design's names, not
     // on a trace: asked once, and told on every row that has a path to replay. The lift stages
-    // the sources under names of its own, so a design under `my project/` gets this far.
+    // the sources under names of its own, so a design under `my project/` gets this far. The
+    // clock is `--tb-clock`'s own value whenever it is outside a port name (the names the
+    // search above tries are all inside it).
     let refusal = bench_refusal(&design).map(|r| {
-        r.message(
-            "copy the sources under a path with only those characters and run again (a link \
-             is not enough: the path is resolved before it is written)",
-        )
+        r.message(&BenchRemedies {
+            sources: "copy the sources under a path with only those characters and run again \
+                      (a link is not enough: the path is resolved before it is written)",
+            clock: "pass `--tb-clock` the name of the top module's clock port",
+        })
     });
     // Verilator's own build refuses a directory whose path has whitespace. The files are
     // written either way; under `--replay` the row says why the bench did not run and what to

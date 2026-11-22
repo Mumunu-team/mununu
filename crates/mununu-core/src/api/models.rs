@@ -2413,7 +2413,9 @@ pub struct SvVerifyAutoRequest {
     #[serde(default)]
     pub emit_testbench: bool,
     /// The clock port the testbench toggles (default: the first of `clk`, `clk_i`, `clock`,
-    /// `i_clk`, `aclk`, `clk_sys` the source declares).
+    /// `i_clk`, `aclk`, `clk_sys` the source declares). A port name is a letter or `_`, then
+    /// letters, digits and `_`; with another value no testbench is generated and each row says
+    /// why (`trace.replay.not_generated`).
     #[serde(default)]
     pub tb_clock: Option<String>,
     /// Build and run each replay testbench under Verilator on the server (`make`, then `make
