@@ -37,7 +37,7 @@ alternative-engine path (Phase B).
 
 ### 1.1 Pipeline shape
 
-> Source of truth: [`crates/mununu-core/src/verify/orchestrator.rs`](../../crates/mununu-core/src/verify/orchestrator.rs#L79) — surface: CLI+API
+> Source of truth: [`crates/mununu-core/src/verify/orchestrator.rs`](../../crates/mununu-core/src/verify/orchestrator.rs#L78) — surface: CLI+API
 
 The current pipeline is:
 
@@ -53,14 +53,14 @@ verdict ◀── │ mu-calculus eval │◀───│ composed Clts    │�
             └──────────────────┘    └──────────────────┘    └────────────────┘
 ```
 
-`verify_project()` (orchestrator.rs#L79) consumes `verify.toml`,
+`verify_project()` (orchestrator.rs#L78) consumes `verify.toml`,
 dispatches per-`[[sources]]` adapter, applies alphabet bindings, assembles
 a unified CTXDSL string, parses it, realizes it into a `Context`, then
 evaluates each `[[properties]]` entry.
 
 ### 1.2 Adapters
 
-> Source of truth: [`crates/mununu-core/src/adapter/mod.rs`](../../crates/mununu-core/src/adapter/mod.rs#L62) — surface: CLI+API+UI
+> Source of truth: [`crates/mununu-core/src/adapter/mod.rs`](../../crates/mununu-core/src/adapter/mod.rs#L227) — surface: CLI+API+UI
 
 mununu ships eleven adapters that all implement `FormatAdapter`:
 
@@ -101,7 +101,7 @@ value, and an optional `value_map`. `SignalAbstraction::Discover` (the
 sidecar's sixth pseudo-variant) is *not* an `AbstractionType` — it is a
 *directive* that gets resolved into `EnumValues` once `discovered_values`
 is populated by either SMT discovery or hand-edit; the resolver is at
-[`adapter/sidecar/mod.rs:130`](../../crates/mununu-core/src/adapter/sidecar/mod.rs#L130).
+[`adapter/sidecar/mod.rs:138`](../../crates/mununu-core/src/adapter/sidecar/mod.rs#L138).
 
 ### 1.4 State enumeration
 
@@ -116,7 +116,7 @@ bit-blaster use it. BTOR2 caps: `MAX_STATE_BITS=20`,
 
 ### 1.5 Sidecar schema
 
-> Source of truth: [`crates/mununu-core/src/adapter/systemverilog/annotation.rs`](../../crates/mununu-core/src/adapter/systemverilog/annotation.rs#L30) — surface: CLI+API
+> Source of truth: [`crates/mununu-core/src/adapter/systemverilog/annotation.rs`](../../crates/mununu-core/src/adapter/systemverilog/annotation.rs#L31) — surface: CLI+API
 
 `SvAnnotation` (`mununu_sv_annotation_v1`) carries:
 
@@ -148,32 +148,32 @@ discovery for the `sv-yosys` flow.)
 
 ### 1.7 Mu-calculus
 
-> Source of truth: [`crates/mununu-core/src/mu_calculus/mod.rs`](../../crates/mununu-core/src/mu_calculus/mod.rs#L264) — surface: CLI+API
+> Source of truth: [`crates/mununu-core/src/mu_calculus/mod.rs`](../../crates/mununu-core/src/mu_calculus/mod.rs#L440) — surface: CLI+API
 
 The `Node` enum carries `True | False | Predicate | Variable | Not |
 And | Or | Modal | Mu | Nu`. The `Guard { labels, current, next,
-control, max_steps }` (mu_calculus/mod.rs#L323) constrains modalities
+control, max_steps }` (mu_calculus/mod.rs#L537) constrains modalities
 across five axes; `Control` is `All | Controllable | Environment`.
 The evaluator at
-[`mu_calculus/evaluator.rs`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L348)
+[`mu_calculus/evaluator.rs`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L729)
 operates on the composed `Clts` and returns a `BitVec` per fixpoint
 variable, with `IterationRanks` for signature-based controller
 extraction.
 
 ### 1.8 Composition
 
-> Source of truth: [`crates/mununu-core/src/composition/mod.rs`](../../crates/mununu-core/src/composition/mod.rs#L389) — surface: CLI+API
+> Source of truth: [`crates/mununu-core/src/composition/mod.rs`](../../crates/mununu-core/src/composition/mod.rs#L535) — surface: CLI+API
 
 `CompositionSemantics { Synchronous | Asynchronous | Superset }` and
-`compose(left, right, options)` (composition/mod.rs#L440) produce a
+`compose(left, right, options)` (composition/mod.rs#L647) produce a
 BFS-reachable product CLTS. The realize pipeline at
-[`context_dsl/realize.rs:compose_and_register`](../../crates/mununu-core/src/context_dsl/realize.rs#L1180)
+[`context_dsl/realize.rs:compose_and_register`](../../crates/mununu-core/src/context_dsl/realize.rs#L1379)
 chains composition operations declared in the CTXDSL `compositions {}`
 block.
 
 ### 1.9 Property templates
 
-> Source of truth: [`crates/mununu-core/src/adapter/templates/mod.rs`](../../crates/mununu-core/src/adapter/templates/mod.rs#L210) — surface: CLI (`mununu templates`) + API (`/api/templates`)
+> Source of truth: [`crates/mununu-core/src/adapter/templates/mod.rs`](../../crates/mununu-core/src/adapter/templates/mod.rs#L308) — surface: CLI (`mununu templates`) + API (`/api/templates`)
 
 `TemplateRegistry::builtin()` ships ~15 universal templates
 (`no_deadlock`, `reachable`, `never`, `always_eventually`, `bounded`,
@@ -184,9 +184,9 @@ instantiated via `TemplateRegistry::instantiate(&TemplateRef)`.
 
 ### 1.10 Verify orchestrator
 
-> Source of truth: [`crates/mununu-core/src/verify/orchestrator.rs`](../../crates/mununu-core/src/verify/orchestrator.rs#L79) — surface: CLI (`mununu verify`)
+> Source of truth: [`crates/mununu-core/src/verify/orchestrator.rs`](../../crates/mununu-core/src/verify/orchestrator.rs#L78) — surface: CLI (`mununu verify`)
 
-`VerifyConfig` (config.rs#L70): `[project]`, `[[sources]]`,
+`VerifyConfig` (config.rs#L71): `[project]`, `[[sources]]`,
 `[alphabet { direct | renamings | register_map }]`, `[composition]`,
 `[[properties]]`. Alphabet bindings rewrite labels across composed
 sources via word-boundary textual substitution
@@ -388,7 +388,7 @@ cross-product enumerator at
 and the realize pipeline at
 [`context_dsl/realize.rs:realize_context`](../../crates/mununu-core/src/context_dsl/realize.rs#L1464)
 remain the load-bearing primitives. A new `verify::refine` module wraps
-[`verify::orchestrator::verify_project`](../../crates/mununu-core/src/verify/orchestrator.rs#L79)
+[`verify::orchestrator::verify_project`](../../crates/mununu-core/src/verify/orchestrator.rs#L78)
 in a CEGAR driver:
 
 ```rust
@@ -466,7 +466,7 @@ the FMCAD 2023 propagation rule is not.
 **AVR's full refinement loop (Goel–Sakallah NFM 2019, #6).** AVR refines
 predicates *inside* an IC3 inductive proof. mununu has no inductive
 prover; the mu-calculus evaluator
-([`evaluator.rs:348`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L348))
+([`evaluator.rs:729`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L729))
 is a fixpoint over the materialised graph. Borrow Stage 3's *syntactic
 seed* (the SyGuS sub-term collection is theory-agnostic) but drive
 refinement from mu-calculus counterexample traces, not from IC3 frame
@@ -606,7 +606,7 @@ A.4 measurement.
 
 Phase B's IC3-IA verdict comes back as `holds` / `fails-with-cex` /
 `unknown`. mununu's controller synthesis
-([`context/mod.rs:ControllerMode`](../../crates/mununu-core/src/context/mod.rs#L1293))
+([`context/mod.rs:ControllerMode`](../../crates/mununu-core/src/context/mod.rs#L1319))
 operates on a CLTS; an IC3-IA verdict gives a witness trace, not a
 plant model. **Tentative plan.** If verdict is `holds`, synthesis is
 trivial (no controller needed for a safety property). If `fails`,

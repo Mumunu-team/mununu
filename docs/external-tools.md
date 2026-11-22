@@ -1,6 +1,6 @@
 # External Tools
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3437), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L772), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3490), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3437), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L772), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3490), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L74) — surface: CLI+API
 
 Mununu's verification engine, model checker, and synthesiser are pure Rust + the linked [Z3](https://github.com/Z3Prover/z3) library. Several pipelines also invoke external command-line tools via subprocess. Those tools are **optional** — mununu functions without them, and individual pipelines emit a structured `AdapterWarning` or `AdapterError` when invoked while a required tool is missing, never silently fail.
 
@@ -184,7 +184,7 @@ Missing-tool behaviour: the milestone validation harness skips fixtures that req
 
 ## CVC5
 
-> Source of truth: [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
+> Source of truth: [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L74) — surface: CLI+API
 
 [CVC5](https://cvc5.github.io/) is an open-source SMT solver developed at Stanford + The University of Iowa, with strong support for SMT-LIB Craig interpolation via `(get-interpolant ...)`. Mununu uses it as a **second SMT backend** (alongside Z3) for the `PredicateSource::CraigInterpolation` path in the R.5 CEGAR loop.
 

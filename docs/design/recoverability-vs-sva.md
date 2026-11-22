@@ -68,7 +68,7 @@ the discriminating case).
 
 ### 3.1 Sound `AG EF` over a predicate abstraction
 
-> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2743) + [`cegar_refine_loop`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L880) — surface: (CLI+API+UI)
+> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2744) + [`cegar_refine_loop`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L880) — surface: (CLI+API+UI)
 
 mununu lifts a BTOR2 design into a **predicate cube** (abstract states are
 elements of `2^|P|` over a declared predicate set `P`, not the bit-blast state
@@ -130,7 +130,7 @@ reads `bad` / `justice` / `constraint` / `fair`, and the bit-blast lowering
 auto-translates them to mu-calculus with no formula input — a `bad` becomes
 `nu X. ((!pred) && ([] X))` (i.e. `AG ¬bad`):
 
-> Source of truth: [`bit_blast.rs` bad→safety / justice→liveness](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs#L2961) — surface: (API via verify)
+> Source of truth: [`bit_blast.rs` bad→safety / justice→liveness](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs#L4342) — surface: (API via verify)
 
 So any BTOR2 *that already carries properties* (HWMCC benchmarks, or anything a
 Verific-backed flow emits) is auto-verifiable. The blocker is upstream, in the

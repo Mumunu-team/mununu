@@ -1,6 +1,6 @@
 # Consumer briefing — a constraint disjoint from the property's cone is no longer dropped (2026-11)
 
-> Source of truth: [`cone_closure`](../../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L336), [`bit_cone`](../../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L564) and [`cone_slice`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs#L1072) — surface: CLI+API (`mununu btor2 verify-liveness --justice`, `POST /api/v1/btor2/verify-liveness`).
+> Source of truth: [`cone_closure`](../../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L336), [`bit_cone`](../../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L564) and [`cone_slice`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs#L1153) — surface: CLI+API (`mununu btor2 verify-liveness --justice`, `POST /api/v1/btor2/verify-liveness`).
 
 > **Audience:** everyone who reads a justice / fair-cycle verdict from mununu — rosf and monono (CI gates in the `mununu-sva` image), mununu-ui, and agents on the HTTP API.
 >

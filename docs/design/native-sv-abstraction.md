@@ -166,7 +166,7 @@ Today's `build_kripke_with_config` reads registers from `Declaration::Logic` and
 
 ### §4.2 Wires / ports → labels on transitions
 
-Combinational signals and module ports are values held *during* a cycle, not across it. They are the natural witnesses of a single transition. [`Transition::labels`](../../crates/mununu-core/src/clts/mod.rs#L521) is a `SmallVec<[LabelId; 4]>` precisely because a single SV cycle exposes multiple port values simultaneously: `(port_a = v1, port_b = v2, …)`. Per CLAUDE.md, the convention is multi-label edges, not parallel single-label edges between the same source/target pair.
+Combinational signals and module ports are values held *during* a cycle, not across it. They are the natural witnesses of a single transition. [`Transition::labels`](../../crates/mununu-core/src/clts/mod.rs#L532) is a `SmallVec<[LabelId; 4]>` precisely because a single SV cycle exposes multiple port values simultaneously: `(port_a = v1, port_b = v2, …)`. Per CLAUDE.md, the convention is multi-label edges, not parallel single-label edges between the same source/target pair.
 
 This is theoretically equivalent to a Kripke structure with atomic propositions over both registers and ports, but the labels-on-transitions encoding has two practical wins: label-based synchronization between module automata directly mirrors SV port connectivity (§4.4), and valuations stay internal to each automaton — necessary for compositional reasoning (§7).
 
@@ -186,7 +186,7 @@ Synchronization is value-equality on shared labels, which is SV semantics for a 
 
 ### §4.5 Driver-side controllability
 
-[`LabelControllability { Controllable | Internal | Uncontrollable }`](../../crates/mununu-core/src/clts/mod.rs#L248) currently encodes the *synthesis-level* (game-theoretic) controllability split — top inputs are uncontrollable, top outputs are controllable. There is a second, *composition-level* (driver) flavour: inside a hierarchy, every internal net has a unique driver. The driver's automaton "controls" that net; the consumer is "driven by" it. The two flavours can co-exist on the same enum — the driver discipline becomes the lifter's default for internal nets (producer-side controllable, consumer-side uncontrollable). This is adapter discipline, not a data-model change.
+[`LabelControllability { Controllable | Internal | Uncontrollable }`](../../crates/mununu-core/src/clts/mod.rs#L249) currently encodes the *synthesis-level* (game-theoretic) controllability split — top inputs are uncontrollable, top outputs are controllable. There is a second, *composition-level* (driver) flavour: inside a hierarchy, every internal net has a unique driver. The driver's automaton "controls" that net; the consumer is "driven by" it. The two flavours can co-exist on the same enum — the driver discipline becomes the lifter's default for internal nets (producer-side controllable, consumer-side uncontrollable). This is adapter discipline, not a data-model change.
 
 ## §5 Cone of influence: the exact / free / sound abstraction
 
@@ -659,7 +659,7 @@ Each milestone runs the fully automated SV → CTXDSL/KMTS pipeline end-to-end o
 
 1. **sv2v / Yosys version drift.** Same problem the pillow plan has with `yosys`/`avr.py`. Mitigation: discovery + version check + actionable error.
 2. **Yosys `opt` eliminates predicate-referenced registers.** Per §3.4: insert `(* keep = 1 *)` pre-pass; hard error in the lifter on missing references.
-3. **Synchronisation by value-equality on shared labels.** May require extending [`composition/mod.rs`](../../crates/mununu-core/src/composition/mod.rs#L518) from name-equality. Audit before R.1.
+3. **Synchronisation by value-equality on shared labels.** May require extending [`composition/mod.rs`](../../crates/mununu-core/src/composition/mod.rs#L874) from name-equality. Audit before R.1.
 4. **CEGAR non-termination.** Lazy refinement can loop on history-dependent predicates. Mitigation: bounded refinement (default 16 rounds); on cap-hit, keep verdict as `KleeneBot` with soundness-tagged warning.
 5. **Tightness loss in compositional KMTS.** Per §7.2: port-equality predicate heuristic; lifter auto-emits canonical predicates for declared connections.
 6. **Migration drag.** Sidecar schema change (Tier D) breaks every existing `.mununu.json`. Mitigation: 1-release deprecation window + auto-migration tool.

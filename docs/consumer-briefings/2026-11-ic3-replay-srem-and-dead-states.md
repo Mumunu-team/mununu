@@ -2,7 +2,7 @@
 
 > **Audience:** maintainers of the repositories that read `mununu btor2 verify --owned-only`, `sv verify-auto`'s reach rescue on a host without rIC3, or `POST /api/v1/btor2/verify` (rosf, monono, mununu-ui). Not a release note.
 >
-> Source of truth: [`Ic3::concretize`](../../crates/mununu-core/src/adapter/btor2/ic3.rs#L1055) · [`eval_op`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs#L6717) · [`Bv::sdiv`](../../crates/mununu-core/src/adapter/btor2/bv.rs#L326) — surface: CLI+API
+> Source of truth: [`Ic3::concretize`](../../crates/mununu-core/src/adapter/btor2/ic3.rs#L1095) · [`eval_op`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs#L6749) · [`Bv::sdiv`](../../crates/mununu-core/src/adapter/btor2/bv.rs#L330) — surface: CLI+API
 
 ## TL;DR
 
