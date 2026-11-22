@@ -503,6 +503,30 @@ pub struct TraceReplay {
     /// The bench built and run (`--replay` / `replay: true`); absent when not requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<ReplayResultView>,
+    /// Why no testbench was generated although one was asked for and the row has a path to
+    /// replay (mununu#1176): a source path or the top module's name the bench's Makefile does
+    /// not take. `testbench` and `gtkw` are then absent; absent itself when the bench was
+    /// generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_generated: Option<String>,
+}
+
+impl TraceReplay {
+    /// The entry of a row whose bench was asked for and not generated, with the reason. When
+    /// the run was asked for too (`replay_requested`), `result` says `unavailable` with the same
+    /// reason, so a consumer that reads only `result.outcome` is not told nothing.
+    pub fn without_bench(why: &str, replay_requested: bool) -> Self {
+        TraceReplay {
+            result: replay_requested.then(|| {
+                ReplayResultView::from_run(
+                    0,
+                    Err(format!("the testbench was not generated: {why}")),
+                )
+            }),
+            not_generated: Some(why.to_string()),
+            ..TraceReplay::default()
+        }
+    }
 }
 
 /// The replay's verdict: the bench ran under Verilator and compared the trace cycle by cycle, or

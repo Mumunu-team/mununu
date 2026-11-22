@@ -273,6 +273,13 @@
           "description": "True iff `good` is genuinely reached under `phi` (the non-vacuity gate passed).",
           "type": "boolean"
         },
+        "notes": {
+          "description": "mununu#1175 — what the reader should know about the non-vacuity gate's own evidence: one line per reach-portfolio member whose path (to the target, or out of it) the concrete simulator did not confirm. Absent when every path was confirmed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "phi": {
           "description": "A human-readable predicate over named inputs (Phase 2b may carry a typed schedule/strategy).",
           "type": "string"
@@ -774,6 +781,13 @@
         },
         "gtkw": {
           "description": "`replay.gtkw` — a GTKWave save file listing the clock, the trace's inputs and the registers it names, so `gtkwave replay.vcd replay.gtkw` opens on the scene (2026-10-29).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not_generated": {
+          "description": "Why no testbench was generated although one was asked for and the row has a path to replay (mununu#1176): a source path or the top module's name the bench's Makefile does not take. `testbench` and `gtkw` are then absent; absent itself when the bench was generated.",
           "type": [
             "string",
             "null"

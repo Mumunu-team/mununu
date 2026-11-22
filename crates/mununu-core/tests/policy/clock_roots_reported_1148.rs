@@ -38,7 +38,7 @@ const SETTERS: &[(&str, &[(&str, &str)])] = &[
 
 /// `path` relative to the crate, with `/` between components on every host (built from the
 /// components, never from the display string: mununu#1153).
-fn rel(path: &Path, root: &Path) -> String {
+pub(crate) fn rel(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .expect("under the crate")
         .components()
@@ -49,7 +49,7 @@ fn rel(path: &Path, root: &Path) -> String {
 
 /// The product code of `src`: no test module, no line that is only a comment (a comment that
 /// names the call is not the call).
-fn product_code(src: &str) -> String {
+pub(crate) fn product_code(src: &str) -> String {
     without_test_modules(src)
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))

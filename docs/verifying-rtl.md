@@ -29,7 +29,7 @@ signal/value of interest (`"state_q == 3"`).
 
 ### `btor2 verify` — safety / reachability
 
-> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1105) — surface: (CLI+API+UI)
+> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1166) — surface: (CLI+API+UI)
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
 engine, the in-house native BMC + k-induction engine (in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
@@ -67,7 +67,7 @@ mununu btor2 verify-liveness design.btor2 --request "st == 1" --grant "st == 2"
 
 ### `btor2 verify-liveness --fairness` — response liveness under a `GF` fairness assumption (mununu#477)
 
-> Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L648) — surface: (CLI+API+UI)
+> Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L657) — surface: (CLI+API+UI)
 
 Decides `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei extension of the plain l2s: one `fairⱼ_seen` latch per fairness atom (each mirroring the existing `b_seen`), conjuncted into `bad = looped ∧ ¬b_seen ∧ ⋀ⱼ fairⱼ_seen`. A reachable `bad` ⇒ a lasso exists that satisfies every fairness constraint AND leaves a request forever ungranted ⇒ VIOLATED. Empty `--fairness` recovers `verify-liveness` exactly, byte-for-byte on the emitted monitor. Sound + complete for the response shape (a useless fairness atom env satisfies trivially does NOT rescue a genuinely starving design — the `fair_gated_is_not_rescued_by_useless_fairness` soundness control validates this).
 
@@ -86,7 +86,7 @@ mununu btor2 verify-liveness --fairness design.btor2 \
 
 ### The proof fallback: k-liveness after l2s (Track V, 2026-11)
 
-> Source of truth: [`response_kliveness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L610) · [`emit_response_kliveness_monitor`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L124) · [`kliveness_ladder`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L339) · [`undecided_notes`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L573) — surface: CLI+API (`btor2 verify-liveness` in all three forms, `sv verify-liveness`, `POST /api/v1/btor2/verify-liveness`, `POST /api/v1/sv/verify-liveness`)
+> Source of truth: [`response_kliveness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L619) · [`emit_response_kliveness_monitor`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L124) · [`kliveness_ladder`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L339) · [`member_notes`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L579) — surface: CLI+API (`btor2 verify-liveness` in all three forms, `sv verify-liveness`, `POST /api/v1/btor2/verify-liveness`, `POST /api/v1/sv/verify-liveness`)
 
 l2s is complete but its proofs are hard: the safety checker has to find an invariant over the
 design and a shadow copy of it. When l2s leaves a response row **undecided**, every verb above now
@@ -219,10 +219,10 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
 remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with **half** of what
 the slice leaves (the reach portfolio's members take their bounds from it), then **k-liveness**
-(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L347)) with half of
+(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L353)) with half of
 what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
 60 s defaults and each abstention note says so, naming every member's refusal or budget abstention.
-`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L440)) races the three
+`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L457)) races the three
 rungs on threads, returns the first definite verdict and cancels the rest. In the race the l2s portfolio
 runs without its exact member, which has no cancellation point (#816), and k-liveness runs rIC3 as one
 `-e ic3` process instead of its portfolio (#986). **It is not a speed-up on a small host:** on the 129
@@ -272,7 +272,7 @@ in effect — that is the user's own clock, reported as `budget-expired`.
 
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 
-> Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L8674) — surface: (CLI+API+UI)
+> Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L8683) — surface: (CLI+API+UI)
 
 A `// @mununu_assume GF <REG op VALUE>` inline annotation is **auto-applied to any response-shape guarantee** (`AG(a → AF b)`) in the same source. The SV verify-auto orchestration parses the `GF <atom>` into a typed fairness atom during annotation scanning; when a response-shape guarantee is left ⊥ by the first-pass members — or is refuted by one of them, which decides without the assumption (mununu#1073, §`violation-without-fairness`) — the ⊥-escalation router dispatches through [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs) (the fair-cycle l2s primitive described above) instead of the plain `response_liveness_rescue`. A definite `holds` under fairness means the guarantee holds against every environment schedule satisfying the assumption infinitely often; a definite `violated` is a reachable lasso satisfying the assumption that still leaves the request forever ungranted.
 
@@ -295,7 +295,7 @@ mununu sv verify-auto wb_mem_client.sv
 
 ### An annotation inside a submodule follows it into every instance (mununu#897)
 
-> Source of truth: [`expand_annotation_instances`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3936) + [`TranslationReport::instance_prefixes`](../crates/mununu-core/src/adapter/slang/translate.rs) + [`MununuAnnotation::module`](../crates/mununu-core/src/mununu_annotations/mod.rs) — surface: (CLI+API)
+> Source of truth: [`expand_annotation_instances`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3942) + [`TranslationReport::instance_prefixes`](../crates/mununu-core/src/adapter/slang/translate.rs) + [`MununuAnnotation::module`](../crates/mununu-core/src/mununu_annotations/mod.rs) — surface: (CLI+API)
 
 A `@mununu_guarantee` written inside a module names its registers by their local names
 (`fill0_q`). Verified with that module as `--top`, the names bind directly. Verified under a
@@ -332,7 +332,7 @@ positional name of such a row must take the prefixed one.
 
 ### Naming an annotation property: `@mununu_guarantee(<name>)` (mununu#550)
 
-> Source of truth: [`split_tag_name`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4259) — surface: (CLI+API)
+> Source of truth: [`split_tag_name`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4265) — surface: (CLI+API)
 
 An annotation property is named `ann_guarantee_<index>` by position, so inserting one mid-file
 re-points every pin below it. mununu#544 fixed that for SVA assertions by giving them a `label`;
@@ -369,7 +369,7 @@ annotation, and has no such excuse.
 
 ### Template instances as annotations: `@mununu_template` (2026-10-30)
 
-> Source of truth: [`scan_annotation_properties_with`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4268) + [`parse_template_body`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4151) + [`template_annotations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6010) — surface: (CLI+API) — every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`scan_annotation_properties_with`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4274) + [`parse_template_body`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4157) + [`template_annotations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6016) — surface: (CLI+API) — every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`.
 
 A property template (`mununu templates --domain rtl`) can be instantiated next to the design, so the
 obligation is persisted with the RTL instead of living in a command line:
@@ -395,7 +395,7 @@ hard error, because the user typed it. `--json` carries the instance as the row'
 
 ### Per-property assumptions: the `assumes=` modifier (2026-10-30)
 
-> Source of truth: [`split_tag_head`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`row_modifiers`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4117) + [`plan_assumptions`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L914) — surface: (CLI+API).
+> Source of truth: [`split_tag_head`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`row_modifiers`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4123) + [`plan_assumptions`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L920) — surface: (CLI+API).
 
 `--assumes` is one mode for the whole run. Some obligations are only meaningful **without** the
 environment's promise — "the trip, once raised, holds until the stop" says nothing under an
@@ -443,7 +443,7 @@ hand-written sidecar and no supplied formula**. End to end:
 The HTTP request is just the source plus options — there is no `sidecar` or `formula`
 field:
 
-> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2335) — surface: API
+> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2321) — surface: API
 
 ```bash
 mununu sv verify-auto my_module.sv
@@ -463,7 +463,7 @@ model-level diagnostics.
 
 ### LTL bodies in annotations: `@mununu_guarantee ltl …` (2026-10-27)
 
-> Source of truth: [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4259) + [`translate_universal_text`](../crates/mununu-core/src/ltl/universal.rs) — surface: (CLI+API) — every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4265) + [`translate_universal_text`](../crates/mununu-core/src/ltl/universal.rs) — surface: (CLI+API) — every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`.
 
 A guarantee body that starts with the keyword `ltl` is an LTL formula, read over **every** path
 from reset — the same reading as a CTXDSL `body = ltl …;` — and translated into the mu-calculus
@@ -554,7 +554,7 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 
 ### Which engines decided a row, and which refused: `portfolio` (mununu#873)
 
-> Source of truth: [`PortfolioAttributionView`](../crates/mununu-core/src/api/models.rs#L3427) — surface: (CLI+API)
+> Source of truth: [`PortfolioAttributionView`](../crates/mununu-core/src/api/models.rs#L3450) — surface: (CLI+API)
 
 When a ⊥ row goes to the reachability portfolio (the safety, liveness, fair-cycle and
 reachability rescues), the row carries `portfolio`: the members that answered (`decided_by`) and
@@ -577,7 +577,7 @@ mununu --quiet sv verify-auto design.sv --json \
 
 ### The counterexample of a violated safety property (mununu#710)
 
-> Source of truth: [`attach_safety_witnesses`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2032) — surface: (CLI+API)
+> Source of truth: [`attach_safety_witnesses`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2038) — surface: (CLI+API)
 
 Every VIOLATED safety property carries a `trace` (`kind: "finite"`) — whichever engine decided it:
 the **shallowest** reset → violation path on a one-path monitor of the formula, one `steps[]` entry
@@ -629,14 +629,22 @@ plain search; `false` when `sat-bmc`'s dynamic step answered a window with a dee
 absent when the member does not say — `ic3`, btormc, rIC3); a member whose own witness
 did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone; the owned
 `ic3` replays inside the engine, so its failure — a cell wider than the simulator's 128 bits — is listed with or
-without `--witness`, mununu#1143). A member
+without `--witness`, mununu#1143). **Every verb that reads a reach-portfolio outcome carries that list
+(mununu#1175)**, so a result that rests on an unconfirmed path never reads like a replayed one: a `sv verify-auto`
+row has it as `portfolio.trace_replay_failed` (text report: an `unconfirmed path:` line under the row), with the
+antecedent-vacuity probe and the `AG EF` trap certificate listing theirs as note items; the response and justice
+`verify-liveness` / `verify-justice` rows, `check-fsm` rows and a `verify-recoverability` discovered assumption
+(`holds_under[].notes`) carry one line per member in `notes` — `<member>: the path it found was not confirmed on
+the concrete simulator (<reason>); no other member found a path, so this result rests on it alone` (or `<members>
+found a path too`; on a contradiction, `… and <members> proved there is none`); `sv cdc-lint` appends the line to the gray-step finding's detail; `btor2 verify --fault …
+--target` has `trace_replay_failed` on its summary. A member
 of that second search that PROVES `bad` unreachable is a contradiction, not a note (mununu#1076): the verdict becomes
 `unknown` with `contradiction: true`, that member joins `unreachable_by` beside `reachable_by`, no trace ships, and
 `trace_unavailable_reason` says so; a `sv verify-auto` row goes to `unknown` with `bottom_reason: engine-contradiction`.
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
 
-> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L69) — surface: (CLI+API)
+> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L135) — surface: (CLI+API)
 
 `--emit-testbench DIR` writes, for every property that carries a counterexample, a Verilator
 testbench under `DIR/<property>/` (`tb.cpp` and a `Makefile`). The testbench is built from the RTL
@@ -693,6 +701,20 @@ carries the same object under `trace.replay.result` (`outcome`, `reason`, `check
 `trace.replay.dir` and `trace.replay.gtkw`; over HTTP, `replay: true` with `emit_testbench: true`
 runs the bench in a scratch directory on the server and returns the same `result` (no `dir`).
 
+**Where the bench can be built (mununu#1176).** Verilator builds through `make`, and its makefile
+refuses a directory whose full path has whitespace; a `Makefile` word cannot carry whitespace
+either. mununu says so in its own words instead of leaving `make`'s:
+
+| what has the whitespace | what the report says | what to do |
+|---|---|---|
+| the `--emit-testbench` directory (its full path, after links are resolved) | the files are written; under `--replay` the row says `replay: unavailable — Verilator's make build does not run in a directory whose path has whitespace (…)`; without `--replay`, a line on stderr says `make` will not build there | pass `--emit-testbench` a directory whose full path has none |
+| a source path (the CLI writes the resolved path; the API writes `source_name` and `additional_sources[].name`), or any character outside ASCII letters, digits and `_` `-` `.` `/` | no bench for that run: the text row says `replay testbench: not written — <why>`, and `trace.replay.not_generated` carries the reason (with `--replay` / `replay: true`, `trace.replay.result` is `unavailable` with the same reason) | CLI: copy the sources under a path with only those characters (a link is not enough: the path is resolved before it is written). API: name the sources with only those characters |
+| the server's scratch root (`MUNUNU_LIFT_STAGING_ROOT`, else the system temporary directory) on `replay: true` | `trace.replay.result` is `unavailable`, naming the variable | set `MUNUNU_LIFT_STAGING_ROOT` to a directory whose path has none |
+| a top module name with a character a Makefile word cannot carry (an escaped identifier) | `not written`, as a mununu limitation — nothing to change in the design | none |
+
+The verdict and the trace are unaffected in every row; only the Verilator cross-check is missing,
+and the report says which one and why.
+
 **`replay.gtkw` — the scene, ready to open.** `--emit-testbench` also writes a GTKWave save file
 beside the testbench: the clock, the trace's inputs and the registers it names, in trace order,
 under `TOP.<top>.`, vectors in decimal as the report prints them. `gtkwave replay.vcd replay.gtkw`
@@ -701,7 +723,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1756) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1318) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1756) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1324) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -737,7 +759,7 @@ map does not know, such as a monitor latch, is simply not listed.
 
 ### Where in the RTL: each row's `source:` and `involves:` (2026-10-30)
 
-> Source of truth: [`property_sources_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1409) + [`attach_involves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2534) + [`cone_named_signals`](../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L296) + [`compact_lines`](../crates/mununu-core/src/trace.rs#L120) — surface: (CLI+API) — every `sv verify-auto` row, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`property_sources_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1415) + [`attach_involves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2540) + [`cone_named_signals`](../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L296) + [`compact_lines`](../crates/mununu-core/src/trace.rs#L120) — surface: (CLI+API) — every `sv verify-auto` row, and `POST /api/v1/sv/verify-auto`.
 
 Every row says where the property is written and which RTL lines it is about, whatever its verdict:
 
@@ -770,7 +792,7 @@ constant, so its lines are not in the cone. Absent when the source map placed no
 
 ### The lines that decided a counterexample: `slice:` (2026-10-30)
 
-> Source of truth: [`Netlist::slice`](../crates/mununu-core/src/adapter/yosys/netlist.rs) + [`TraceNames::attach_slice`](../crates/mununu-core/src/trace.rs) + [`PropertyVerdict::trace`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L324) — surface: (CLI+API) — every `sv verify-auto` row with a counterexample, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`Netlist::slice`](../crates/mununu-core/src/adapter/yosys/netlist.rs) + [`TraceNames::attach_slice`](../crates/mununu-core/src/trace.rs) + [`PropertyVerdict::trace`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L330) — surface: (CLI+API) — every `sv verify-auto` row with a counterexample, and `POST /api/v1/sv/verify-auto`.
 
 `involves:` is the code the verdict is about; the slice is the code that **ran** on this
 counterexample. After the `cells:` legend, every RTL counterexample lists, per cycle, the lines that
@@ -816,7 +838,7 @@ written, trimmed, at most 72 characters) and `trace.slice_status` (`{status: "ex
 "unavailable", reason}`), on every `Trace` the response holds.
 ### Repair candidates under a counterexample: `--localize` (2026-10-30)
 
-> Source of truth: [`repair::localize`](../crates/mununu-core/src/adapter/btor2/repair.rs) + [`attach_repair_candidates`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2360) + [`AutoVerifyReport::trace_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1251) — surface: (CLI+API) — `sv verify-auto --localize`, `POST /api/v1/sv/verify-auto` with `localize: true`.
+> Source of truth: [`repair::localize`](../crates/mununu-core/src/adapter/btor2/repair.rs) + [`attach_repair_candidates`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2366) + [`AutoVerifyReport::trace_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1257) — surface: (CLI+API) — `sv verify-auto --localize`, `POST /api/v1/sv/verify-auto` with `localize: true`.
 
 `involves:` is the code the verdict is about; a counterexample is what happened. `--localize` asks
 the next question, with the counterexample's **inputs fixed**: which register's next-state function,
@@ -869,7 +891,7 @@ in the ranked order) and `trace.localization` (`{status, reason}`); the API requ
 
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
-> Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L340) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L10532) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥
+> Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L344) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L10541) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥
 
 `AG EF p` (recoverability) is false iff some reachable state can never reach `p` again. When the
 main pass leaves such a row ⊥, the re-plan first looks for a **trap**: a value `v` of `p`'s own
@@ -951,7 +973,7 @@ The API peer is an `expectations` object on the request (`all_hold`, `count`, `v
 
 ### SVA `assume` statements are preconditions: `--assumes`
 
-> Source of truth: [`AssumeMode`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L805) + [`emit_assume_ok_monitor`](../crates/mununu-core/src/adapter/btor2/assume_monitor.rs) + [`relativize`](../crates/mununu-core/src/adapter/slang/assume_guarantee.rs) — surface: (CLI+API)
+> Source of truth: [`AssumeMode`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L811) + [`emit_assume_ok_monitor`](../crates/mununu-core/src/adapter/btor2/assume_monitor.rs) + [`relativize`](../crates/mununu-core/src/adapter/slang/assume_guarantee.rs) — surface: (CLI+API)
 
 An `assume property (P)` restricts the traces a design is checked on, as a formal tool reads it.
 By default (`--assumes precondition`, API `assumes: "precondition"`) each supported assumption is
@@ -998,7 +1020,7 @@ verdict is scoped to the traces those assumptions admit.
 
 ### Real assertion macros, synthesis macros for the lift: `--lift-override`
 
-> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3355) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5883) — surface: (CLI+API)
+> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3361) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5889) — surface: (CLI+API)
 
 `sv verify-auto` reads the sources twice: slang extracts the SVA, and yosys (`read_slang`) lifts the RTL to
 BTOR2. Some assertion macro sets do not survive the lift — OpenTitan's real `prim_assert.sv` expands
@@ -1177,7 +1199,7 @@ receives each override as `-G NAME=VALUE`, the same top-scoped form the `read_sl
 the run is then **refused** ("the override did not reach the SVA extraction"), naming the value
 slang elaborated, rather than judging the properties against the default.
 
-> Source of truth: [`ast_json_args`](../crates/mununu-core/src/adapter/slang/mod.rs) + the reached-the-SVA check in [`prepare_model`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6166) — surface: (CLI+API)
+> Source of truth: [`ast_json_args`](../crates/mununu-core/src/adapter/slang/mod.rs) + the reached-the-SVA check in [`prepare_model`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6172) — surface: (CLI+API)
 
 `--param` is also the remedy for a **bit-blast size wall**: several wide counters
 (e.g. six 32-bit counters, each doubled by its `$past` shadow) can push a
@@ -1197,11 +1219,11 @@ the verdict host-dependent, so it is opt-in). Bit count cannot see the reachable
 wall-clock budget — the message distinguishes the four so the remedy is not blind
 trial-and-error.
 
-> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L10072) — surface: (CLI+API+UI)
+> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L10081) — surface: (CLI+API+UI)
 
 ### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
 
-> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3355) + [`scripts/vendor_opentitan_ip.py`](../scripts/vendor_opentitan_ip.py) — surface: (CLI+API) — `sv verify-auto … --lift-override` / `POST /api/v1/sv/verify-auto` with `additional_sources`; the vendoring script is a developer tool
+> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3361) + [`scripts/vendor_opentitan_ip.py`](../scripts/vendor_opentitan_ip.py) — surface: (CLI+API) — `sv verify-auto … --lift-override` / `POST /api/v1/sv/verify-auto` with `additional_sources`; the vendoring script is a developer tool
 
 Everything above was measured on **extracted blocks** — one module and the primitives it needs. A full
 IP is the top with its TL-UL register block and every sub-block: `edn` (lowRISC/opentitan 558921c) is
@@ -1311,7 +1333,7 @@ class decides only at bit level).
 
 ### The fault-injection posture — `--fault`, `--fault-model sec-cm`, `btor2 inject-fault` (2026-10-23)
 
-> Source of truth: [`inject_faults`](../crates/mununu-core/src/adapter/btor2/fault.rs) + [`apply_fault_posture`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6944) — surface: (CLI+API) — `sv verify-auto` / `sv mutate` / `btor2 verify` and their `POST /api/v1/…` peers; `btor2 inject-fault` is CLI-only (a file transform)
+> Source of truth: [`inject_faults`](../crates/mununu-core/src/adapter/btor2/fault.rs) + [`apply_fault_posture`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6953) — surface: (CLI+API) — `sv verify-auto` / `sv mutate` / `btor2 verify` and their `POST /api/v1/…` peers; `btor2 inject-fault` is CLI-only (a file transform)
 
 OpenTitan's security-countermeasure checks ask what happens AFTER a corruption:
 `$rose(u_x.u_state_regs.unused_err_o) |-> ##[0:30] alert_tx_o[1].alert_p`. On the lifted design
@@ -1494,7 +1516,7 @@ Two properties of this path are worth knowing:
 
 **Bounded response chains (2026-10-18).** Every translator shape with MORE than one box — `$rose(x) |-> ##[0:k] y` (a disjunct at every level), `a |=> ##n c`, `throughout` chains, a `$stable(bus)` leaf (`bus == bus__past`) — reduces too ([`reach_rescue::reduce_bounded_chain`](../crates/mununu-core/src/adapter/reach_rescue.rs)): the body compiles to the one-path monitor the counterexample extractor always used (a block at box depth `k` is delayed `D − k` cycles through shared 1-bit latches; `bad` fires when the attempt that started `D` cycles ago fails), and on these shapes the one-path reading is EXACT — every `||` has at most one box-bearing side, so `p ∨ []q` negates to `¬p ∧ ∃succ. ¬q`, a single path — which makes the same monitor a decider: `bad` reachable ⇔ a violation. The body may end in ONE weak-until block `nu Z. (e && (b || [] Z))` — the lowering of `e throughout b[->1]` — at its deepest level: the compiler reads the bounded part twice (the block as `false` and as `true`), and a pending latch carries the block's obligation from every attempt that reaches it until `b` (`bad` when `active ∧ ¬e`); its negation is again one existential path, so the reading stays exact. Before this they were declined in 0 ms and never reached an engine: on the full OpenTitan `edn` IP, 21 of the 54 non-trivial rows.
 
-**The re-plan runs once per run (2026-10-18).** Under a portfolio every member used to re-plan its own ⊥ rows, so a row the next engine's main pass decides in a second first paid a full rescue slice, and a row no engine decides paid one slice per member. The members now leave their ⊥ rows alone ([`VerifyAutoOptions::replan_defer`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3284), set by the planner) and the planner re-plans the MERGED report once ([`replan_merged`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5434)) — exactly the rows no engine decided; the rescue's provenance notes land on the merged report, and a `portfolio-replan` note says how many rows were re-planned and how many decided. A single-engine run (`--engine …`) re-plans its own rows as before. And a later member does not re-run a row an earlier one decided (2026-10-19, mununu#733): the merge keeps the first definite verdict, so that work could never change it — the member records the row `unknown` / `not-attempted` and spends nothing; a `portfolio-skip` note counts them. The cost it removes: the census design `keymgr_ctrl` went 256 s → 1 092 s once the cube's SMT image ran on four rows the exact engine had decided. The trade-off, stated: the merge's contradiction alarm cannot fire in sequential mode on a skipped row; `--portfolio parallel` and the census stay the differential check.
+**The re-plan runs once per run (2026-10-18).** Under a portfolio every member used to re-plan its own ⊥ rows, so a row the next engine's main pass decides in a second first paid a full rescue slice, and a row no engine decides paid one slice per member. The members now leave their ⊥ rows alone ([`VerifyAutoOptions::replan_defer`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3290), set by the planner) and the planner re-plans the MERGED report once ([`replan_merged`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L5440)) — exactly the rows no engine decided; the rescue's provenance notes land on the merged report, and a `portfolio-replan` note says how many rows were re-planned and how many decided. A single-engine run (`--engine …`) re-plans its own rows as before. And a later member does not re-run a row an earlier one decided (2026-10-19, mununu#733): the merge keeps the first definite verdict, so that work could never change it — the member records the row `unknown` / `not-attempted` and spends nothing; a `portfolio-skip` note counts them. The cost it removes: the census design `keymgr_ctrl` went 256 s → 1 092 s once the cube's SMT image ran on four rows the exact engine had decided. The trade-off, stated: the merge's contradiction alarm cannot fire in sequential mode on a skipped row; `--portfolio parallel` and the census stay the differential check.
 
 **What still declines.** `[] a || [] b` — two box-bearing disjuncts, false at a state with one `¬a` and one `¬b` successor although every single path satisfies the reading; a negated modality; a chain deeper than 64 boxes (the translator's own unroll cap); a `CmpReg` leaf whose sides differ in width; two weak-until blocks, or one with a deeper box beside it; any other fixpoint inside the body. Each declines as `safety-shape-not-reducible` rather than being mis-compiled.
 
@@ -1511,7 +1533,7 @@ Consumers keying on `verification_notes[i].kind` can distinguish "the engine gav
 
 ### Is this ⊥ reproducible? `determinism` and `budget` (mununu#553)
 
-> Source of truth: [`BottomReason::determinism`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L9526) + [`classify_engine_budget`](../crates/mununu-core/src/adapter/mod.rs) — surface: (CLI+API)
+> Source of truth: [`BottomReason::determinism`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L9535) + [`classify_engine_budget`](../crates/mununu-core/src/adapter/mod.rs) — surface: (CLI+API)
 
 A `⊥` that names its cause still leaves the question a gate has to answer: **would running the
 same command again give a different answer?** A deterministic abstention is a property of the
@@ -1591,7 +1613,7 @@ The success documents are schema-pinned and drift-tested like `sv verify-auto`'s
 
 ### The withheld VIOLATED: `unestablished-initial-state` (mununu#577)
 
-> Source of truth: [`BottomReason::UnestablishedInitialState`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`downgrade_violated_on_unestablished_init`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2096) — surface: (CLI+API)
+> Source of truth: [`BottomReason::UnestablishedInitialState`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`downgrade_violated_on_unestablished_init`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2102) — surface: (CLI+API)
 
 Every other `⊥` on this page is an engine that did not finish. This one is a verdict that was
 **withheld because it could not be trusted** — the only place mununu turns a definite answer back
@@ -1652,7 +1674,7 @@ today — a mununu limitation. Retrying is never the answer.
 
 ### A violation through an undriven net: `violation-over-free-leaves` (mununu#750)
 
-> Source of truth: [`BottomReason::ViolationOverFreeLeaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`withhold_violated_over_free_leaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2266) — surface: (CLI+API)
+> Source of truth: [`BottomReason::ViolationOverFreeLeaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`withhold_violated_over_free_leaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2272) — surface: (CLI+API)
 
 The second withheld VIOLATED. A module missing from the source set is not modelled: the lift
 leaves its outputs as undriven nets, free at every cycle, and so is any unconnected wire. A
@@ -1862,7 +1884,7 @@ MUNUNU_MAX_PROCESS_MEMORY_BYTES=0 mununu sv verify-auto design.sv
 
 ### Handing over a reproducer: `MUNUNU_SHADOW_BTOR2_DUMP` (mununu#552)
 
-> Source of truth: [`dump_prepared_model`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L7149) — surface: (CLI+API, env var)
+> Source of truth: [`dump_prepared_model`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L7158) — surface: (CLI+API, env var)
 
 `MUNUNU_KEEP_YOSYS_TMP=1` and `sv emit-btor2-per-module` give you the **pre-shadow** lift. They do
 not give you the model the engine ran, and for a `$past`-bearing property that is exactly where
@@ -2002,7 +2024,7 @@ mununu sv verify-auto design.sv --resume-from verdicts.ndjson --json \
 
 ### Pinning a config input: `--pin`
 
-> Source of truth: [`partition_config_pins`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1590) — surface: (CLI+API+UI)
+> Source of truth: [`partition_config_pins`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1596) — surface: (CLI+API+UI)
 
 `--pin SIGNAL=VALUE` (API `pins: [...]`) pins a primary input to
 a decimal constant and substitutes it into every formula atom, scoping the verdicts

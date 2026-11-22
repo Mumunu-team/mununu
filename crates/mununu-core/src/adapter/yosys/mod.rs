@@ -4194,18 +4194,10 @@ impl TempDir {
         let tid = format!("{:?}", std::thread::current().id());
         let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
         // mununu#1138 — `MUNUNU_LIFT_STAGING_ROOT` moves the staging off the system temp dir
-        // (a small or `noexec` `/tmp`); the default is the system's.
-        let root = crate::adapter::env_var::read("MUNUNU_LIFT_STAGING_ROOT")
-            .filter(|v| !v.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        // Absolute, whatever the variable or `TMPDIR` said: yosys runs inside the staging
-        // directory and its `-l` log and the outputs are named by their absolute paths.
-        let mut base = if root.is_absolute() {
-            root
-        } else {
-            std::env::current_dir().map_err(io_err)?.join(root)
-        };
+        // (a small or `noexec` `/tmp`); the default is the system's. Absolute, whatever the
+        // variable or `TMPDIR` said: yosys runs inside the staging directory and its `-l` log
+        // and the outputs are named by their absolute paths.
+        let mut base = crate::adapter::staging_root().map_err(io_err)?;
         base.push(format!("{prefix}-{pid}-{tid_digits}-{seq}-{nanos}"));
         std::fs::create_dir_all(&base).map_err(io_err)?;
         let keep = crate::adapter::env_var::read("MUNUNU_KEEP_YOSYS_TMP")

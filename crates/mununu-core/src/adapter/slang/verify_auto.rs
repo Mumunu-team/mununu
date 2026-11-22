@@ -298,6 +298,11 @@ pub struct PortfolioAttribution {
     /// mununu#1022 — `(member, progress)` for every member that searched to its own bound
     /// without a verdict (native: the depth and k reached).
     pub undecided: Vec<(String, String)>,
+    /// mununu#1175 — every member that found a path the concrete simulator did not confirm (a
+    /// design the simulator cannot carry, or a witness that did not replay — the reason says
+    /// which). The row's verdict is unchanged; `sole_decider` marks the member the verdict rests
+    /// on alone. `btor2 verify` reports the same list under the same name.
+    pub trace_replay_failed: Vec<crate::adapter::reach_portfolio::UnconfirmedPath>,
 }
 
 impl PortfolioAttribution {
@@ -312,6 +317,7 @@ impl PortfolioAttribution {
             refused: owned(&reach.refused),
             abstained: owned(&reach.abstained),
             undecided: owned(&reach.undecided),
+            trace_replay_failed: reach.unconfirmed(),
         }
     }
 }
@@ -6793,7 +6799,10 @@ fn check_antecedent_vacuity(
                              which the countermeasure's fault flag rises, so the response the \
                              chain demands was actually checked."
                         .into(),
-                    items: vec![atom.clone()],
+                    // mununu#1175 — a path the simulator did not confirm is said beside the atom.
+                    items: std::iter::once(atom.clone())
+                        .chain(outcome.unconfirmed_notes())
+                        .collect(),
                     property: Some(name.clone()),
                 });
             }
@@ -10571,13 +10580,21 @@ fn trap_certificate_note(
                  counterexample is the path into T; it ends there because T never lets the target \
                  back in."
             .into(),
-        items: vec![
+        items: [
             format!("trap: {} == {}", cert.signal, cert.value),
             format!("source: {}", cert.source.label()),
             format!("closure: {}", list(&cert.closure_engines)),
             format!("reach: {}", list(&cert.reach_engines)),
             format!("depth: {depth}"),
-        ],
+        ]
+        .into_iter()
+        // mununu#1175 — a reach member whose path into the trap was not confirmed.
+        .chain(
+            cert.reach_unconfirmed
+                .iter()
+                .map(|l| format!("reach — {l}")),
+        )
+        .collect(),
         property: Some(name.to_string()),
     }
 }
@@ -11737,6 +11754,117 @@ mod tests {
             notes[0].items
         );
         assert_eq!(PortfolioAttribution::of(&reach).undecided.len(), 1);
+    }
+
+    /// mununu#1175 REPRODUCER — a row the reach portfolio decided on a path the concrete
+    /// simulator did not confirm says so on the row, as `btor2 verify` does: the attribution
+    /// carries the member, the reason and whether the verdict rests on it alone, and the wire
+    /// row shows them under `portfolio.trace_replay_failed`. Fails on the parent (no such key:
+    /// the list stopped at the portfolio's outcome).
+    #[cfg(feature = "api")]
+    #[test]
+    fn x1175_a_path_the_simulator_did_not_confirm_reaches_the_verify_auto_row() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let reach = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["ic3"],
+            trace_replay_failed: vec![("ic3", "a 130-bit cell".to_string())],
+            ..Default::default()
+        };
+        let report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "p".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "AG p".to_string(),
+                outcome: VerifyOutcome::Violated { false_cells: 0 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: Some("reach-portfolio(ic3)".to_string()),
+                vacuity: None,
+                portfolio: Some(PortfolioAttribution::of(&reach)),
+            }],
+            ..Default::default()
+        };
+        let view = crate::api::models::SvVerifyAutoResponse::from(&report);
+        let json = serde_json::to_value(&view).expect("serialises");
+        let row = &json["properties"][0]["portfolio"]["trace_replay_failed"][0];
+        assert_eq!(row["member"], "ic3", "{json:#}");
+        assert_eq!(row["reason"], "a 130-bit cell");
+        assert_eq!(row["sole_decider"], true);
+    }
+
+    /// mununu#1175 — a row decided on confirmed paths has no `trace_replay_failed` key (the
+    /// wire shape of every existing report is unchanged).
+    #[cfg(feature = "api")]
+    #[test]
+    fn x1175_a_row_decided_on_confirmed_paths_has_no_replay_failure_key() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let reach = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["native"],
+            ..Default::default()
+        };
+        let a = PortfolioAttribution::of(&reach);
+        assert!(a.trace_replay_failed.is_empty());
+        let report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "p".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "AG p".to_string(),
+                outcome: VerifyOutcome::Violated { false_cells: 0 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+                portfolio: Some(a),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(crate::api::models::SvVerifyAutoResponse::from(&report))
+            .expect("serialises");
+        assert!(
+            json["properties"][0]["portfolio"]
+                .get("trace_replay_failed")
+                .is_none(),
+            "{json:#}"
+        );
+    }
+
+    /// mununu#1175 — a trap certificate whose reachability half rests on a path the simulator
+    /// did not confirm lists it in the note's items, after the engines.
+    #[test]
+    fn x1175_a_trap_certificate_lists_a_reach_path_that_was_not_confirmed() {
+        use crate::adapter::btor2::predicate_expr::CmpOp;
+        use crate::adapter::trap_certificate::{TrapCertificate, TrapSource};
+        let good = crate::adapter::liveness_rescue::Atom {
+            signal: "st".to_string(),
+            op: CmpOp::Eq,
+            value: 0,
+        };
+        let cert = |reach_unconfirmed: Vec<String>| TrapCertificate {
+            signal: "st".to_string(),
+            value: 3,
+            source: TrapSource::Domain,
+            closure_engines: vec!["native"],
+            reach_engines: vec!["ic3"],
+            reach_unconfirmed,
+            witness: None,
+        };
+        let line = "ic3: the path it found was not confirmed on the concrete simulator (a \
+                    130-bit cell); no other member found a path, so this result rests on it alone";
+        let note = trap_certificate_note("p", &good, &cert(vec![line.to_string()]));
+        assert_eq!(
+            note.items.last().map(String::as_str),
+            Some(format!("reach — {line}").as_str()),
+            "{:?}",
+            note.items
+        );
+        let plain = trap_certificate_note("p", &good, &cert(Vec::new()));
+        assert_eq!(plain.items.len(), 5, "{:?}", plain.items);
     }
 
     /// PR C — the classifier agrees with the reducers: a bounded chain and a chain ending in a

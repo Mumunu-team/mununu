@@ -317,13 +317,19 @@ fn l2s_rung(
         Some((LivenessVerdict::Violated, outcome)) => {
             let mut by = vec!["l2s".to_string()];
             by.extend(outcome.reachable_by.iter().map(|s| s.to_string()));
-            (PropertyVerdict::Violated, by, Vec::new())
+            // mununu#1175 — a lasso the concrete simulator did not confirm is said on the row.
+            (
+                PropertyVerdict::Violated,
+                by,
+                l2s_unconfirmed_notes(&outcome),
+            )
         }
-        Some((LivenessVerdict::Inconclusive, outcome)) => (
-            PropertyVerdict::Unknown,
-            Vec::new(),
-            vec![l2s_undecided_note(budget, &outcome)],
-        ),
+        Some((LivenessVerdict::Inconclusive, outcome)) => {
+            // On a contradiction the unconfirmed side is the first thing a reader needs.
+            let mut notes = vec![l2s_undecided_note(budget, &outcome)];
+            notes.extend(l2s_unconfirmed_notes(&outcome));
+            (PropertyVerdict::Unknown, Vec::new(), notes)
+        }
         None => (
             PropertyVerdict::Unknown,
             Vec::new(),
@@ -407,6 +413,17 @@ fn kliveness_rung(
     (PropertyVerdict::Unknown, Vec::new(), vec![note])
 }
 
+/// mununu#1175 — the l2s members whose lasso the concrete simulator did not confirm, one line each
+/// ([`ReachOutcome::unconfirmed_notes`](crate::adapter::reach_portfolio::ReachOutcome::unconfirmed_notes)),
+/// named as the rung's.
+fn l2s_unconfirmed_notes(outcome: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<String> {
+    outcome
+        .unconfirmed_notes()
+        .into_iter()
+        .map(|line| format!("l2s {line}"))
+        .collect()
+}
+
 /// The l2s rung's abstention note: the budget the portfolio ran under and every member's refusal
 /// or budget abstention, so a reader can tell "more time may help" from "no member carries this"
 /// (Failure Paths: the note used to say only "undecided", hiding a fixed 60 s member cap).
@@ -442,12 +459,19 @@ fn l2s_undecided_note(
 /// straggler grace, the same value).
 const RUNG_STRAGGLER_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// One rung's answer on the parallel channel: who, and either `(verdict, stage, notes-or-by)` or
-/// the reason it abstained.
-type RungResult = (
-    &'static str,
-    Result<(PropertyVerdict, &'static str, Vec<String>), String>,
-);
+/// One rung's answer on the parallel channel: who, and either what it decided or the reason it
+/// abstained.
+type RungResult = (&'static str, Result<RungAnswer, String>);
+
+/// A rung's definite answer: the verdict, who decided it (the stage, then its members) and what
+/// the rung says beside it (the exact rung's cone size; mununu#1175 — an l2s lasso the concrete
+/// simulator did not confirm, which the three-field tuple this replaced had no place for).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RungAnswer {
+    verdict: PropertyVerdict,
+    decided_by: Vec<String>,
+    notes: Vec<String>,
+}
 
 /// What the parallel merge decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,22 +514,25 @@ fn merge_parallel_rungs(
         let Some((who, r)) = next else { break };
         pending -= 1;
         match r {
-            Ok((v, stage, mut by)) => match first {
+            Ok(RungAnswer {
+                verdict: v,
+                mut decided_by,
+                mut notes,
+            }) => match first {
                 None => {
                     first = Some((who, v));
                     merged.verdict = v;
-                    if who == "exact" {
-                        // `by` is the exact rung's notes (its cone size, …).
-                        merged.decided_by.push(stage.to_string());
-                        merged.notes.append(&mut by);
-                    } else {
-                        merged.decided_by.append(&mut by);
-                    }
+                    merged.decided_by.append(&mut decided_by);
+                    merged.notes.append(&mut notes);
                     grace_end = Some(std::time::Instant::now() + grace);
                 }
                 Some((first_who, first_v)) if first_v != v => {
                     // SOUNDNESS: two definite verdicts that cannot both be right; neither ships.
                     merged.verdict = PropertyVerdict::Unknown;
+                    // mununu#1175 — the later rung's notes cross too: a `violated` that rests
+                    // on a lasso the simulator did not confirm is the first thing a reader of
+                    // the alarm needs, whichever rung arrived first.
+                    merged.notes.append(&mut notes);
                     merged.notes.push(crate::adapter::owner::mununu_defect(&format!(
                         "🔴 SOUNDNESS ALARM — the liveness rungs contradict each other: `{first_who}` \
                          says {} and `{who}` says {}; both verdicts are withheld and retrying is \
@@ -514,10 +541,13 @@ fn merge_parallel_rungs(
                         v.as_str()
                     )));
                 }
-                Some(_) => merged.notes.push(format!(
-                    "{who} also decided {} (agrees with the first rung)",
-                    v.as_str()
-                )),
+                Some(_) => {
+                    merged.notes.append(&mut notes);
+                    merged.notes.push(format!(
+                        "{who} also decided {} (agrees with the first rung)",
+                        v.as_str()
+                    ));
+                }
             },
             Err(e) => merged.notes.push(format!("{who}: {e}")),
         }
@@ -600,7 +630,13 @@ pub fn verify_justice_with(
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
                             let _budget = crate::adapter::run_budget::enter(outer_budget);
-                            let r = exact_rung(named, lits, total, Some(cancel));
+                            let r = exact_rung(named, lits, total, Some(cancel)).map(
+                                |(verdict, stage, notes)| RungAnswer {
+                                    verdict,
+                                    decided_by: vec![stage.to_string()],
+                                    notes,
+                                },
+                            );
                             let _ = tx.send(("exact", r));
                         })
                     };
@@ -626,7 +662,11 @@ pub fn verify_justice_with(
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
                             } else {
-                                Ok((v, "l2s", by))
+                                Ok(RungAnswer {
+                                    verdict: v,
+                                    decided_by: by,
+                                    notes: n,
+                                })
                             };
                             let _ = tx.send(("l2s", r));
                         })
@@ -651,7 +691,11 @@ pub fn verify_justice_with(
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
                             } else {
-                                Ok((v, "kliveness", by))
+                                Ok(RungAnswer {
+                                    verdict: v,
+                                    decided_by: by,
+                                    notes: n,
+                                })
                             };
                             let _ = tx.send(("kliveness", r));
                         })
@@ -751,6 +795,111 @@ pub fn verify_justice_with(
 mod tests {
     use super::*;
 
+    /// A rung's definite answer, as the channel carries it.
+    fn ans(verdict: PropertyVerdict, by: &[&str], notes: &[&str]) -> Result<RungAnswer, String> {
+        Ok(RungAnswer {
+            verdict,
+            decided_by: by.iter().map(|s| s.to_string()).collect(),
+            notes: notes.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    /// mununu#1175 — the parallel ladder's l2s rung answers `violated` on a lasso the simulator
+    /// did not confirm: the note crosses the channel with the verdict (the three-field answer it
+    /// replaced carried the deciding members and nothing else, so the note was dropped there).
+    #[test]
+    fn x1175_an_unconfirmed_l2s_lasso_crosses_the_parallel_merge_with_its_note() {
+        let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
+        tx.send((
+            "l2s",
+            ans(
+                PropertyVerdict::Violated,
+                &["l2s", "ic3"],
+                &["l2s ic3: the path it found was not confirmed on the concrete simulator (…)"],
+            ),
+        ))
+        .unwrap();
+        drop(tx);
+        let m = merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250));
+        assert_eq!(m.verdict, PropertyVerdict::Violated);
+        assert_eq!(m.decided_by, vec!["l2s".to_string(), "ic3".to_string()]);
+        assert!(
+            m.notes.iter().any(|n| n.contains("not confirmed")),
+            "{:?}",
+            m.notes
+        );
+    }
+
+    /// mununu#1175 — the same note when the l2s rung is the SECOND to answer: the merge keeps a
+    /// later rung's notes on a contradiction (exact `holds` first — the alarm is raised and the
+    /// unconfirmed lasso is what explains it) and on an agreement, in either arrival order.
+    /// Before, only the first arrival's notes were kept.
+    #[test]
+    fn x1175_a_later_rungs_unconfirmed_lasso_note_survives_the_parallel_merge() {
+        const NOTE: &str =
+            "l2s ic3: the path it found was not confirmed on the concrete simulator (…)";
+        let merge = |answers: Vec<RungResult>| {
+            let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
+            for a in answers {
+                tx.send(a).unwrap();
+            }
+            drop(tx);
+            merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250))
+        };
+        let exact = |v| ("exact", ans(v, &["exact"], &["cone 5b"]));
+        let l2s = || {
+            (
+                "l2s",
+                ans(PropertyVerdict::Violated, &["l2s", "ic3"], &[NOTE]),
+            )
+        };
+        let has = |m: &RungMerge, what: &str| m.notes.iter().any(|n| n.contains(what));
+
+        // Contradiction, the unconfirmed side second, then first.
+        for answers in [
+            vec![exact(PropertyVerdict::Holds), l2s()],
+            vec![l2s(), exact(PropertyVerdict::Holds)],
+        ] {
+            let m = merge(answers);
+            assert_eq!(m.verdict, PropertyVerdict::Unknown, "{m:?}");
+            assert!(has(&m, "contradict"), "{:?}", m.notes);
+            assert!(has(&m, "not confirmed"), "{:?}", m.notes);
+            assert!(has(&m, "cone 5b"), "both rungs' notes: {:?}", m.notes);
+        }
+        // Agreement, the unconfirmed side second, then first.
+        for answers in [
+            vec![exact(PropertyVerdict::Violated), l2s()],
+            vec![l2s(), exact(PropertyVerdict::Violated)],
+        ] {
+            let m = merge(answers);
+            assert_eq!(m.verdict, PropertyVerdict::Violated, "{m:?}");
+            assert!(has(&m, "also decided"), "{:?}", m.notes);
+            assert!(has(&m, "not confirmed"), "{:?}", m.notes);
+            assert!(has(&m, "cone 5b"), "both rungs' notes: {:?}", m.notes);
+        }
+    }
+
+    /// mununu#1175 — the l2s rung's own lines: an unconfirmed member is named as the rung's and
+    /// says whether the row rests on it alone.
+    #[test]
+    fn x1175_the_l2s_rung_names_a_member_whose_lasso_was_not_confirmed() {
+        let outcome = crate::adapter::reach_portfolio::ReachOutcome {
+            verdict: crate::adapter::reach_portfolio::ReachVerdict::Reachable,
+            reachable_by: vec!["ic3"],
+            unreachable_by: Vec::new(),
+            refused: Vec::new(),
+            abstained: Vec::new(),
+            undecided: Vec::new(),
+            trace: None,
+            trace_replay_failed: vec![("ic3", "not replayed: a 130-bit cell".to_string())],
+        };
+        let notes = l2s_unconfirmed_notes(&outcome);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("l2s ic3: "), "{notes:?}");
+        assert!(notes[0].contains("130-bit cell"), "{notes:?}");
+        assert!(notes[0].contains("rests on it alone"), "{notes:?}");
+    }
+
     /// mununu#1140 — two rungs that disagree within the grace merge to `Unknown` with a
     /// contradiction note; two that agree keep the first verdict and note the second; an
     /// abstention is a note. The seam the parallel ladder reaches its verdict through.
@@ -759,14 +908,11 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
         tx.send((
             "exact",
-            Ok((PropertyVerdict::Holds, "exact", vec!["cone 5b".into()])),
+            ans(PropertyVerdict::Holds, &["exact"], &["cone 5b"]),
         ))
         .unwrap();
-        tx.send((
-            "l2s",
-            Ok((PropertyVerdict::Violated, "l2s", vec!["l2s:native".into()])),
-        ))
-        .unwrap();
+        tx.send(("l2s", ans(PropertyVerdict::Violated, &["l2s:native"], &[])))
+            .unwrap();
         tx.send(("kliveness", Err("no bound within the slice".into())))
             .unwrap();
         drop(tx);
@@ -786,12 +932,9 @@ mod tests {
         );
 
         let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
-        tx.send((
-            "l2s",
-            Ok((PropertyVerdict::Violated, "l2s", vec!["l2s:native".into()])),
-        ))
-        .unwrap();
-        tx.send(("exact", Ok((PropertyVerdict::Violated, "exact", vec![]))))
+        tx.send(("l2s", ans(PropertyVerdict::Violated, &["l2s:native"], &[])))
+            .unwrap();
+        tx.send(("exact", ans(PropertyVerdict::Violated, &["exact"], &[])))
             .unwrap();
         drop(tx);
         let m = merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250));
@@ -805,7 +948,7 @@ mod tests {
 
         // A single definite verdict with the channel closing: taken, no wait past the close.
         let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
-        tx.send(("exact", Ok((PropertyVerdict::Holds, "exact", vec![]))))
+        tx.send(("exact", ans(PropertyVerdict::Holds, &["exact"], &[])))
             .unwrap();
         drop(tx);
         let started = std::time::Instant::now();

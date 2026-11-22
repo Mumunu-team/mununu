@@ -21,3 +21,5 @@ mod remedies_on_the_verb_1121;
 mod server_paths_resolve_through_one_function;
 mod source_scan;
 mod third_party_inventory_g1;
+mod unconfirmed_paths_reach_every_report_1175;
+mod verilator_build_directories_1176;
