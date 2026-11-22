@@ -66,6 +66,7 @@ examples/verify/**/build/
 
 # Claude Code (user-local)
 .claude/settings.json
+.claude/settings.local.json
 .claude/reviews/
 .claude/plans/
 .claude/scheduled_tasks.lock

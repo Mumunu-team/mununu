@@ -53,6 +53,26 @@ To reproduce the run locally: `docker run --rm -e MUNUNU_REQUIRE_TOOLS=1 -v "$(p
 
 **Host caveat.** slang ships prebuilts only for `linux-x86_64` and `macos-arm64`; on an Intel macOS host the Linux image is the supported way. `MUNUNU_SLANG_PATH` honours a local build.
 
+### A verdict-changing pull request runs the sweep on its head (rule, added 2026-11-22)
+
+> Source of truth: [`scripts/e2e-sweep.sh`](../../scripts/e2e-sweep.sh) and the `e2e` target of [`Makefile`](../../Makefile) — surface: CLI-only — a contributor instrument run in the image, not a shipped verb
+
+A pull request that changes a verdict a verb can return runs `make e2e` in `mununu-sva` on its head, with `main` merged in, **before** it merges. Its description quotes the sweep's summary line and the head it ran on:
+
+```
+Image-sweep: <n> passed, 0 failed, 0 CRASHED — head <sha>
+```
+
+**What counts as verdict-changing.** Any of: a verdict value on some input (`holds` / `violated` / `unknown`, a contradiction); a verdict that is now withheld, or now given, where it was not; a `bottom_reason`; the model a verdict is computed on (the lift, an abstraction pass, an engine's search or its budget defaults). In practice it is a pull request that ships a consumer briefing for a verdict-value or verdict-semantics change, or carries the `soundness` label. Documentation, test-only changes, refactors that keep every verdict, and wording-only message changes are exempt.
+
+**What a red row means.** The `#[ignore]`d set holds recorded verdicts (the corpus ledger, the differential census) that only the image can check. A row the change turned red is either a defect of the change, or a recorded verdict the change made stale. A stale record is updated in the same pull request, with the reason in the commit; the pull request does not merge on a red row.
+
+**A push after the sweep** that touches code needs a new sweep. A push that touches only documentation, or a merge of `main` whose incoming commits were themselves swept, does not; the description then says which head the quoted line is for and why it still stands.
+
+**Why.** The PR runner has no slang, so it cannot run any of that set. #1135 withheld an existential HOLDS over an undriven net, which was right, and merged with every required check green. One ledger row had recorded exactly such a HOLDS. The nightly sweep on `main` failed on it for two nights before anyone read the log (mununu#1192). The sweep on the pull request's head would have shown the stale row before the merge. The reviewer of a sensitive pull request checks the line (`review-orchestrator`, gate A17); no status check enforces it yet.
+
+**Cost.** One more image run per such pull request, serialised with the other heavy workloads on the host (see the hook-serialisation rule below).
+
 ### Validate any slang / SVA-touching change in the image — never on the bare host (rule, added 2026-07-13)
 
 > Source of truth: [`adapter::slang::locate_slang`](../../crates/mununu-core/src/adapter/slang/mod.rs) — surface: CLI+API
