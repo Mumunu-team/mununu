@@ -886,7 +886,13 @@ pub(crate) fn parse_lift_timeout_ms(v: Option<String>) -> Option<std::time::Dura
 /// terminal's Ctrl-C, a SIGINT / SIGTERM / SIGHUP handler kills every live member group before
 /// the process dies; it is installed only where the disposition is still the default, so an
 /// embedder's own handler is left alone.
-pub(crate) trait SpawnMember {
+///
+/// Private to this module (mununu#1186): [`run_with_timeout_cancellable`] is the one place a
+/// member child is spawned and waited on, so every member is stopped by the same four things —
+/// its own exit, the wall, the caller's flag, a cancelled run budget — and has its pipes
+/// drained while it runs. The two solver runners that had their own wait loop had neither the
+/// run-budget stop nor the drain.
+trait SpawnMember {
     fn spawn_member(&mut self) -> std::io::Result<(std::process::Child, MemberGroup)>;
 }
 
@@ -911,7 +917,7 @@ impl SpawnMember for std::process::Command {
 /// crash — kills the members too (the role the Unix signal handler plays). A process the member
 /// forks in the few microseconds between spawn and assignment escapes the job; a launcher forks
 /// after it starts, which is far later.
-pub(crate) struct MemberGroup {
+struct MemberGroup {
     #[cfg(unix)]
     pgid: i32,
     #[cfg(unix)]
@@ -954,7 +960,7 @@ impl MemberGroup {
 
     /// Kill the member and everything in its process group, then reap the child. The group is
     /// killed before the reap, so its id cannot have been reused by an unrelated process.
-    pub(crate) fn kill_and_reap(&self, child: &mut std::process::Child) {
+    fn kill_and_reap(&self, child: &mut std::process::Child) {
         #[cfg(unix)]
         member_group::kill(self.pgid);
         #[cfg(windows)]

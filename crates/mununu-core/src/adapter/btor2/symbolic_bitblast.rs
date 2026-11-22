@@ -5244,10 +5244,11 @@ impl ExactModel {
                 ));
             }
             if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(
-                    "symbolic bit-blaster: cancelled by the caller — another rung decided first"
-                        .into(),
-                );
+                // The flag says THAT the caller stopped this model, never why: a peer rung's
+                // verdict raises it (the parallel policy), and so does the run budget once the
+                // ladder is abandoned (`exact_ladder_within_run_budget`). The text names no
+                // cause (mununu#1186); the caller knows it.
+                return Err("symbolic bit-blaster: cancelled by the caller".into());
             }
             // mununu#804 — the caller's run budget (`run_budget`: the planner's per-property
             // budget, the HWMCC harness's per-instance budget, a rescue slice) is polled HERE,
@@ -5930,7 +5931,8 @@ pub enum AbstentionKind {
     Latency,
     /// The wall clock (process-wide or per-request) — host-dependent; the attempt was cut, not refuted.
     Deadline,
-    /// The caller cancelled (another rung decided first).
+    /// The caller cancelled: another rung decided first, or the run budget abandoned the ladder.
+    /// The message does not say which (mununu#1186).
     Cancelled,
     /// An atom pins or reaches a primary input — a soundness refusal; another engine, not a retry.
     RefusedInputAtom,
@@ -15378,7 +15380,7 @@ mod lever_gating_tests {
                 AbstentionKind::Deadline,
             ),
             (
-                "symbolic bit-blaster: cancelled by the caller — another rung decided first",
+                "symbolic bit-blaster: cancelled by the caller",
                 AbstentionKind::Cancelled,
             ),
             (
@@ -15511,6 +15513,8 @@ mod lever_gating_tests {
             ))
             .expect_err("cancelled");
         assert_eq!(abstention_kind(&err), AbstentionKind::Cancelled);
+        // mununu#1186 — the flag does not say why it went up, so neither does the text.
+        assert_eq!(err, "symbolic bit-blaster: cancelled by the caller");
     }
 }
 
