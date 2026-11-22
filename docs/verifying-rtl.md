@@ -116,6 +116,45 @@ justice verb's `kliveness` rung, applied to the response shape:
 Verify-auto's response rescue (`escalate_bottom`) does not use the fallback yet; that is the
 planner-wiring step, measured separately.
 
+**Where the fallback adds reach** (mununu#1145). The wall-class matrix carries a response family,
+`response_fallback_marginal_reach` in `crates/mununu-core/tests/wall_class_matrix.rs`: a timed
+handshake (`AG(pending == 1 -> AF ack == 1)`, acknowledged `n` cycles after the request), alone or
+with a 32-bit register `acc` beside it, and three columns. Measured 2026-11-22 on `b821c044` plus
+the test, debug build in `mununu-sva`; `H` holds, `V` violated, `⊥` undecided:
+
+| row | what it is | oracle | l2s alone | fallback alone | shipped |
+|---|---|---|---|---|---|
+| `hs_n10` | the handshake, `n = 10` | holds | H 1 s | H `k=15` 1 s | H 1 s |
+| `hs_add32_n10` | an adder over a free input beside it | holds | H 4 s | H `k=15` 1 s | H 5 s |
+| `hs_midsq32_n10` | a mid-square multiplier beside it | holds | ⊥ 61 s | H `k=15` 1 s | **H 62 s** |
+| `hs_gated_midsq32_n10` | the request is taken only while `acc[0]` is set | holds | ⊥ 61 s | H `k=15` 2 s | **H 63 s** |
+| `hs_midsq32_n200` | `n = 200` beside the multiplier | holds | ⊥ 61 s | ⊥ 61 s | ⊥ 121 s |
+| `hs_stall_n10` | the counter advances only on a free `go` | violated | V 0 s | ⊥ 64 s | V 0 s |
+| `hs_stall_midsq32_n10` | the same beside the multiplier | violated | ⊥ 60 s | ⊥ 61 s | ⊥ 124 s |
+| `hs_stall_fair_n10` | the same under `GF go == 1` | holds | H 1 s | H `k=15` 1 s | H 1 s |
+| `hs_stall_fair_midsq32_n10` | the same beside the multiplier | holds | ⊥ 61 s | H `k=15` 1 s | **H 61 s** |
+
+How to read it:
+
+- **The fallback proves three rows l2s leaves undecided** (bold). On two of them the multiplier is
+  outside the property's cone, and l2s is undecided only because its monitor shadows every
+  register; a cone slice before l2s would decide those (mununu#1210). On `hs_gated_midsq32_n10`
+  the multiplier is in the cone, so that row is the fallback's own reach.
+- **A proof by the fallback costs l2s's budgets first**: about a minute before a proof that takes
+  one or two seconds (mununu#1211).
+- **Two rows stay undecided.** With `n = 200` the ladder shows `k=15` reachable and no member
+  decides `k=255`. The violated row beside the multiplier has a two-state lasso that l2s does not
+  find, because the loop it accepts must also repeat `acc` (mununu#1210); the fallback cannot
+  report a violation.
+- **On a violated row the fallback only spends time**: it climbs every width. The shipped order
+  never runs it there when l2s finds the lasso.
+
+engine: l2s monitor decided as `bad`-reachability by the full reach portfolio (exact ROBDD,
+native BMC / k-induction, interpolation, owned SAT BMC and IC3, btormc, Pono, rIC3; subprocess
+members at 60 s), role: complete decider. Fallback: the commit-and-count monitor decided by rIC3
+in its portfolio mode, Pono `ic3bits` or native k-induction, widths 1 to 16 bits, role: HOLDS-only
+decider. Every fallback proof in the table was rIC3's.
+
 ### `btor2 verify-recoverability` — recoverability `AG EF good`
 
 > Source of truth: [`verify_recoverability`](../crates/mununu-core/src/adapter/recoverability.rs#L1051) — surface: (CLI+API+UI)
