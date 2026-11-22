@@ -2349,7 +2349,7 @@ fn attach_testbenches(
     response: &mut SvVerifyAutoResponse,
 ) -> ApiResult<()> {
     use crate::adapter::verilator::replay::{
-        ReplayDesign, counterexample_testbench, gtkwave_save, run_replay,
+        ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save, has_path, run_replay,
     };
     use crate::trace::ReplayResultView;
     let clock = match &request.tb_clock {
@@ -2393,6 +2393,22 @@ fn attach_testbenches(
                 .map(|f| f.name.clone()),
         )
         .collect();
+    let design = ReplayDesign {
+        top: &top,
+        clock: &clock,
+        reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
+        sources: &sources,
+    };
+    // mununu#1176 — whether a bench can be generated at all is a property of the request's
+    // names, asked once; a row with a path to replay then carries the reason where it would
+    // have carried the bench. The additional sources' names were checked at the lift;
+    // `source_name` is not staged under its own name there, so it is first checked here.
+    let refusal = bench_refusal(&design).map(|r| {
+        r.message(
+            "name the sources with only those characters (`source_name`, \
+             `additional_sources[].name`)",
+        )
+    });
     for (idx, (row, p)) in response
         .properties
         .iter_mut()
@@ -2402,12 +2418,15 @@ fn attach_testbenches(
         let Some(cex) = &p.counterexample else {
             continue;
         };
-        let design = ReplayDesign {
-            top: &top,
-            clock: &clock,
-            reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
-            sources: &sources,
-        };
+        if let Some(why) = &refusal {
+            if !has_path(cex) {
+                continue;
+            }
+            if let Some(trace) = row.trace.as_mut() {
+                trace.replay = Some(TraceReplay::without_bench(why, request.replay));
+            }
+            continue;
+        }
         let Some(bench) = counterexample_testbench(&design, cex) else {
             continue;
         };
@@ -2416,13 +2435,20 @@ fn attach_testbenches(
         // builds and runs it there, and the row carries the verdict; the directory itself is not
         // part of the response (the VCD is reported by size, the files by content).
         let result = request.replay.then(|| {
-            let dir = std::env::temp_dir().join(format!(
-                "mununu-replay-{}-{idx}-{}",
-                std::process::id(),
-                p.name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
-            ));
-            let staged: Result<(), String> = (|| {
-                std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            // The scratch directory sits under the root every Verilator build of this process
+            // uses (`MUNUNU_LIFT_STAGING_ROOT`, else the system temporary directory); a root
+            // whose path has whitespace is refused there with the variable to set
+            // (mununu#1176) and reaches the row as `replay: unavailable — …`.
+            let dir = crate::adapter::verilator::scratch_root().map(|root| {
+                root.join(format!(
+                    "mununu-replay-{}-{idx}-{}",
+                    std::process::id(),
+                    p.name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+                ))
+            });
+            let at: Result<&std::path::Path, String> = dir.as_deref().map_err(Clone::clone);
+            let staged: Result<&std::path::Path, String> = at.and_then(|dir| {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 let mut files: Vec<(String, &str)> =
                     vec![(sources[0].clone(), request.lift.source.as_str())];
                 for f in &request.lift.additional_sources {
@@ -2432,7 +2458,7 @@ fn attach_testbenches(
                 files.push(("Makefile".to_string(), bench.makefile.as_str()));
                 files.push(("replay.gtkw".to_string(), gtkw.as_str()));
                 for (name, content) in files {
-                    let path = crate::adapter::staged_path(&dir, &name).map_err(|e| e.message)?;
+                    let path = crate::adapter::staged_path(dir, &name).map_err(|e| e.message)?;
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -2440,11 +2466,14 @@ fn attach_testbenches(
                     std::fs::write(&path, content)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
                 }
-                Ok(())
-            })();
-            let run = staged.and_then(|()| run_replay(&dir, true));
-            if crate::adapter::env_var::read("MUNUNU_KEEP_VERILATOR_TMP").is_none() {
-                let _ = std::fs::remove_dir_all(&dir);
+                Ok(dir)
+            });
+            let run = staged.and_then(|dir| run_replay(dir, true));
+            if let Ok(dir) = &dir
+                && crate::adapter::env_var::read("MUNUNU_KEEP_VERILATOR_TMP").is_none()
+            {
+                // Best effort: the scratch copy is not part of the response.
+                let _ = std::fs::remove_dir_all(dir);
             }
             ReplayResultView::from_run(bench.checks, run)
         });
@@ -2459,6 +2488,7 @@ fn attach_testbenches(
                 gtkw: Some(gtkw),
                 dir: None,
                 result,
+                not_generated: None,
             });
         }
     }

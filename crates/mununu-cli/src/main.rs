@@ -2451,7 +2451,9 @@ struct SvVerifyAutoArgs {
     /// Write a Verilator replay testbench for every counterexample to DIR/<property>/
     /// (`tb.cpp` + `Makefile`; `make -C DIR/<property>` builds and runs it). It resets the design,
     /// drives the trace's inputs, compares every register the trace names after each clock edge,
-    /// and runs the design's assertions under `--assert`.
+    /// and runs the design's assertions under `--assert`. Verilator's build does not run in a
+    /// directory whose full path has whitespace, and the Makefile takes source paths made of
+    /// ASCII letters, digits and `_` `-` `.` `/`; a row whose testbench was not written says why.
     #[arg(long = "emit-testbench", value_name = "DIR")]
     emit_testbench: Option<PathBuf>,
     /// The clock port the replay testbench toggles (default: the first of `clk`, `clk_i`,
@@ -5262,7 +5264,7 @@ fn render_faults(faults: &[mununu_core::trace::TraceFault]) -> String {
 
 fn render_verify_auto_text(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
-    replays: &std::collections::BTreeMap<String, CliReplay>,
+    replays: &std::collections::BTreeMap<String, CliReplayRow>,
 ) {
     println!(
         "verify-auto: {} propert{} verified, {} unsupported assertion(s)",
@@ -5552,7 +5554,13 @@ fn render_verify_auto_text(
             }
         }
         // 2026-10-29 — the replay, on the row, with the keys `--json` uses (`trace.replay.*`).
-        if let Some(r) = replays.get(&p.name) {
+        if let Some(CliReplayRow::NotWritten(t)) = replays.get(&p.name) {
+            println!(
+                "        replay testbench: not written — {}",
+                t.not_generated.as_deref().unwrap_or("no reason recorded")
+            );
+        }
+        if let Some(CliReplayRow::Written(r)) = replays.get(&p.name) {
             println!(
                 "        replay dir: {} ({} checks{}); open: gtkwave replay.vcd replay.gtkw",
                 r.dir.display(),
@@ -5634,7 +5642,7 @@ fn note_level_glyph(level: mununu_core::adapter::slang::verify_auto::NoteLevel) 
 fn render_verify_auto_json(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
     expectations: &Option<mununu_core::adapter::slang::expectations::ExpectationResult>,
-    replays: &std::collections::BTreeMap<String, CliReplay>,
+    replays: &std::collections::BTreeMap<String, CliReplayRow>,
 ) -> Result<(), String> {
     // mununu#536 — serialize the SAME type the HTTP API returns, via the one shared conversion
     // (`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`).
@@ -5654,8 +5662,15 @@ fn render_verify_auto_json(
     // files are on disk here, their contents travel too so one document reads the same on both
     // surfaces.
     for row in &mut view.properties {
-        let Some(r) = replays.get(&row.name) else {
-            continue;
+        let r = match replays.get(&row.name) {
+            Some(CliReplayRow::Written(r)) => r,
+            Some(CliReplayRow::NotWritten(t)) => {
+                if let Some(trace) = row.trace.as_mut() {
+                    trace.replay = Some(t.clone());
+                }
+                continue;
+            }
+            None => continue,
         };
         if let Some(trace) = row.trace.as_mut() {
             trace.replay = Some(mununu_core::trace::TraceReplay {
@@ -5668,6 +5683,7 @@ fn render_verify_auto_json(
                 gtkw: Some(r.gtkw.clone()),
                 dir: Some(r.dir.display().to_string()),
                 result: r.result.clone(),
+                not_generated: None,
             });
         }
     }
@@ -10230,14 +10246,21 @@ struct CliReplay {
     result: Option<mununu_core::trace::ReplayResultView>,
 }
 
+/// One row's answer to `--emit-testbench`: the files, or why a row with a path to replay has
+/// none (mununu#1176 — the entry `--json` prints as `trace.replay`, `not_generated` set).
+enum CliReplayRow {
+    Written(CliReplay),
+    NotWritten(mununu_core::trace::TraceReplay),
+}
+
 fn emit_replay_testbenches(
     dir: &Path,
     args: &SvVerifyAutoArgs,
     sources: &[(String, String)],
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
-) -> Result<std::collections::BTreeMap<String, CliReplay>, String> {
+) -> Result<std::collections::BTreeMap<String, CliReplayRow>, String> {
     use mununu_core::adapter::verilator::replay::{
-        ReplayDesign, counterexample_testbench, gtkwave_save, run_replay,
+        ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save, has_path, run_replay,
     };
     let mut emitted = std::collections::BTreeMap::new();
     let clock = match &args.tb_clock {
@@ -10274,17 +10297,45 @@ fn emit_replay_testbenches(
             .unwrap_or("top")
             .to_string()
     });
+    let design = ReplayDesign {
+        top: &top,
+        clock: &clock,
+        reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
+        sources: &paths,
+    };
+    // mununu#1176 — whether a bench can be generated at all depends on the design's names, not
+    // on a trace: asked once, and told on every row that has a path to replay. The lift stages
+    // the sources under names of its own, so a design under `my project/` gets this far.
+    let refusal = bench_refusal(&design).map(|r| {
+        r.message(
+            "copy the sources under a path with only those characters and run again (a link \
+             is not enough: the path is resolved before it is written)",
+        )
+    });
+    // Verilator's own build refuses a directory whose path has whitespace. The files are
+    // written either way; under `--replay` the row says why the bench did not run and what to
+    // pass instead.
+    let dir_refusal = mununu_core::adapter::verilator::build_dir_refusal(dir)
+        .map(|why| format!("{why}; pass `--emit-testbench` a directory whose full path has none"));
     let mut written = 0usize;
+    let mut not_written = 0usize;
     for p in &report.properties {
         let Some(cex) = &p.counterexample else {
             continue;
         };
-        let design = ReplayDesign {
-            top: &top,
-            clock: &clock,
-            reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
-            sources: &paths,
-        };
+        if let Some(why) = &refusal {
+            if has_path(cex) {
+                emitted.insert(
+                    p.name.clone(),
+                    CliReplayRow::NotWritten(mununu_core::trace::TraceReplay::without_bench(
+                        why,
+                        args.replay,
+                    )),
+                );
+                not_written += 1;
+            }
+            continue;
+        }
         let Some(bench) = counterexample_testbench(&design, cex) else {
             continue;
         };
@@ -10320,7 +10371,10 @@ fn emit_replay_testbenches(
         // `--replay`: build and run it now; everything `make` printed goes to replay.log, the
         // verdict to the row.
         let result = args.replay.then(|| {
-            let run = run_replay(&out, true);
+            let run = match &dir_refusal {
+                Some(why) => Err(why.clone()),
+                None => run_replay(&out, true),
+            };
             if let Ok(r) = &run {
                 let _ = std::fs::write(out.join("replay.log"), &r.output);
             }
@@ -10328,16 +10382,25 @@ fn emit_replay_testbenches(
         });
         emitted.insert(
             p.name.clone(),
-            CliReplay {
+            CliReplayRow::Written(CliReplay {
                 dir: out,
                 bench,
                 gtkw,
                 result,
-            },
+            }),
         );
         written += 1;
     }
-    if written == 0 {
+    match (&refusal, &dir_refusal) {
+        (Some(why), _) if not_written > 0 => {
+            eprintln!("replay testbench: not written for {not_written} counterexample(s) — {why}")
+        }
+        (None, Some(why)) if written > 0 && !args.replay => {
+            eprintln!("replay testbench: `make` will not build there — {why}")
+        }
+        _ => {}
+    }
+    if written == 0 && not_written == 0 {
         eprintln!("replay testbench: no counterexample with a path to replay");
     }
     let _ = sources;

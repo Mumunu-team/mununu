@@ -5736,8 +5736,9 @@ pub(crate) fn apply_simulate_reset_seeding(
             warnings.push(AdapterWarning {
                 kind: WarningKind::ApproximateTranslation,
                 message: format!(
-                    "failed to create Verilator tempdir: {}; skipping \
-                     reset-simulation seeding.",
+                    "no work directory for the Verilator build ({}); skipping \
+                     reset-simulation seeding. The typedef, property-syntactic and \
+                     case-literal seeding still apply.",
                     e.message
                 ),
                 location: None,

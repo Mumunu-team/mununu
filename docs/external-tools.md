@@ -243,7 +243,7 @@ When the Craig path becomes load-bearing for a milestone (e.g. V.3 speculative n
 
 ## Verilator
 
-> Source of truth: [`adapter/verilator/mod.rs::locate_verilator`](../crates/mununu-core/src/adapter/verilator/mod.rs#L79) — surface: CLI+API
+> Source of truth: [`adapter/verilator/mod.rs::locate_verilator`](../crates/mununu-core/src/adapter/verilator/mod.rs#L81) — surface: CLI+API
 
 [Verilator](https://www.veripool.org/verilator/) is an open-source SystemVerilog
 simulator. Mununu invokes it via subprocess for **R-S2b reset-state simulation
