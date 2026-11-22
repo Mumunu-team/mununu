@@ -143,6 +143,13 @@
           "description": "True iff `good` is genuinely reached under `phi` (the non-vacuity gate passed).",
           "type": "boolean"
         },
+        "notes": {
+          "description": "mununu#1175 — what the reader should know about the non-vacuity gate's own evidence: one line per reach-portfolio member whose path (to the target, or out of it) the concrete simulator did not confirm. Absent when every path was confirmed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "phi": {
           "description": "A human-readable predicate over named inputs (Phase 2b may carry a typed schedule/strategy).",
           "type": "string"

@@ -177,6 +177,66 @@ impl ReachOutcome {
             trace_replay_failed: Vec::new(),
         }
     }
+
+    /// mununu#1175 — the members that found `bad` reachable on a path the concrete simulator did
+    /// not confirm ([`Self::trace_replay_failed`]), each with whether it is the only member
+    /// that found one. Every report that reads an outcome carries these: `btor2 verify` and
+    /// `sv verify-auto` as a typed list, the other verbs as [`Self::unconfirmed_notes`] lines.
+    pub fn unconfirmed(&self) -> Vec<UnconfirmedPath> {
+        self.trace_replay_failed
+            .iter()
+            .map(|(member, reason)| UnconfirmedPath {
+                member: (*member).to_string(),
+                reason: reason.clone(),
+                sole_decider: self.reachable_by.len() == 1 && self.reachable_by[0] == *member,
+                also_found_by: self
+                    .reachable_by
+                    .iter()
+                    .filter(|m| *m != member)
+                    .map(|m| (*m).to_string())
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// [`Self::unconfirmed`] as one line per member, for a report whose carrier is a list of
+    /// notes or a detail text. Empty when every path found was confirmed (or none was found).
+    pub fn unconfirmed_notes(&self) -> Vec<String> {
+        self.unconfirmed()
+            .iter()
+            .map(UnconfirmedPath::note)
+            .collect()
+    }
+}
+
+/// mununu#1175 — one member whose path to `bad` the concrete simulator did not confirm (see
+/// [`ReachOutcome::trace_replay_failed`] for what that is evidence of).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnconfirmedPath {
+    /// The member (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`).
+    pub member: String,
+    /// Why the path was not confirmed, in the replay's words.
+    pub reason: String,
+    /// `true` when no other member found a path: the result rests on this one.
+    pub sole_decider: bool,
+    /// The other members that found a path (empty when [`Self::sole_decider`]).
+    pub also_found_by: Vec<String>,
+}
+
+impl UnconfirmedPath {
+    /// The line a note-carrying report prints. "Path" and not "counterexample": the same line
+    /// serves a violated invariant, a reached target and a reached encoding.
+    pub fn note(&self) -> String {
+        let rests_on = if self.also_found_by.is_empty() {
+            "no other member found a path, so this result rests on it alone".to_string()
+        } else {
+            format!("{} found a path too", self.also_found_by.join(", "))
+        };
+        format!(
+            "{}: the path it found was not confirmed on the concrete simulator ({}); {rests_on}",
+            self.member, self.reason
+        )
+    }
 }
 
 /// `(member, text)` notes — a refusal, an abstention, a progress line or a replay failure.
@@ -744,8 +804,9 @@ fn run_ic3(
                 // the reason went to the log alone and the verdict read like a replayed one.
                 // SOUNDNESS: the verdict is the engine's concretised counterexample, unconfirmed
                 // by the simulator; it is listed in `trace_replay_failed` (`sole_decider` when it
-                // is the whole verdict), which `btor2 verify` prints on CLI and API — the other
-                // verbs drop the list on their way to the report (mununu#1175).
+                // is the whole verdict), which every verb that reads this outcome carries into
+                // its report (mununu#1175; the consumers are enumerated by the policy test
+                // `unconfirmed_paths_reach_every_report_1175`).
                 match replay {
                     Replay::Confirmed(trace) if witness => store.carry("ic3", Ok(trace), None),
                     Replay::Confirmed(_) => {}
@@ -3638,6 +3699,50 @@ mod tests {
             "{}",
             got[0].1
         );
+    }
+
+    /// mununu#1175 — the carrier every report reads: one entry per member whose path was not
+    /// confirmed, saying whether the result rests on it alone and, when not, who else found a
+    /// path. Nothing for an outcome whose paths were all confirmed.
+    #[test]
+    fn x1175_an_unconfirmed_path_says_whether_the_result_rests_on_it_alone() {
+        let alone = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["ic3"],
+            trace_replay_failed: vec![("ic3", "a 130-bit cell".to_string())],
+            ..Default::default()
+        };
+        let u = alone.unconfirmed();
+        assert_eq!(u.len(), 1);
+        assert!(u[0].sole_decider && u[0].also_found_by.is_empty(), "{u:?}");
+        let line = &alone.unconfirmed_notes()[0];
+        assert!(
+            line.starts_with("ic3: ")
+                && line.contains("a 130-bit cell")
+                && line.contains("rests on it alone"),
+            "{line}"
+        );
+
+        let beside = ReachOutcome {
+            reachable_by: vec!["native", "ic3"],
+            ..alone.clone()
+        };
+        let u = beside.unconfirmed();
+        assert!(!u[0].sole_decider, "{u:?}");
+        assert_eq!(u[0].also_found_by, vec!["native".to_string()]);
+        assert!(
+            beside.unconfirmed_notes()[0].contains("native found a path too"),
+            "{:?}",
+            beside.unconfirmed_notes()
+        );
+
+        let confirmed = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["native"],
+            ..Default::default()
+        };
+        assert!(confirmed.unconfirmed().is_empty());
+        assert!(confirmed.unconfirmed_notes().is_empty());
     }
 
     /// mununu#1143 — REPRODUCER through the public driver: an IC3-only portfolio on a design

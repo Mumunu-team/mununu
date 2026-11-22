@@ -109,10 +109,28 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the owned SAT members' model build stopped (the node cap, the wall, a peer's verdict, the run budget) | `abstained` with the node count, or a cancellation; both members share the one build | mununu#1142 |
 | the member panicked | `refused`, "ended without a result (it panicked)", in both drivers; the owned-only collector tells a disconnect from the deadline | mununu#1143 |
 | a rung of the justice / response ladder panicked | named in the row's notes | mununu#1140 |
-| an IC3 counterexample on a design the simulator cannot carry | shipped `violated`, listed in `trace_replay_failed` with or without a witness; printed by `btor2 verify` (CLI, API) — open on `sv verify-auto` and the liveness / recoverability / fsm / cdc verbs, which drop the list (mununu#1175) | mununu#1143 |
+| a member's path the concrete simulator did not confirm (owned IC3 on a design with a cell wider than 128 bits; a subprocess member's witness that did not replay) | the verdict ships, and the member is listed with the reason and with whether another member found a path too (`ReachOutcome::unconfirmed`), with or without a witness, on every report that reads a reach outcome — the second table below | mununu#1143, mununu#1175 |
 | an owned-only member that panics while another is still alive | its death notice on the channel (`spawn_owned`), named in `refused`; a disconnect with no notice is the backstop | mununu#1143 |
 
 **Enumerating test:** for why the shared stop flag went up (the first and third rows), the enum `StopCause` (`PeerDecided`, `CallerCancelled`, `Wall`, `RunBudget`) in `adapter/reach_portfolio.rs`, carried by `StopSignal`: its three matches are exhaustive (`StopCause::is_clock`, `StopCause::sweep_cause`, `StopSignal::raise`), so a new cause does not compile until each says where it goes, and `every_stop_cause_reports_a_stopped_member_where_its_kind_goes` holds one row per cause against the three functions that settle a stopped member. One reader is not on the enum: the exact member's join (`await_straggler`) still reads the run budget itself to tell a budget stop from a peer's. For the other rows there is no one table; `x1142_the_sat_members_share_one_aig_model_and_its_stop`, `x1142_a_cap_stop_abstains_both_members_in_both_drivers` and the exhaustive `BuildStop` matches in `sat_bmc_built` / `ic3_built` pin the build-stop row; `x1143_the_owned_collector_tells_a_dead_member_from_one_still_running`, `x1143_a_panicked_member_is_a_named_refusal_in_both_drivers`, `x1143_the_portfolio_lists_an_unreplayed_ic3_violation_without_a_witness` and `x1143_an_unreplayed_ic3_violation_is_listed_without_a_witness` pin the panicked and unreplayed rows.
+
+**The unconfirmed-path row, by report** (mununu#1175). What varies there is which report reads a reach outcome; the reports are the call sites of the functions that return one.
+
+| Report | Where the unconfirmed path shows | Landed |
+|---|---|---|
+| `btor2 verify`, portfolio and owned-only (CLI, API) | `trace_replay_failed` | mununu#1143 |
+| `sv verify-auto` rows decided by a rescue (safety, response, fair-cycle response, EF reachability) | `portfolio.trace_replay_failed` on the row | mununu#1175 |
+| `sv verify-auto` antecedent-vacuity probe | an item of the `antecedent-reachable` note | mununu#1175 |
+| `sv verify-auto` `AG EF` trap certificate | an item of the certificate's note (the reach step; the closure step claims only its proof) | mununu#1175 |
+| response `verify-liveness` (`btor2` and `sv`; one pair, under fairness, a conjunction) | a line of the row's notes, on a decided row too | mununu#1175 |
+| justice `verify-liveness` / `verify-justice`, the l2s rung, serial and parallel ladder | a line of the verdict's notes | mununu#1175 |
+| `verify-recoverability` assumption discovery (the non-vacuity gate) | `notes` on the discovered assumption | mununu#1175 |
+| `check-fsm` (`btor2` and `sv`), with and without `--liveness` | `notes` on the register's row | mununu#1175 |
+| `sv cdc-lint` gray-step check | in the finding's detail | mununu#1175 |
+| `btor2 verify --fault … --target` | `trace_replay_failed` on the fault summary | mununu#1175 |
+| the k-liveness ladder; the recoverability vacuity probe | nothing to show: a reachable `bad` there only moves the ladder, and only the proof yields a hint | — |
+
+**Enumerating test:** `policy::unconfirmed_paths_reach_every_report_1175` derives the producers (every `pub` function whose return type names a `ReachOutcome`) and the readers (every file that calls one, with the number of calls) from the source, and holds one row per reader with the call that carries the list into its report; a new producer, a new reader or one more call in a listed reader fails it. `x1175_a_path_the_simulator_did_not_confirm_reaches_the_verify_auto_row` is the reproducer; `x1175_an_unconfirmed_path_says_whether_the_result_rests_on_it_alone` pins the one wording.
 
 ### `server-side-file-read`
 
