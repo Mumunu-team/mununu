@@ -1669,3 +1669,391 @@ fn wall_class_safety_on_memory() {
         "no lever decides these safety-on-memory cases (marginal-reach regression): {undecided:?}"
     );
 }
+
+// ---- Response properties: l2s and the k-liveness fallback (mununu#1145) -------------------------
+
+/// What sits beside the handshake, outside the cone of the response property.
+#[derive(Clone, Copy)]
+enum Beside {
+    Nothing,
+    /// `acc' = acc + din` over a free input (linear).
+    Adder(u32),
+    /// `acc' = middle bits of acc * acc, plus a constant` (no input; a bit-blasted multiplier).
+    MidSquare(u32),
+}
+
+/// A timed handshake as BTOR2, with a datapath register beside it that the property never reads.
+///
+/// ```text
+/// ack      = pending & (cnt == n)
+/// pending' = ack ? 0 : (pending | req)
+/// cnt'     = (pending & !ack) ? (step ? cnt + 1 : cnt) : 0      16 bits
+/// step     = 1, or the free input `go` when `stall`
+/// ```
+///
+/// `AG(pending == 1 -> AF ack == 1)` holds with latency `n` when `step` is 1. With `stall` it is
+/// violated (hold `go` low), and holds under the fairness assumption `GF go == 1`. The datapath
+/// changes none of this: no handshake signal reads `acc`, unless `gated`, where a request is taken
+/// only while `acc[0]` is set (`pending' = ack ? 0 : (pending | (req & acc[0]))`) — the verdicts
+/// are the same and `acc` is in the property's cone.
+fn timed_handshake(n: u32, beside: Beside, stall: bool, gated: bool) -> String {
+    fn e(lines: &mut Vec<String>, body: String) -> usize {
+        lines.push(format!("{} {body}", lines.len() + 1));
+        lines.len()
+    }
+    /// The datapath register, when there is one.
+    fn datapath(l: &mut Vec<String>, beside: Beside) -> Option<usize> {
+        let w = match beside {
+            Beside::Nothing => return None,
+            Beside::Adder(w) | Beside::MidSquare(w) => w,
+        };
+        let bw = e(l, format!("sort bitvec {w}"));
+        let acc = e(l, format!("state {bw} acc"));
+        let seed = e(l, format!("constd {bw} 2654435761"));
+        e(l, format!("init {bw} {acc} {seed}"));
+        let next = if matches!(beside, Beside::Adder(_)) {
+            let din = e(l, format!("input {bw} din"));
+            e(l, format!("add {bw} {acc} {din}"))
+        } else {
+            let b2w = e(l, format!("sort bitvec {}", 2 * w));
+            let wide = e(l, format!("uext {b2w} {acc} {w}"));
+            let sq = e(l, format!("mul {b2w} {wide} {wide}"));
+            let mid = e(l, format!("slice {bw} {sq} {} {}", w + w / 2 - 1, w / 2));
+            let c = e(l, format!("constd {bw} 40503"));
+            e(l, format!("add {bw} {mid} {c}"))
+        };
+        e(l, format!("next {bw} {acc} {next}"));
+        Some(acc)
+    }
+    let l = &mut Vec::new();
+    let b1 = e(l, "sort bitvec 1".into());
+    let b16 = e(l, "sort bitvec 16".into());
+    let req = e(l, format!("input {b1} req"));
+    let pending = e(l, format!("state {b1} pending"));
+    let cnt = e(l, format!("state {b16} cnt"));
+    let z1 = e(l, format!("zero {b1}"));
+    let z16 = e(l, format!("zero {b16}"));
+    e(l, format!("init {b1} {pending} {z1}"));
+    e(l, format!("init {b16} {cnt} {z16}"));
+    let bound = e(l, format!("constd {b16} {n}"));
+    let at = e(l, format!("eq {b1} {cnt} {bound}"));
+    let ack = e(l, format!("and {b1} {pending} {at}"));
+    // A gated request is taken only while the datapath's low bit is set: `acc` is then in the
+    // cone of the property, and no cone reduction can drop it.
+    let early = if gated { datapath(l, beside) } else { None };
+    let taken = match early {
+        Some(acc) => {
+            let low = e(l, format!("slice {b1} {acc} 0 0"));
+            e(l, format!("and {b1} {req} {low}"))
+        }
+        None => req,
+    };
+    let por = e(l, format!("or {b1} {pending} {taken}"));
+    let pn = e(l, format!("ite {b1} {ack} {z1} {por}"));
+    e(l, format!("next {b1} {pending} {pn}"));
+    let o16 = e(l, format!("one {b16}"));
+    let inc = e(l, format!("add {b16} {cnt} {o16}"));
+    let step = if stall {
+        let go = e(l, format!("input {b1} go"));
+        e(l, format!("ite {b16} {go} {inc} {cnt}"))
+    } else {
+        inc
+    };
+    let nack = e(l, format!("not {b1} {ack}"));
+    let wait = e(l, format!("and {b1} {pending} {nack}"));
+    let cn = e(l, format!("ite {b16} {wait} {step} {z16}"));
+    e(l, format!("next {b16} {cnt} {cn}"));
+    if !gated {
+        datapath(l, beside);
+    }
+    e(l, format!("output {ack} ack"));
+    let mut text = l.join("\n");
+    text.push('\n');
+    text
+}
+
+struct ResponseCase {
+    name: &'static str,
+    class: &'static str,
+    n: u32,
+    beside: Beside,
+    stall: bool,
+    /// The request is gated by the datapath's low bit (the datapath is in the cone).
+    gated: bool,
+    /// Fairness atoms (`GF atom` each), in the grammar of `verify-liveness --fairness`.
+    fair: &'static [&'static str],
+    /// By construction of [`timed_handshake`]; never `HardUnknown`.
+    oracle: Oracle,
+    /// The shipped path (l2s, then the fallback) decided the row when it was measured. An open
+    /// row is documented, not asserted: it marks where the levers stop.
+    decided: bool,
+}
+
+fn response_cases() -> Vec<ResponseCase> {
+    const NO_FAIR: &[&str] = &[];
+    const GO: &[&str] = &["go == 1"];
+    vec![
+        ResponseCase {
+            name: "hs_n10",
+            class: "response/control",
+            n: 10,
+            beside: Beside::Nothing,
+            stall: false,
+            gated: false,
+            fair: NO_FAIR,
+            oracle: Oracle::Holds,
+            decided: true,
+        },
+        ResponseCase {
+            name: "hs_add32_n10",
+            class: "response/beside-adder",
+            n: 10,
+            beside: Beside::Adder(32),
+            stall: false,
+            gated: false,
+            fair: NO_FAIR,
+            oracle: Oracle::Holds,
+            decided: true,
+        },
+        ResponseCase {
+            name: "hs_midsq32_n10",
+            class: "response/beside-multiplier",
+            n: 10,
+            beside: Beside::MidSquare(32),
+            stall: false,
+            gated: false,
+            fair: NO_FAIR,
+            oracle: Oracle::Holds,
+            decided: true,
+        },
+        ResponseCase {
+            name: "hs_gated_midsq32_n10",
+            class: "response/gated-by-multiplier",
+            n: 10,
+            beside: Beside::MidSquare(32),
+            stall: false,
+            gated: true,
+            fair: NO_FAIR,
+            oracle: Oracle::Holds,
+            decided: true,
+        },
+        ResponseCase {
+            name: "hs_midsq32_n200",
+            class: "response/beside-multiplier",
+            n: 200,
+            beside: Beside::MidSquare(32),
+            stall: false,
+            gated: false,
+            fair: NO_FAIR,
+            oracle: Oracle::Holds,
+            decided: false,
+        },
+        ResponseCase {
+            name: "hs_stall_n10",
+            class: "response/control",
+            n: 10,
+            beside: Beside::Nothing,
+            stall: true,
+            gated: false,
+            fair: NO_FAIR,
+            oracle: Oracle::Violated,
+            decided: true,
+        },
+        ResponseCase {
+            name: "hs_stall_midsq32_n10",
+            class: "response/beside-multiplier",
+            n: 10,
+            beside: Beside::MidSquare(32),
+            stall: true,
+            gated: false,
+            fair: NO_FAIR,
+            oracle: Oracle::Violated,
+            decided: false,
+        },
+        ResponseCase {
+            name: "hs_stall_fair_n10",
+            class: "response-under-fairness/control",
+            n: 10,
+            beside: Beside::Nothing,
+            stall: true,
+            gated: false,
+            fair: GO,
+            oracle: Oracle::Holds,
+            decided: true,
+        },
+        ResponseCase {
+            name: "hs_stall_fair_midsq32_n10",
+            class: "response-under-fairness/beside-multiplier",
+            n: 10,
+            beside: Beside::MidSquare(32),
+            stall: true,
+            gated: false,
+            fair: GO,
+            oracle: Oracle::Holds,
+            decided: true,
+        },
+    ]
+}
+
+/// The lever justification mununu#1145 asks of the response k-liveness fallback: the three ways
+/// to decide `AG(pending == 1 -> AF ack == 1)` on a fixed family, one column each.
+///
+/// - `l2s` — engine: the liveness-to-safety monitor (Biere–Artho–Schuppan, with Emerson–Lei
+///   fairness latches) decided as `bad`-reachability by the full reach portfolio (exact ROBDD,
+///   native BMC / k-induction, interpolation, owned SAT BMC and IC3, btormc, Pono, rIC3; the
+///   subprocess members at their default 60 s). Role: the complete decider, both sides.
+/// - `fallback` — engine: the commit-and-count k-liveness monitor decided by the proof-directed
+///   portfolio (rIC3, Pono, native k-induction) up the width ladder. Role: HOLDS-only.
+/// - `shipped` — what `btor2 verify-liveness` runs: l2s, then the fallback on an undecided row.
+///
+/// Asserted: no column contradicts a row's oracle; every row marked `decided` is decided by the
+/// shipped path; and the fallback has MARGINAL REACH on the set — it proves a row l2s leaves
+/// undecided. The last one is the lever's justification (CLAUDE.md, lever validation): when it
+/// fails, l2s decides everything the fallback does here, and the fallback is retired or given a
+/// new class representative.
+///
+/// What the rows say about l2s is as much the point. The monitor compares every state cell with
+/// its shadow, so a register the property never reads is in the cone of `bad`; beside a
+/// multiplier that costs the proof and, on the violated row, the two-state lasso (the
+/// counterexample must also close a cycle of `acc`). A cone reduction before l2s would turn the
+/// beside-multiplier rows into the control rows (mununu#1210); `hs_gated_midsq32_n10` is the row
+/// it cannot touch, so that row is the one the fallback's justification rests on.
+///
+/// Measured 2026-11-22 on `b821c044` plus this test (debug build, `mununu-sva`, 939 s): the
+/// fallback proved the three `decided` multiplier rows at `k=15` in 1–2 s each, and l2s left each
+/// of them undecided at its 60 s member budget.
+#[test]
+#[ignore = "manual: the response levers on the timed-handshake family; an undecided column waits out its 60 s member budgets, about 16 min in all; run with --ignored --nocapture in mununu-sva"]
+fn response_fallback_marginal_reach() {
+    use mununu_core::adapter::liveness_rescue::{
+        LivenessVerdict, response_liveness_rescue_under_fairness,
+        response_liveness_rescue_under_fairness_cancellable,
+    };
+    use mununu_core::adapter::reach_portfolio::{ReachMembers, ReachOutcome};
+    use std::time::Instant;
+
+    fn cell(v: LivenessVerdict, o: &ReachOutcome, secs: f64) -> String {
+        match v {
+            LivenessVerdict::Holds => format!("H[{}] {secs:.0}s", o.unreachable_by.join("+")),
+            LivenessVerdict::Violated => format!("V[{}] {secs:.0}s", o.reachable_by.join("+")),
+            LivenessVerdict::Inconclusive => format!("⊥ {secs:.0}s"),
+        }
+    }
+    let contradicts = |oracle: Oracle, v: LivenessVerdict| match oracle {
+        Oracle::Holds => v == LivenessVerdict::Violated,
+        Oracle::Violated | Oracle::NeverHolds => v == LivenessVerdict::Holds,
+        Oracle::HardUnknown => false,
+    };
+    let agrees = |oracle: Oracle, v: LivenessVerdict| match oracle {
+        Oracle::Holds => v == LivenessVerdict::Holds,
+        Oracle::Violated => v == LivenessVerdict::Violated,
+        Oracle::NeverHolds | Oracle::HardUnknown => false,
+    };
+
+    println!(
+        "\n{:26} {:42} {:30} {:30} {:34}  oracle",
+        "case", "class", "l2s", "fallback", "shipped"
+    );
+    println!("{}", "-".repeat(176));
+    let request = parse_response_atom("pending == 1").expect("request atom");
+    let grant = parse_response_atom("ack == 1").expect("grant atom");
+    let mut violations = Vec::new();
+    let mut undecided = Vec::new();
+    let mut newly_decided = Vec::new();
+    let mut marginal = Vec::new();
+    for c in response_cases() {
+        let model = timed_handshake(c.n, c.beside, c.stall, c.gated);
+        let fair: Vec<_> = c
+            .fair
+            .iter()
+            .map(|s| parse_response_atom(s).expect("fairness atom"))
+            .collect();
+        let fair_tuples: Vec<_> = fair
+            .iter()
+            .map(|a| (a.signal.as_str(), a.op, a.value))
+            .collect();
+
+        let t = Instant::now();
+        let (l2s, l2s_outcome) = response_liveness_rescue_under_fairness_cancellable(
+            &model,
+            &request,
+            &grant,
+            &fair,
+            false,
+            None,
+            ReachMembers::ALL,
+        )
+        .expect("the l2s monitor builds");
+        let l2s_cell = cell(l2s, &l2s_outcome, t.elapsed().as_secs_f64());
+
+        let t = Instant::now();
+        let ladder = response_kliveness(&model, &request, &grant, &fair_tuples, false, None);
+        let secs = t.elapsed().as_secs_f64();
+        let (fallback, fallback_cell) = match &ladder {
+            KlivenessLadder::Holds { bound, members } => (
+                LivenessVerdict::Holds,
+                format!("H[{bound} {}] {secs:.0}s", members.join("+")),
+            ),
+            KlivenessLadder::Undecided { tried, .. } => (
+                LivenessVerdict::Inconclusive,
+                format!("⊥ {secs:.0}s ({} widths)", tried.len()),
+            ),
+            KlivenessLadder::Failed(note) => {
+                violations.push(format!("{} / fallback: failed: {note}", c.name));
+                (LivenessVerdict::Inconclusive, "FAILED".to_string())
+            }
+        };
+
+        let t = Instant::now();
+        let (shipped, shipped_outcome) =
+            response_liveness_rescue_under_fairness(&model, &request, &grant, &fair, false)
+                .expect("the l2s monitor builds");
+        let shipped_cell = cell(shipped, &shipped_outcome, t.elapsed().as_secs_f64());
+
+        println!(
+            "{:26} {:42} {:30} {:30} {:34}  {:?}{}",
+            c.name,
+            c.class,
+            l2s_cell,
+            fallback_cell,
+            shipped_cell,
+            c.oracle,
+            if c.decided { "" } else { " (open row)" }
+        );
+        if let KlivenessLadder::Undecided { tried, .. } = &ladder {
+            println!("    fallback tried: {}", tried.join(", "));
+        }
+        for (lever, v) in [("l2s", l2s), ("fallback", fallback), ("shipped", shipped)] {
+            if contradicts(c.oracle, v) {
+                violations.push(format!("{} / {lever}: {v:?} vs {:?}", c.name, c.oracle));
+            }
+        }
+        match (c.decided, agrees(c.oracle, shipped)) {
+            (true, false) => undecided.push(c.name),
+            (false, true) => newly_decided.push(c.name),
+            _ => {}
+        }
+        if fallback == LivenessVerdict::Holds && l2s != LivenessVerdict::Holds {
+            marginal.push(c.name);
+        }
+    }
+    println!("{}", "-".repeat(176));
+    println!("the fallback proved, and l2s left undecided: {marginal:?}");
+    if !newly_decided.is_empty() {
+        println!("open rows the shipped path now decides (update the row): {newly_decided:?}");
+    }
+    assert!(
+        violations.is_empty(),
+        "SOUNDNESS: a lever contradicts an oracle, or the fallback failed to build: {violations:?}"
+    );
+    assert!(
+        undecided.is_empty(),
+        "the shipped path no longer decides these rows (reach regression): {undecided:?}"
+    );
+    assert!(
+        !marginal.is_empty(),
+        "the k-liveness fallback proved no row that l2s left undecided: on this set it has no \
+         marginal reach. Either l2s now decides the multiplier rows (then the fallback needs a \
+         new class representative or is retired), or the fallback lost its proof."
+    );
+}
