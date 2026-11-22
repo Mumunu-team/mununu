@@ -19,7 +19,8 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the blocking handler body | runs under a run budget whose cancel flag goes up when the future is dropped | mununu#1147 |
 | engine threads and per-property budgets under it | children of the request's budget (`Budget::child(&current(), …)`), so they see the cancel; the fault-reach handler's budget made a child | mununu#1147 |
 | a subprocess child (yosys, btormc, Pono, rIC3) | the helper polls the flag and kills the child, returning `Interrupted` with the reason | mununu#1147 |
-| a solver query child (cvc5, MathSAT) | the same helper: the two runners had loops of their own that never read the run budget; the member-spawning trait is private to the helper now, so there is one place a member child is spawned and waited on | mununu#1186 |
+| a solver query child (cvc5, MathSAT) | the same helper: the two runners had loops of their own that never read the run budget. The helper is the one place that spawns a member child today; the member-spawning trait is private to `adapter/mod.rs`, which keeps other crates out but not the adapter's own submodules, and no test enforces the single call site | mununu#1186 |
+| the isolated `exact-symbolic` child (`MUNUNU_ISOLATE_ENGINES`) | open: waited on with no wall, no cancel flag and no run-budget kill (mununu#1196) | — |
 | a thread with no budget poll inside one operation (an OxiDD apply) | open: stops between stages only (mununu#996) | — |
 | an MCP tool call past `--request-timeout` | open: the call errors and the engine thread finishes on its own | — |
 

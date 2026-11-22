@@ -1163,6 +1163,16 @@ mod cancel_latch_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// mununu#1186 — a child's output that is not UTF-8 is kept, with the bad bytes replaced.
+    /// `read_to_string` gave nothing for it: on a clean exit the reply read as empty, and on a
+    /// stop at the limit the stderr line that says so was lost.
+    #[test]
+    fn x1186_a_child_s_output_that_is_not_utf8_is_kept_lossily() {
+        assert_eq!(read_lossy(&b"un\xffsat\n"[..]), "un\u{fffd}sat\n");
+        assert_eq!(read_lossy(&b"cvc5 interrupted by timeout.\n"[..]).len(), 29);
+        assert_eq!(read_lossy(&b""[..]), "");
+    }
+
     /// The grace runs from the FIRST sighting of the flag, not from the latch's creation, and
     /// a latch without a flag, or with one that is never set, never trips.
     #[test]
@@ -1197,7 +1207,7 @@ pub(crate) fn run_with_timeout_cancellable(
     timeout: std::time::Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<Option<(std::process::ExitStatus, String, String)>> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::Stdio;
     let (mut child, group) = command
         .stdin(if stdin_data.is_some() {
@@ -1218,18 +1228,10 @@ pub(crate) fn run_with_timeout_cancellable(
         });
     }
     // Drain both pipes concurrently so the child never blocks on a full buffer.
-    let mut so = child.stdout.take().expect("piped stdout");
-    let mut se = child.stderr.take().expect("piped stderr");
-    let so_h = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = so.read_to_string(&mut s);
-        s
-    });
-    let se_h = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = se.read_to_string(&mut s);
-        s
-    });
+    let so = child.stdout.take().expect("piped stdout");
+    let se = child.stderr.take().expect("piped stderr");
+    let so_h = std::thread::spawn(move || read_lossy(so));
+    let se_h = std::thread::spawn(move || read_lossy(se));
     let start = std::time::Instant::now();
     let mut latch = CancelLatch::new();
     enum End {
@@ -1238,8 +1240,14 @@ pub(crate) fn run_with_timeout_cancellable(
         Cancelled,
     }
     let end = loop {
-        if let Some(st) = child.try_wait()? {
-            break End::Done(st);
+        match child.try_wait() {
+            Ok(Some(st)) => break End::Done(st),
+            Ok(None) => {}
+            // The child's state is unknown: it is not left running with no owner.
+            Err(e) => {
+                group.kill_and_reap(&mut child);
+                return Err(e);
+            }
         }
         // mununu#1147 — the run that started this child is gone (an HTTP request past its
         // timeout cancels its budget): kill it now, and say so rather than "timed out".
@@ -1263,6 +1271,17 @@ pub(crate) fn run_with_timeout_cancellable(
             RUN_CANCELLED,
         )),
     }
+}
+
+/// A child's pipe read to its end, as text. Bytes that are not UTF-8 become U+FFFD:
+/// `read_to_string` returns nothing at all for such a stream, so a solver's reply, or the
+/// stderr line that says why it stopped, was dropped whole — the two solver runners decoded
+/// lossily before they moved onto this helper (mununu#1186).
+fn read_lossy(mut pipe: impl std::io::Read) -> String {
+    let mut bytes = Vec::new();
+    // A read error ends the stream where it failed; what arrived before it is kept.
+    let _ = pipe.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// mununu#1147 — the error a subprocess helper returns when the thread's run budget was

@@ -1196,12 +1196,31 @@ mod tests {
         }
     }
 
-    /// A stand-in for the cvc5 binary (Unix): answers `--version` the way cvc5 does, and on any
-    /// other invocation runs `body`, a shell fragment, with the query on its stdin.
+    /// What a stand-in solver does with a query.
+    #[derive(Debug, Clone, Copy)]
+    enum StandIn {
+        /// Never answers: sleeps 30 s.
+        Hangs,
+        /// Reads the query to its end, writes this many bytes of `a` and exits 0.
+        Replies { bytes: usize },
+        /// Writes one line on stderr and exits with this code.
+        Exits { code: i32, stderr: &'static str },
+    }
+
+    /// A stand-in for a solver binary, written into `dir`: it answers `--version` the way cvc5
+    /// does, and on any other invocation does `what`. It exists on every OS (the OS matrix's
+    /// same-tests rule): a `/bin/sh` script on Unix, a `.bat` + PowerShell pair on Windows.
     #[cfg(unix)]
-    fn stand_in_cvc5(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let fake = dir.join("cvc5");
+        let body = match what {
+            StandIn::Hangs => "exec sleep 30".to_string(),
+            StandIn::Replies { bytes } => {
+                format!("cat > /dev/null\nhead -c {bytes} /dev/zero | tr '\\000' a")
+            }
+            StandIn::Exits { code, stderr } => format!("echo '{stderr}' >&2\nexit {code}"),
+        };
+        let fake = dir.join("solver");
         std::fs::write(
             &fake,
             format!(
@@ -1225,16 +1244,57 @@ mod tests {
         fake
     }
 
+    /// The Windows stand-in: a batch file that hands its arguments to a PowerShell script, as
+    /// the other stand-in tools of this crate's tests do. The script reads and writes the raw
+    /// standard streams, so the reply's bytes are the ones written.
+    #[cfg(windows)]
+    fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
+        let body = match what {
+            StandIn::Hangs => "Start-Sleep 30\r\n".to_string(),
+            StandIn::Replies { bytes } => format!(
+                "$stdin = [Console]::OpenStandardInput()\r\n\
+                 $buf = New-Object byte[] 4096\r\n\
+                 while ($stdin.Read($buf, 0, 4096) -gt 0) {{ }}\r\n\
+                 $reply = [Text.Encoding]::ASCII.GetBytes('a' * {bytes})\r\n\
+                 $stdout = [Console]::OpenStandardOutput()\r\n\
+                 $stdout.Write($reply, 0, $reply.Length)\r\n\
+                 $stdout.Flush()\r\n\
+                 exit 0\r\n"
+            ),
+            StandIn::Exits { code, stderr } => {
+                format!("[Console]::Error.WriteLine('{stderr}')\r\nexit {code}\r\n")
+            }
+        };
+        let ps = dir.join("solver.ps1");
+        std::fs::write(
+            &ps,
+            format!(
+                "if ($args.Count -gt 0 -and $args[0] -eq '--version') {{\r\n  \
+                 [Console]::Out.WriteLine('This is cvc5 version 1.2.0')\r\n  exit 0\r\n}}\r\n{body}"
+            ),
+        )
+        .expect("write the stand-in");
+        let bat = dir.join("solver.bat");
+        std::fs::write(
+            &bat,
+            format!(
+                "@powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
+                ps.display()
+            ),
+        )
+        .expect("write the stand-in's launcher");
+        bat
+    }
+
     /// REPRODUCER (mununu#1186) — a cvc5 that does not stop at `--tlimit` is killed by the wall
     /// backstop, and the report reads as the budget stop it is, with the knob: the same
     /// sentence as cvc5's own exit at the limit. Fails on the parent, where the backstop said
     /// "cvc5 exceeded 1ms". The stand-in makes the backstop fire on every host; with the real
     /// cvc5 it fires only when the host is loaded, which is how the flake was found.
-    #[cfg(unix)]
     #[test]
     fn x1186_a_cvc5_killed_by_the_backstop_is_the_same_budget_stop() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let fake = stand_in_cvc5(dir.path(), "exec sleep 30");
+        let fake = stand_in(dir.path(), StandIn::Hangs);
         let _env = crate::adapter::env_var::override_for_test("MUNUNU_CVC5_PATH", &fake);
         let t0 = std::time::Instant::now();
         let err = run_cvc5_raw_cancellable("(exit)\n", 1, None)
@@ -1261,18 +1321,15 @@ mod tests {
     /// mununu#1186 — a reply larger than a pipe's buffer comes back whole. The runner used to
     /// read stdout only after the child had exited: a solver blocked on a full pipe never
     /// exits, so the backstop killed it and its reply was reported as a query past its limit
-    /// (fails on the parent with "cvc5 exceeded 3000ms"). Structural: pinned with a stand-in,
-    /// not observed on a real interpolant.
-    #[cfg(unix)]
+    /// (measured on the parent at a 3 s limit: "cvc5 exceeded 3000ms"). Structural: pinned with
+    /// a stand-in, not observed on a real interpolant. The limit is far above what the reply
+    /// takes, so a loaded host does not turn this into the backstop's row.
     #[test]
     fn x1186_a_reply_larger_than_the_pipe_buffer_is_read_whole() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let fake = stand_in_cvc5(
-            dir.path(),
-            "cat > /dev/null\nhead -c 300000 /dev/zero | tr '\\000' a",
-        );
+        let fake = stand_in(dir.path(), StandIn::Replies { bytes: 300_000 });
         let _env = crate::adapter::env_var::override_for_test("MUNUNU_CVC5_PATH", &fake);
-        let reply = run_cvc5_raw_cancellable("(exit)\n", 3_000, None)
+        let reply = run_cvc5_raw_cancellable("(exit)\n", 30_000, None)
             .expect("a clean exit hands the reply through");
         assert_eq!(reply.len(), 300_000);
         assert!(reply.bytes().all(|b| b == b'a'));
@@ -1281,41 +1338,39 @@ mod tests {
     /// ENUMERATING (mununu#1186) — every way a solver child stops, through the one runner both
     /// solvers use (`run_solver_query`): its own reply, its own exit at the limit, the wall
     /// backstop, the caller's flag, a cancelled run budget, a failure exit, a signal. Each is
-    /// named for what it is, and the two limit stops are the one sentence.
-    #[cfg(unix)]
+    /// named for what it is, and the two limit stops are the one sentence. The rows that end by
+    /// the child's own exit run under a 30 s limit they never reach, so a loaded host cannot
+    /// move them to the backstop's row. Every row runs on every OS but the signal's: a death by
+    /// signal is a Unix mechanism.
     #[test]
     fn x1186_every_way_a_solver_child_stops_is_named() {
         use std::sync::atomic::AtomicBool;
-        let sh = |script: &str| {
-            let mut c = std::process::Command::new("sh");
-            c.arg("-c").arg(script);
-            c
-        };
-        let run = |tool: &str, script: &str, limit_ms: u32, cancel: Option<&AtomicBool>| {
-            run_solver_query(tool, &mut sh(script), "q\n", limit_ms, 100, cancel)
+        let run = |tool: &str, what: StandIn, limit_ms: u32, cancel: Option<&AtomicBool>| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut solver = std::process::Command::new(stand_in(dir.path(), what));
+            run_solver_query(tool, &mut solver, "q\n", limit_ms, 100, cancel)
         };
         // Its own reply.
         assert_eq!(
-            run("cvc5", "cat > /dev/null; echo unsat", 5_000, None),
-            Ok("unsat\n".to_string())
+            run("cvc5", StandIn::Replies { bytes: 5 }, 30_000, None),
+            Ok("aaaaa".to_string())
         );
         // Its own exit at the limit (what cvc5 does on `--tlimit`).
+        let at_its_limit = StandIn::Exits {
+            code: 134,
+            stderr: "cvc5 interrupted by timeout.",
+        };
         assert_eq!(
-            run(
-                "cvc5",
-                "echo 'cvc5 interrupted by timeout.' >&2; exit 134",
-                5_000,
-                None
-            ),
+            run("cvc5", at_its_limit, 30_000, None),
             Err(query_limit_stop(
                 "cvc5",
-                5_000,
+                30_000,
                 LimitStop::SolverExit(Some(134))
             ))
         );
         // The wall backstop (MathSAT's only limit).
         assert_eq!(
-            run("mathsat", "exec sleep 30", 1, None),
+            run("mathsat", StandIn::Hangs, 1, None),
             Err(query_limit_stop(
                 "mathsat",
                 1,
@@ -1326,7 +1381,7 @@ mod tests {
         let up = AtomicBool::new(true);
         let t0 = std::time::Instant::now();
         assert_eq!(
-            run("cvc5", "exec sleep 30", 30_000, Some(&up)),
+            run("cvc5", StandIn::Hangs, 30_000, Some(&up)),
             Err(format!("cvc5 {CANCELLED_BY_CALLER}"))
         );
         assert!(
@@ -1341,7 +1396,7 @@ mod tests {
             let _g = enter(&budget);
             budget.cancel();
             let t0 = std::time::Instant::now();
-            let gone = run("cvc5", "exec sleep 30", 30_000, None).expect_err("a cancelled run");
+            let gone = run("cvc5", StandIn::Hangs, 30_000, None).expect_err("a cancelled run");
             assert!(gone.contains(crate::adapter::RUN_CANCELLED), "{gone}");
             assert!(
                 t0.elapsed() < std::time::Duration::from_secs(10),
@@ -1349,11 +1404,22 @@ mod tests {
                 t0.elapsed()
             );
         }
-        // A failure exit and a death by signal: the status and the first stderr line.
-        let died = run("mathsat", "echo boom >&2; exit 3", 5_000, None).expect_err("an exit 3");
+        // A failure exit: the status and the first stderr line.
+        let failed = StandIn::Exits {
+            code: 3,
+            stderr: "boom",
+        };
+        let died = run("mathsat", failed, 30_000, None).expect_err("an exit 3");
         assert!(died.contains("status 3") && died.contains("boom"), "{died}");
-        let signalled = run("cvc5", "kill -9 $$", 5_000, None).expect_err("a signal");
-        assert!(signalled.contains("signal"), "{signalled}");
+        // A death by signal (Unix: Windows has no such exit).
+        #[cfg(unix)]
+        {
+            let mut sh = std::process::Command::new("sh");
+            sh.arg("-c").arg("kill -9 $$");
+            let signalled =
+                run_solver_query("cvc5", &mut sh, "q\n", 30_000, 100, None).expect_err("a signal");
+            assert!(signalled.contains("signal"), "{signalled}");
+        }
     }
 
     /// mununu#1186 — a search stopped by its caller's flag says that and no more. It cannot
