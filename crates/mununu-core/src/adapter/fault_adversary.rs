@@ -44,6 +44,10 @@ pub struct FaultReachOutcome {
     /// mununu#1045 — on `violated` without a witness: why (each member's miss, the bound, the
     /// budget). `None` otherwise.
     pub trace_unavailable_reason: Option<String>,
+    /// mununu#1175 — the members whose path to the target the concrete simulator did not
+    /// confirm (the reach portfolio's `trace_replay_failed`); the verdict is unchanged. Empty
+    /// when every path found was confirmed.
+    pub trace_replay_failed: Vec<crate::adapter::reach_portfolio::UnconfirmedPath>,
 }
 
 /// Decide whether an attacker with the posture `spec` reaches `target` (a boolean atom such as
@@ -122,6 +126,7 @@ pub fn verify_fault_reach(
                 depth,
                 trace_by,
                 trace_unavailable_reason,
+                trace_replay_failed: outcome.unconfirmed(),
             })
         }
         None => {
@@ -182,6 +187,7 @@ pub fn verify_fault_reach(
                 depth,
                 trace_by,
                 trace_unavailable_reason,
+                trace_replay_failed: outcome.unconfirmed(),
             })
         }
     }

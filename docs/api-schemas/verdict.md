@@ -68,7 +68,7 @@ Rust source: [`PropertyVerdict`](../../crates/mununu-core/src/verdict.rs#L22) �
 
 ## SvVerifyAutoResponse — top-level shape
 
-Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L2496).
+Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L2510).
 
 ```jsonc
 {
@@ -86,7 +86,7 @@ Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs
 
 ## PropertyVerdictView — per-property
 
-Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3204).
+Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3227).
 
 ```jsonc
 {
@@ -237,7 +237,7 @@ Every verdict-modifying decision (config pin, parameter override, cut point, res
 
 ## Unsupported assertions
 
-Rust source: [`UnsupportedAssertionView`](../../crates/mununu-core/src/api/models.rs#L2283). One entry per SVA that could not be translated:
+Rust source: [`UnsupportedAssertionView`](../../crates/mununu-core/src/api/models.rs#L2297). One entry per SVA that could not be translated:
 
 ```jsonc
 { "name": "some_property", "kind": "assert", "reason": "unbounded ##[m:$] delay in sequence antecedent" }
@@ -256,7 +256,11 @@ Unsupported assertions are **surfaced honestly**, never silently dropped. Reason
                                             // reset_eventually | env_strategy
                                             // input_fairness | input_fairness_conjunction
   "non_vacuous": true,                      // gate: does `good` actually get reached under phi?
-  "engine":      "exact-symbolic per-cell"  // provenance
+  "engine":      "exact-symbolic per-cell", // provenance
+  "notes":       ["ic3: the path it found was not confirmed on the concrete simulator (…); …"]
+                                            // absent when empty: one line per portfolio member
+                                            // whose path, in one of the gate's two reach checks,
+                                            // the concrete simulator did not confirm
 }
 ```
 

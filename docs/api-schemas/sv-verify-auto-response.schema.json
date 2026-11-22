@@ -509,6 +509,13 @@
           },
           "type": "array"
         },
+        "trace_replay_failed": {
+          "description": "mununu#1175 — the members that found a path the concrete simulator did not confirm (a design the simulator cannot carry — a cell wider than 128 bits — or a witness that did not replay; the reason says which). The row's verdict is unchanged; `sole_decider` marks the member the verdict rests on alone. The same rows as `btor2 verify`'s `trace_replay_failed`. Absent when every path found was confirmed.",
+          "items": {
+            "$ref": "#/definitions/TraceReplayFailureView"
+          },
+          "type": "array"
+        },
         "undecided": {
           "default": [],
           "description": "mununu#1022 — the members that searched to their own bound without a verdict, each with how far it got. Absent on older reports; empty when none did.",
@@ -1384,6 +1391,29 @@
           "description": "The Verilator testbench (`--emit-testbench` / `emit_testbench`)."
         }
       },
+      "type": "object"
+    },
+    "TraceReplayFailureView": {
+      "description": "N5.4 — one member whose own counterexample did not replay (see [`Btor2VerifyResponse::trace_replay_failed`]).",
+      "properties": {
+        "member": {
+          "description": "The member (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`).",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why its witness did not replay, in the replay's words.",
+          "type": "string"
+        },
+        "sole_decider": {
+          "description": "`true` when this member is the only one in `reachable_by`: the `violated` verdict rests on a counterexample the design's simulator did not confirm.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "member",
+        "reason",
+        "sole_decider"
+      ],
       "type": "object"
     },
     "TraceStep": {

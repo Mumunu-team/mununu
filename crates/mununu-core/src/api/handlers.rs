@@ -987,7 +987,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             trace_by: o.trace_by.map(str::to_string),
             trace_shortest: None,
             trace_unavailable_reason: o.trace_unavailable_reason,
-            trace_replay_failed: Vec::new(),
+            trace_replay_failed: o.trace_replay_failed.iter().map(Into::into).collect(),
         }));
     }
     // `faults`: the fault-injection rewrite before any engine (the CLI `--fault`).
@@ -1249,7 +1249,7 @@ fn btor2_verify_liveness_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
-        notes: crate::adapter::liveness_rescue::undecided_notes(&outcome),
+        notes: crate::adapter::liveness_rescue::member_notes(&outcome),
     }))
 }
 
@@ -1294,7 +1294,7 @@ fn btor2_verify_liveness_all_handler_impl(
             .iter()
             .enumerate()
             .flat_map(|(i, o)| {
-                crate::adapter::liveness_rescue::undecided_notes(o)
+                crate::adapter::liveness_rescue::member_notes(o)
                     .into_iter()
                     .map(move |n| format!("response #{i}: {n}"))
             })
@@ -1357,7 +1357,7 @@ fn btor2_verify_liveness_under_fairness_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
-        notes: crate::adapter::liveness_rescue::undecided_notes(&outcome),
+        notes: crate::adapter::liveness_rescue::member_notes(&outcome),
     }))
 }
 
@@ -1482,6 +1482,7 @@ fn btor2_check_fsm_handler_impl(
             legal_encodings: f.legal_encodings.clone(),
             outcome: f.verdict.as_str().to_string(),
             illegal_encoding_reachable: f.is_finding(),
+            notes: f.notes.clone(),
         })
         .collect();
 
@@ -1715,7 +1716,7 @@ fn sv_verify_liveness_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
-        notes: crate::adapter::liveness_rescue::undecided_notes(&outcome),
+        notes: crate::adapter::liveness_rescue::member_notes(&outcome),
     }))
 }
 
@@ -1751,7 +1752,7 @@ fn sv_verify_liveness_all_handler_impl(
             .iter()
             .enumerate()
             .flat_map(|(i, o)| {
-                crate::adapter::liveness_rescue::undecided_notes(o)
+                crate::adapter::liveness_rescue::member_notes(o)
                     .into_iter()
                     .map(move |n| format!("response #{i}: {n}"))
             })
@@ -1861,6 +1862,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
             legal_encodings: f.legal_encodings.clone(),
             outcome: f.verdict.as_str().to_string(),
             illegal_encoding_reachable: f.is_finding(),
+            notes: f.notes.clone(),
         })
         .collect();
 

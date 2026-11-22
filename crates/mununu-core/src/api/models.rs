@@ -1199,15 +1199,17 @@ pub struct TraceReplayFailureView {
 impl TraceReplayFailureView {
     /// The outcome's replay failures as the wire rows.
     pub fn list(outcome: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
-        outcome
-            .trace_replay_failed
-            .iter()
-            .map(|(member, reason)| Self {
-                member: (*member).to_string(),
-                reason: reason.clone(),
-                sole_decider: outcome.reachable_by.len() == 1 && outcome.reachable_by[0] == *member,
-            })
-            .collect()
+        outcome.unconfirmed().iter().map(Self::from).collect()
+    }
+}
+
+impl From<&crate::adapter::reach_portfolio::UnconfirmedPath> for TraceReplayFailureView {
+    fn from(u: &crate::adapter::reach_portfolio::UnconfirmedPath) -> Self {
+        Self {
+            member: u.member.clone(),
+            reason: u.reason.clone(),
+            sole_decider: u.sole_decider,
+        }
     }
 }
 
@@ -1282,7 +1284,8 @@ pub struct Btor2JusticeEntry {
     pub outcome: String,
     /// The rung and engines that decided it.
     pub decided_by: Vec<String>,
-    /// Abstention reasons, when a rung abstained.
+    /// Abstention reasons, when a rung abstained; and (mununu#1175) each l2s member whose lasso
+    /// the concrete simulator did not confirm, on a `"violated"` row.
     pub notes: Vec<String>,
 }
 
@@ -1316,7 +1319,9 @@ pub struct Btor2VerifyLivenessResponse {
     pub converted_from_aiger: Option<bool>,
     /// Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget
     /// abstention (`"<member> refused: …"` / `"<member>: …"`), and the k-liveness fallback's note.
-    /// Empty — and omitted — on a decided row.
+    /// mununu#1175 — and, on any row, each member whose path the concrete simulator did not
+    /// confirm (`"<member>: the path it found was not confirmed on the concrete simulator (…)"`),
+    /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -1476,6 +1481,10 @@ pub struct FsmRegisterFinding {
     pub outcome: String,
     /// `true` when an illegal encoding is reachable (a finding).
     pub illegal_encoding_reachable: bool,
+    /// mununu#1175 — each member whose path to an illegal encoding the concrete simulator did
+    /// not confirm, saying whether the finding rests on it alone. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Response for `POST /api/v1/btor2/check-fsm`.
@@ -1510,6 +1519,10 @@ pub struct FsmLivenessView {
     pub returns_to_reset: String,
     /// Encodings no engine decided.
     pub undecided: Vec<u64>,
+    /// mununu#1175 — per encoding counted as reached on a path the concrete simulator did not
+    /// confirm: `"encoding <v>: <member>: …"`. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl From<&crate::adapter::fsm_scan::FsmLivenessFinding> for FsmLivenessView {
@@ -1522,6 +1535,7 @@ impl From<&crate::adapter::fsm_scan::FsmLivenessFinding> for FsmLivenessView {
             expected_terminal: f.expected_terminal.clone(),
             returns_to_reset: f.returns_to_reset.as_str().to_string(),
             undecided: f.undecided.clone(),
+            notes: f.notes.clone(),
         }
     }
 }
@@ -2753,6 +2767,11 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                             refused: views(&a.refused),
                             abstained: views(&a.abstained),
                             undecided: views(&a.undecided),
+                            trace_replay_failed: a
+                                .trace_replay_failed
+                                .iter()
+                                .map(TraceReplayFailureView::from)
+                                .collect(),
                         }
                     }),
                     // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
@@ -2967,7 +2986,9 @@ pub struct SvVerifyLivenessReport {
     pub decided_by: Vec<String>,
     /// Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget
     /// abstention (`"<member> refused: …"` / `"<member>: …"`), and the k-liveness fallback's note.
-    /// Empty — and omitted — on a decided row.
+    /// mununu#1175 — and, on any row, each member whose path the concrete simulator did not
+    /// confirm (`"<member>: the path it found was not confirmed on the concrete simulator (…)"`),
+    /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -2995,7 +3016,9 @@ pub struct SvLivenessResponseView {
     pub decided_by: Vec<String>,
     /// Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget
     /// abstention (`"<member> refused: …"` / `"<member>: …"`), and the k-liveness fallback's note.
-    /// Empty — and omitted — on a decided row.
+    /// mununu#1175 — and, on any row, each member whose path the concrete simulator did not
+    /// confirm (`"<member>: the path it found was not confirmed on the concrete simulator (…)"`),
+    /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -3436,6 +3459,13 @@ pub struct PortfolioAttributionView {
     /// how far it got. Absent on older reports; empty when none did.
     #[serde(default)]
     pub undecided: Vec<MemberRefusalView>,
+    /// mununu#1175 — the members that found a path the concrete simulator did not confirm (a
+    /// design the simulator cannot carry — a cell wider than 128 bits — or a witness that did
+    /// not replay; the reason says which). The row's verdict is unchanged; `sole_decider` marks
+    /// the member the verdict rests on alone. The same rows as `btor2 verify`'s
+    /// `trace_replay_failed`. Absent when every path found was confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace_replay_failed: Vec<TraceReplayFailureView>,
 }
 
 /// mununu#873 — one portfolio member's refusal of a design (mununu#893: also one member's budget
@@ -3648,6 +3678,7 @@ mod bottom_reason_view_tests {
                     refused: vec![("exact".into(), "over cap".into())],
                     abstained: vec![("native".into(), "resource limit at depth 2".into())],
                     undecided: vec![("interp".into(), "no fixpoint within 24 iterations".into())],
+                    trace_replay_failed: Vec::new(),
                 }),
                 ..bottom_prop(None)
             }],

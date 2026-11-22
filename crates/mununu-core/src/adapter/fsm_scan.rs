@@ -99,6 +99,10 @@ pub struct FsmFinding {
     /// an illegal encoding is **reachable** (a finding); `Unknown` = the portfolio
     /// could not decide; `Skipped` = a counter, not checked.
     pub verdict: PropertyVerdict,
+    /// mununu#1175 — what the deciding members say beside the verdict: each member whose path to
+    /// an illegal encoding the concrete simulator did not confirm, and whether the finding rests
+    /// on it alone. Empty otherwise.
+    pub notes: Vec<String>,
 }
 
 impl FsmFinding {
@@ -159,6 +163,7 @@ pub fn fsm_encoding_scan(btor2: &str, max_width: u32) -> Result<Vec<FsmFinding>,
                 kind: RegisterKind::Counter,
                 legal_encodings: Vec::new(),
                 verdict: PropertyVerdict::Skipped,
+                notes: Vec::new(),
             });
             continue;
         }
@@ -194,6 +199,7 @@ pub fn fsm_encoding_scan(btor2: &str, max_width: u32) -> Result<Vec<FsmFinding>,
             kind: RegisterKind::Fsm,
             legal_encodings: legal_vec,
             verdict: PropertyVerdict::from(outcome.verdict),
+            notes: outcome.unconfirmed_notes(),
         });
     }
     Ok(out)
@@ -217,6 +223,9 @@ pub struct FsmLivenessFinding {
     pub returns_to_reset: PropertyVerdict,
     /// Encodings whose reachability or absorption no engine decided.
     pub undecided: Vec<u64>,
+    /// mununu#1175 — per encoding counted as reached (not listed in `unreachable`) on a path the
+    /// concrete simulator did not confirm: `"encoding <v>: <member>: …"`. Empty otherwise.
+    pub notes: Vec<String>,
 }
 
 /// Liveness inventory of every FSM register [`fsm_encoding_scan`] would check, out of reset with
@@ -271,6 +280,7 @@ pub fn fsm_liveness_scan(
             expected_terminal: Vec::new(),
             returns_to_reset: PropertyVerdict::Skipped,
             undecided: Vec::new(),
+            notes: Vec::new(),
         };
         for &v in &legal {
             // bad = (reg == v): every other value is "in the set".
@@ -284,12 +294,20 @@ pub fn fsm_liveness_scan(
             })?;
             let mfile = parser::parse(&monitored)
                 .map_err(|e| format!("parsing the monitored BTOR2 for `{name}`: {}", e.message))?;
-            match PropertyVerdict::from(decide_reach_portfolio(&mfile).verdict) {
+            let reach = decide_reach_portfolio(&mfile);
+            match PropertyVerdict::from(reach.verdict) {
                 PropertyVerdict::Holds => {
                     f.unreachable.push(v);
                     continue;
                 }
-                PropertyVerdict::Violated => {}
+                // Reached. mununu#1175 — on a path the simulator did not confirm, the inventory
+                // says so: the encoding is left out of `unreachable` on that member's word.
+                PropertyVerdict::Violated => f.notes.extend(
+                    reach
+                        .unconfirmed_notes()
+                        .into_iter()
+                        .map(|line| format!("encoding {v}: {line}")),
+                ),
                 _ => {
                     f.undecided.push(v);
                     continue;
