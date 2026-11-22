@@ -1090,25 +1090,67 @@ fn gray_step_verdict(
     let Ok(mfile) = parser::parse(&monitored) else {
         return unchecked("could not parse its monitor".to_string());
     };
-    match PropertyVerdict::from(decide_reach_portfolio(&mfile).verdict) {
+    let outcome = decide_reach_portfolio(&mfile);
+    match PropertyVerdict::from(outcome.verdict) {
         PropertyVerdict::Holds => (
             PropertyVerdict::Holds,
             format!("`{name}` changes at most one bit per source cycle (gray step decided)"),
         ),
         PropertyVerdict::Violated => (
             PropertyVerdict::Violated,
-            format!(
-                "`{name}` can change two or more bits in one source cycle, so the destination \
-                 can sample a value the source never held; gray-code it or use a handshake"
-            ),
+            gray_step_violated_detail(&name, &outcome),
         ),
         v => unchecked(format!("was not decided ({})", v.as_str())),
     }
 }
 
+/// The detail of a `violated` gray-step row. mununu#1175 — a two-bit step found on a path the
+/// concrete simulator did not confirm says so after the finding, member by member.
+fn gray_step_violated_detail(
+    name: &str,
+    outcome: &crate::adapter::reach_portfolio::ReachOutcome,
+) -> String {
+    let mut detail = format!(
+        "`{name}` can change two or more bits in one source cycle, so the destination can sample \
+         a value the source never held; gray-code it or use a handshake"
+    );
+    for line in outcome.unconfirmed_notes() {
+        detail.push_str(" — ");
+        detail.push_str(&line);
+    }
+    detail
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1175 — a two-bit step found on a path the simulator did not confirm says so in
+    /// the row's detail; a confirmed one reads as before.
+    #[test]
+    fn x1175_a_gray_step_found_on_an_unconfirmed_path_says_so() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let unconfirmed = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["ic3"],
+            trace_replay_failed: vec![("ic3", "a 130-bit cell".to_string())],
+            ..Default::default()
+        };
+        let detail = gray_step_violated_detail("ptr", &unconfirmed);
+        assert!(
+            detail.starts_with("`ptr` can change two or more bits")
+                && detail.contains(" — ic3: the path it found was not confirmed")
+                && detail.contains("a 130-bit cell"),
+            "{detail}"
+        );
+        let confirmed = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["native"],
+            ..Default::default()
+        };
+        let detail = gray_step_violated_detail("ptr", &confirmed);
+        assert!(!detail.contains("not confirmed"), "{detail}");
+    }
 
     /// A hand-written netlist in yosys `write_json` shape: `clk_a` = bit 2, `clk_b` = bit 3.
     fn netlist(cells: &str, nets: &str) -> String {

@@ -3769,18 +3769,7 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
         .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
     let findings = fsm_encoding_scan(&content, args.max_width)?;
 
-    let registers: Vec<serde_json::Value> = findings
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "register": f.register,
-                "kind": f.kind.as_str(),
-                "legal_encodings": f.legal_encodings,
-                "outcome": f.verdict.as_str(),
-                "illegal_encoding_reachable": f.is_finding(),
-            })
-        })
-        .collect();
+    let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
@@ -3799,6 +3788,23 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
     let worst = worst_verdict(findings.iter().map(|f| PropertyVerdict::as_str(f.verdict)));
     ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
+}
+
+/// One register's illegal-encoding result as JSON — the same shape as the API's
+/// `FsmRegisterFinding`: `notes` (mununu#1175, a path the simulator did not confirm) only when
+/// there is one.
+fn fsm_register_json(f: &mununu_core::adapter::fsm_scan::FsmFinding) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "register": f.register,
+        "kind": f.kind.as_str(),
+        "legal_encodings": f.legal_encodings,
+        "outcome": f.verdict.as_str(),
+        "illegal_encoding_reachable": f.is_finding(),
+    });
+    if !f.notes.is_empty() {
+        row["notes"] = serde_json::json!(f.notes);
+    }
+    row
 }
 
 /// The liveness inventory as JSON — the same shape as the API's `FsmLivenessView`.
@@ -4188,7 +4194,7 @@ fn btor2_verify_liveness(args: Btor2LivenessOneArgs) -> Result<(), String> {
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
-    let summary = with_undecided_notes(summary, &outcome);
+    let summary = with_member_notes(summary, &outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
@@ -4283,7 +4289,7 @@ fn btor2_verify_liveness_under_fairness(
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
-    let summary = with_undecided_notes(summary, &outcome);
+    let summary = with_member_notes(summary, &outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
@@ -4292,13 +4298,14 @@ fn btor2_verify_liveness_under_fairness(
     Ok(())
 }
 
-/// Track V (V2) — add `notes` (why the row is undecided) to a `btor2 verify-liveness` summary; a
-/// decided row's summary is returned unchanged.
-fn with_undecided_notes(
+/// Add `notes` to a `btor2 verify-liveness` summary: why the row is undecided (Track V, V2), and
+/// on any row the members whose path the concrete simulator did not confirm (mununu#1175). A row
+/// with nothing to say is returned unchanged.
+fn with_member_notes(
     mut summary: serde_json::Value,
     outcome: &mununu_core::adapter::reach_portfolio::ReachOutcome,
 ) -> serde_json::Value {
-    let notes = mununu_core::adapter::liveness_rescue::undecided_notes(outcome);
+    let notes = mununu_core::adapter::liveness_rescue::member_notes(outcome);
     if !notes.is_empty() {
         summary["notes"] = serde_json::json!(notes);
     }
@@ -4323,7 +4330,7 @@ fn per_response_decided_by(
                 .chain(o.unreachable_by.iter())
                 .map(|e| e.to_string())
                 .collect(),
-            notes: mununu_core::adapter::liveness_rescue::undecided_notes(o),
+            notes: mununu_core::adapter::liveness_rescue::member_notes(o),
         })
         .collect()
 }
@@ -4425,6 +4432,11 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                 .then(|| mununu_core::api::models::Trace::attack(o.depth, &o.attack)),
             "trace_by": o.trace_by,
             "trace_unavailable_reason": o.trace_unavailable_reason,
+            "trace_replay_failed": o
+                .trace_replay_failed
+                .iter()
+                .map(mununu_core::api::models::TraceReplayFailureView::from)
+                .collect::<Vec<_>>(),
         });
         println!(
             "{}",
@@ -5359,6 +5371,12 @@ fn render_verify_auto_text(
                 r.determinism().tag(),
                 r.one_line()
             );
+        }
+        // mununu#1175 — a row decided on a path the concrete simulator did not confirm must not
+        // read like a replayed one: one line per member, on the row's own lines (`--json` has
+        // the same rows under `portfolio.trace_replay_failed`).
+        for unconfirmed in p.portfolio.iter().flat_map(|a| &a.trace_replay_failed) {
+            println!("        unconfirmed path: {}", unconfirmed.note());
         }
         // J3 — a verdict carried from a killed run's breadcrumb must not read like a fresh one:
         // it names the build and says what did not travel with it.
@@ -7499,7 +7517,7 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
             .chain(outcome.unreachable_by.iter())
             .map(|e| e.to_string())
             .collect(),
-        notes: mununu_core::adapter::liveness_rescue::undecided_notes(&outcome),
+        notes: mununu_core::adapter::liveness_rescue::member_notes(&outcome),
     };
     print_typed_report(&report)?;
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
@@ -7634,18 +7652,7 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
     let file = args.lift.primary_display();
     let findings = core_sv_check_fsm(&read_sv_lift(&args.lift)?, args.max_width)?;
 
-    let registers: Vec<serde_json::Value> = findings
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "register": f.register,
-                "kind": f.kind.as_str(),
-                "legal_encodings": f.legal_encodings,
-                "outcome": f.verdict.as_str(),
-                "illegal_encoding_reachable": f.is_finding(),
-            })
-        })
-        .collect();
+    let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
         "file": file,
         "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),

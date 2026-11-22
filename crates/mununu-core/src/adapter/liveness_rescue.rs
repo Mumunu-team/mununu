@@ -565,36 +565,45 @@ fn kliveness_after_l2s(
     }
 }
 
-/// Track V, V2 — why an undecided response row is undecided, for the report: every member's
-/// refusal (`"<member> refused: <why>"`) and stated abstention (`"<member>: <why>"`, the k-liveness
-/// fallback's note among them). EMPTY on a decided row, so a decided row's report is unchanged.
-/// Failure Paths: the response verbs used to report only `decided_by`, so an undecided row read the
-/// same whether every member refused the design or all searched to their bound.
-pub fn undecided_notes(outcome: &ReachOutcome) -> Vec<String> {
+/// What the portfolio's members say beside a response row's verdict, for the report.
+///
+/// Track V, V2 — on an UNDECIDED row, why: every member's refusal (`"<member> refused: <why>"`),
+/// stated abstention (`"<member>: <why>"`, the k-liveness fallback's note among them) and how far
+/// each member that searched to its bound got. Failure Paths: the response verbs used to report
+/// only `decided_by`, so an undecided row read the same whether every member refused the design or
+/// all searched to their bound.
+///
+/// mununu#1175 — on ANY row, every member whose lasso the concrete simulator did not confirm
+/// ([`ReachOutcome::unconfirmed_notes`]): a `violated` that rests on such a path used to read like
+/// a replayed one. A row decided on confirmed paths, or proved, still has no note.
+pub fn member_notes(outcome: &ReachOutcome) -> Vec<String> {
+    let mut notes = outcome.unconfirmed_notes();
     if matches!(
         outcome.verdict,
         ReachVerdict::Unreachable | ReachVerdict::Reachable
     ) {
-        return Vec::new();
+        return notes;
     }
-    outcome
-        .refused
-        .iter()
-        .map(|(m, why)| format!("{m} refused: {why}"))
-        .chain(
-            outcome
-                .abstained
-                .iter()
-                .map(|(m, why)| format!("{m}: {why}")),
-        )
-        // mununu#1022 — and how far each member that searched to its bound got.
-        .chain(
-            outcome
-                .undecided
-                .iter()
-                .map(|(m, how_far)| format!("{m} undecided: {how_far}")),
-        )
-        .collect()
+    notes.extend(
+        outcome
+            .refused
+            .iter()
+            .map(|(m, why)| format!("{m} refused: {why}"))
+            .chain(
+                outcome
+                    .abstained
+                    .iter()
+                    .map(|(m, why)| format!("{m}: {why}")),
+            )
+            // mununu#1022 — and how far each member that searched to its bound got.
+            .chain(
+                outcome
+                    .undecided
+                    .iter()
+                    .map(|(m, how_far)| format!("{m} undecided: {how_far}")),
+            ),
+    );
+    notes
 }
 
 /// Track V, V2 — the k-liveness width ladder alone on `(⋀_j GF fair_j) → AG(ante → AF cons)`
@@ -854,6 +863,61 @@ pub fn response_conjunction_property(responses: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::mu_calculus::parser as mu_parser;
+
+    /// mununu#1175 — the response verbs' notes name a member whose lasso the simulator did not
+    /// confirm on a DECIDED row too (the notes used to be empty on every decided row); a row
+    /// decided on confirmed paths, or proved, still has none, and an undecided row keeps its
+    /// refusal lines after the unconfirmed one.
+    #[test]
+    fn x1175_a_decided_response_row_names_a_member_whose_lasso_was_not_confirmed() {
+        let violated = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["ic3"],
+            trace_replay_failed: vec![("ic3", "a 130-bit cell".to_string())],
+            ..Default::default()
+        };
+        let notes = member_notes(&violated);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("ic3: ") && notes[0].contains("rests on it alone"),
+            "{notes:?}"
+        );
+
+        let confirmed = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["native"],
+            ..Default::default()
+        };
+        assert!(member_notes(&confirmed).is_empty());
+        let proved = ReachOutcome {
+            verdict: ReachVerdict::Unreachable,
+            unreachable_by: vec!["native"],
+            refused: vec![("pono", "absent".to_string())],
+            ..Default::default()
+        };
+        assert!(member_notes(&proved).is_empty(), "a proved row has no note");
+
+        // A contradiction is not a decided row: both the unconfirmed path and the refusal show.
+        let contradiction = ReachOutcome {
+            verdict: ReachVerdict::Contradiction,
+            reachable_by: vec!["ic3"],
+            unreachable_by: vec!["native"],
+            refused: vec![("pono", "absent".to_string())],
+            trace_replay_failed: vec![("ic3", "a 130-bit cell".to_string())],
+            ..Default::default()
+        };
+        let notes = member_notes(&contradiction);
+        assert!(notes[0].starts_with("ic3: "), "{notes:?}");
+        assert!(
+            !notes[0].contains("rests on it alone")
+                && notes[0].contains("native proved there is none"),
+            "an undecided row has no result to rest on a path: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n == "pono refused: absent"),
+            "{notes:?}"
+        );
+    }
 
     fn parse(s: &str) -> Formula {
         mu_parser::parse(s).unwrap_or_else(|e| panic!("parse `{s}`: {e:?}"))

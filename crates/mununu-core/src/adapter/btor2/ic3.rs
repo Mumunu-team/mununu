@@ -1376,8 +1376,14 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
         // mununu#1143 — only the simulator's own width refusal is "unavailable"; any other
         // replay error on a wide design is the refusal it is (the witness did not replay).
         Err(why) if too_wide && crate::adapter::btor2::witness::is_width_refusal(&why) => {
-            Replay::Unavailable(format!(
-                "the concrete simulator carries 128-bit cells; this design has a wider one ({why})"
+            // Failure Paths, remedy rule: nothing in the design is wrong and no flag widens the
+            // simulator, so the reason says whose limit it is.
+            Replay::Unavailable(crate::adapter::owner::mununu_limitation(
+                &format!(
+                    "the concrete simulator carries cells up to 128 bits and this design has a \
+                     wider one ({why})"
+                ),
+                None,
             ))
         }
         Err(why) => {

@@ -1476,22 +1476,32 @@ fn probe_vacuous(btor2_content: &str, good: &str) -> Option<VacuityWitness> {
 /// under the assumption. Otherwise it is trivially true — `good` unreachable (nothing to recover to),
 /// or `good` stuck-true (the system never leaves it) — and the φ is worthless. Both directions via the
 /// sound [`decide_reach_portfolio`]; a `Reachable` on each is required. Any non-`Reachable` (including
-/// `Unknown`) fails the gate — we NEVER report a `HoldsUnder` we cannot certify is non-vacuous.
-fn good_nonvacuous_under(content: &str, register: &str, value: u64) -> bool {
+/// `Unknown`, and a monitor that could not be built) fails the gate — we NEVER report a `HoldsUnder` we
+/// cannot certify is non-vacuous.
+///
+/// `None`: the gate fails. `Some(notes)`: it passes, and `notes` (mununu#1175) name every member
+/// whose path — to the target, or out of it — the concrete simulator did not confirm; the caller
+/// puts them on the [`DiscoveredAssumption`], so a gate passed on such a path says so.
+fn good_nonvacuous_under(content: &str, register: &str, value: u64) -> Option<Vec<String>> {
     use crate::adapter::btor2::bad_monitor::emit_ag_state_atom_monitor;
     use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio};
-    let reachable = |op: CmpOp| -> bool {
-        let Ok(m) = emit_ag_state_atom_monitor(content, register, op, value as u128, false) else {
-            return false;
-        };
-        let Ok(f) = crate::adapter::btor2::parser::parse(&m) else {
-            return false;
-        };
-        matches!(decide_reach_portfolio(&f).verdict, ReachVerdict::Reachable)
+    let reachable = |op: CmpOp, what: &str| -> Option<Vec<String>> {
+        let m = emit_ag_state_atom_monitor(content, register, op, value as u128, false).ok()?;
+        let f = crate::adapter::btor2::parser::parse(&m).ok()?;
+        let outcome = decide_reach_portfolio(&f);
+        matches!(outcome.verdict, ReachVerdict::Reachable).then(|| {
+            outcome
+                .unconfirmed_notes()
+                .into_iter()
+                .map(|line| format!("non-vacuity gate, {what}: {line}"))
+                .collect()
+        })
     };
     // good REACHED: `EF(REG == VALUE)` — the `AG(REG != VALUE)` monitor's `bad` is `(REG == VALUE)`.
     // good LEFT (not stuck-true): `EF(REG != VALUE)` — the `AG(REG == VALUE)` monitor's `bad` is `(REG != VALUE)`.
-    reachable(CmpOp::Ne) && reachable(CmpOp::Eq)
+    let mut notes = reachable(CmpOp::Ne, "the target is reached")?;
+    notes.extend(reachable(CmpOp::Eq, "the target is left")?);
+    Some(notes)
 }
 
 /// Capability B (refined-verdicts Phase 2) — DISCOVER an environment assumption φ under which an
@@ -1600,13 +1610,14 @@ fn discover_assumptions(
             // stays conditional-only (the caller never lifts it to a bare Holds).
             if verify_recoverability_with_predicates(&pinned, good, &[]).ok()
                 == Some(PropertyVerdict::Holds)
-                && good_nonvacuous_under(&pinned, &register, value)
+                && let Some(notes) = good_nonvacuous_under(&pinned, &register, value)
             {
                 found.push(DiscoveredAssumption {
                     phi: format!("{ctx_prefix}{name} == {c}"),
                     kind: AssumptionKind::InputHold,
                     non_vacuous: true,
                     engine: engine.clone(),
+                    notes,
                 });
             }
         }
@@ -1650,6 +1661,8 @@ fn synthesize_env_strategy_assumption(
         kind: AssumptionKind::EnvStrategy,
         non_vacuous: true,
         engine: "exact-symbolic env-strategy (νX. EF(good) ∧ ◇X)".to_string(),
+        // No reach-portfolio gate on this path: the strategy is the exact engine's own.
+        notes: Vec::new(),
     })
 }
 
@@ -1759,12 +1772,13 @@ pub fn discover_game_env_assumption(
             // never lifts it to an unconditional realizable.
             let realizable =
                 exact_two_player_reach_realizable(&pinned, good, controllable) == Ok(true);
-            if realizable && good_nonvacuous_under(&pinned, &register, value) {
+            if realizable && let Some(notes) = good_nonvacuous_under(&pinned, &register, value) {
                 found.push(DiscoveredAssumption {
                     phi: format!("{name} == {c}"),
                     kind: AssumptionKind::InputHold,
                     non_vacuous: true,
                     engine: "two-player game realizable under env-input hold".to_string(),
+                    notes,
                 });
             }
         }
@@ -1867,12 +1881,15 @@ pub fn discover_game_fairness_assumption(
             let realizable =
                 exact_two_player_gr1_realizable(btor2_content, good, &atom, controllable)
                     == Ok(true);
-            if realizable && good_nonvacuous_under(btor2_content, &register, value) {
+            if realizable
+                && let Some(notes) = good_nonvacuous_under(btor2_content, &register, value)
+            {
                 found.push(DiscoveredAssumption {
                     phi: format!("GF({name} == {c})"),
                     kind: AssumptionKind::InputFairness,
                     non_vacuous: true,
                     engine: "two-player GR(1) game realizable under env-input fairness".to_string(),
+                    notes,
                 });
             }
         }
@@ -1936,9 +1953,7 @@ fn discover_game_fairness_conjunction(
     }
     // Non-vacuity is a property of the DESIGN (good reachable AND avoidable), independent of the
     // assumption — check it once. A dead/stuck target yields no meaningful conjunction.
-    if !good_nonvacuous_under(btor2_content, &register, value) {
-        return None;
-    }
+    let gate_notes = good_nonvacuous_under(btor2_content, &register, value)?;
     let ctrl_set: std::collections::HashSet<&str> = controllable.iter().copied().collect();
     let Ok(file) = crate::adapter::btor2::parser::parse(btor2_content) else {
         return None;
@@ -2036,6 +2051,7 @@ fn discover_game_fairness_conjunction(
         non_vacuous: true,
         engine: "two-player multi-pair GR(1) game realizable under env-input fairness conjunction"
             .to_string(),
+        notes: gate_notes,
     })
 }
 
@@ -2113,16 +2129,20 @@ fn discover_game_env_conjunction(
     }
 
     // The reused realizable + non-vacuous check on a pin set.
-    let wins = |pins: &[(String, u64)]| -> bool {
+    // `Some(notes)` on a win: the gate's unconfirmed-path lines for THAT pin set (mununu#1175).
+    let wins = |pins: &[(String, u64)]| -> Option<Vec<String>> {
         let (pinned, _) = pin_inputs_to_constants(btor2_content, pins);
-        exact_two_player_reach_realizable(&pinned, good, controllable) == Ok(true)
-            && good_nonvacuous_under(&pinned, &register, value)
+        (exact_two_player_reach_realizable(&pinned, good, controllable) == Ok(true))
+            .then(|| good_nonvacuous_under(&pinned, &register, value))
+            .flatten()
     };
 
     // Search the product of the axes' value ranges for a WINNING full pin.
     let ranges: Vec<u64> = axes.iter().map(|(_, w)| 1u64 << w).collect();
     let total_combos: u64 = ranges.iter().product();
-    let mut vals: Option<Vec<u64>> = None;
+    // The winning pin set and its gate notes; minimisation replaces both together, so the notes
+    // shipped are those of the pin set reported.
+    let mut vals: Option<(Vec<u64>, Vec<String>)> = None;
     for idx in 0..total_combos {
         if start.elapsed().as_millis() > budget_ms {
             break;
@@ -2141,12 +2161,12 @@ fn discover_game_env_conjunction(
             .zip(&candidate)
             .map(|((n, _), v)| (n.clone(), *v))
             .collect();
-        if wins(&pins) {
-            vals = Some(candidate);
+        if let Some(notes) = wins(&pins) {
+            vals = Some((candidate, notes));
             break;
         }
     }
-    let vals = vals?;
+    let (vals, mut gate_notes) = vals?;
 
     // MINIMIZE: greedily drop any pin the controller wins WITHOUT (that env input can stay free/adversarial).
     let mut needed: Vec<usize> = (0..axes.len()).collect();
@@ -2156,8 +2176,9 @@ fn discover_game_env_conjunction(
             .iter()
             .map(|&j| (axes[j].0.clone(), vals[j]))
             .collect();
-        if wins(&pins) {
+        if let Some(notes) = wins(&pins) {
             needed = trial; // input i's pin is redundant
+            gate_notes = notes;
         }
     }
     if needed.len() < 2 {
@@ -2174,6 +2195,7 @@ fn discover_game_env_conjunction(
         non_vacuous: true,
         engine: "two-player game realizable under env-input conjunction (pin-all + minimize)"
             .to_string(),
+        notes: gate_notes,
     })
 }
 

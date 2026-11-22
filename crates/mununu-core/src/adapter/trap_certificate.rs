@@ -144,6 +144,10 @@ pub struct TrapCertificate {
     pub closure_engines: Vec<&'static str>,
     /// The engines that reached `T` (the dual's `bad`).
     pub reach_engines: Vec<&'static str>,
+    /// mununu#1175 — one line per reach member whose path into `T` the concrete simulator did
+    /// not confirm ([`crate::adapter::reach_portfolio::ReachOutcome::unconfirmed_notes`]); the
+    /// certificate's reachability half rests on those paths. Empty when every path was confirmed.
+    pub reach_unconfirmed: Vec<String>,
     /// The shallowest reset → `T` path native BMC found (`None` when `T` is deeper than the bound;
     /// the certificate stands on the portfolio's reach verdict then).
     pub witness: Option<BmcTrace>,
@@ -402,9 +406,12 @@ fn check_candidate(
         Ok(f) => f,
         Err(e) => return (CandidateOutcome::Declined(e.to_string()), None),
     };
-    let reach_engines =
+    let (reach_engines, reach_unconfirmed) =
         match under_check_budget(|| reach_portfolio_rescue_diagnosed(btor2, &dual, reset_pinned)) {
-            Ok((RescueVerdict::Violated, reach)) => reach.reachable_by,
+            Ok((RescueVerdict::Violated, reach)) => {
+                let unconfirmed = reach.unconfirmed_notes();
+                (reach.reachable_by, unconfirmed)
+            }
             Ok((RescueVerdict::Holds, _)) => {
                 return (CandidateOutcome::ClosedButUnreachable, None);
             }
@@ -448,6 +455,7 @@ fn check_candidate(
             source: cand.source.clone(),
             closure_engines,
             reach_engines,
+            reach_unconfirmed,
             witness,
         }),
     )
