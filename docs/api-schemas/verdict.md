@@ -253,7 +253,11 @@ Unsupported assertions are **surfaced honestly**, never silently dropped. Reason
                                             // reset_eventually | env_strategy
                                             // input_fairness | input_fairness_conjunction
   "non_vacuous": true,                      // gate: does `good` actually get reached under phi?
-  "engine":      "exact-symbolic per-cell"  // provenance
+  "engine":      "exact-symbolic per-cell", // provenance
+  "notes":       ["ic3: the path it found was not confirmed on the concrete simulator (…); …"]
+                                            // absent when empty: one line per portfolio member
+                                            // whose path, in one of the gate's two reach checks,
+                                            // the concrete simulator did not confirm
 }
 ```
 

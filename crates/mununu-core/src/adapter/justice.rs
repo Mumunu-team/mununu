@@ -529,6 +529,10 @@ fn merge_parallel_rungs(
                 Some((first_who, first_v)) if first_v != v => {
                     // SOUNDNESS: two definite verdicts that cannot both be right; neither ships.
                     merged.verdict = PropertyVerdict::Unknown;
+                    // mununu#1175 — the later rung's notes cross too: a `violated` that rests
+                    // on a lasso the simulator did not confirm is the first thing a reader of
+                    // the alarm needs, whichever rung arrived first.
+                    merged.notes.append(&mut notes);
                     merged.notes.push(crate::adapter::owner::mununu_defect(&format!(
                         "🔴 SOUNDNESS ALARM — the liveness rungs contradict each other: `{first_who}` \
                          says {} and `{who}` says {}; both verdicts are withheld and retrying is \
@@ -537,10 +541,13 @@ fn merge_parallel_rungs(
                         v.as_str()
                     )));
                 }
-                Some(_) => merged.notes.push(format!(
-                    "{who} also decided {} (agrees with the first rung)",
-                    v.as_str()
-                )),
+                Some(_) => {
+                    merged.notes.append(&mut notes);
+                    merged.notes.push(format!(
+                        "{who} also decided {} (agrees with the first rung)",
+                        v.as_str()
+                    ));
+                }
             },
             Err(e) => merged.notes.push(format!("{who}: {e}")),
         }
@@ -821,6 +828,55 @@ mod tests {
             "{:?}",
             m.notes
         );
+    }
+
+    /// mununu#1175 — the same note when the l2s rung is the SECOND to answer: the merge keeps a
+    /// later rung's notes on a contradiction (exact `holds` first — the alarm is raised and the
+    /// unconfirmed lasso is what explains it) and on an agreement, in either arrival order.
+    /// Before, only the first arrival's notes were kept.
+    #[test]
+    fn x1175_a_later_rungs_unconfirmed_lasso_note_survives_the_parallel_merge() {
+        const NOTE: &str =
+            "l2s ic3: the path it found was not confirmed on the concrete simulator (…)";
+        let merge = |answers: Vec<RungResult>| {
+            let (tx, rx) = std::sync::mpsc::channel::<RungResult>();
+            for a in answers {
+                tx.send(a).unwrap();
+            }
+            drop(tx);
+            merge_parallel_rungs(&rx, 3, std::time::Duration::from_millis(250))
+        };
+        let exact = |v| ("exact", ans(v, &["exact"], &["cone 5b"]));
+        let l2s = || {
+            (
+                "l2s",
+                ans(PropertyVerdict::Violated, &["l2s", "ic3"], &[NOTE]),
+            )
+        };
+        let has = |m: &RungMerge, what: &str| m.notes.iter().any(|n| n.contains(what));
+
+        // Contradiction, the unconfirmed side second, then first.
+        for answers in [
+            vec![exact(PropertyVerdict::Holds), l2s()],
+            vec![l2s(), exact(PropertyVerdict::Holds)],
+        ] {
+            let m = merge(answers);
+            assert_eq!(m.verdict, PropertyVerdict::Unknown, "{m:?}");
+            assert!(has(&m, "contradict"), "{:?}", m.notes);
+            assert!(has(&m, "not confirmed"), "{:?}", m.notes);
+            assert!(has(&m, "cone 5b"), "both rungs' notes: {:?}", m.notes);
+        }
+        // Agreement, the unconfirmed side second, then first.
+        for answers in [
+            vec![exact(PropertyVerdict::Violated), l2s()],
+            vec![l2s(), exact(PropertyVerdict::Violated)],
+        ] {
+            let m = merge(answers);
+            assert_eq!(m.verdict, PropertyVerdict::Violated, "{m:?}");
+            assert!(has(&m, "also decided"), "{:?}", m.notes);
+            assert!(has(&m, "not confirmed"), "{:?}", m.notes);
+            assert!(has(&m, "cone 5b"), "both rungs' notes: {:?}", m.notes);
+        }
     }
 
     /// mununu#1175 — the l2s rung's own lines: an unconfirmed member is named as the rung's and

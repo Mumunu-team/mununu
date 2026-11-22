@@ -195,6 +195,11 @@ impl ReachOutcome {
                     .filter(|m| *m != member)
                     .map(|m| (*m).to_string())
                     .collect(),
+                disputed_by: self
+                    .unreachable_by
+                    .iter()
+                    .map(|m| (*m).to_string())
+                    .collect(),
             })
             .collect()
     }
@@ -221,16 +226,30 @@ pub struct UnconfirmedPath {
     pub sole_decider: bool,
     /// The other members that found a path (empty when [`Self::sole_decider`]).
     pub also_found_by: Vec<String>,
+    /// The members that proved there is NO path (the outcome is then a
+    /// [`ReachVerdict::Contradiction`] and no result ships — nothing "rests" on this path).
+    pub disputed_by: Vec<String>,
 }
 
 impl UnconfirmedPath {
     /// The line a note-carrying report prints. "Path" and not "counterexample": the same line
     /// serves a violated invariant, a reached target and a reached encoding.
     pub fn note(&self) -> String {
-        let rests_on = if self.also_found_by.is_empty() {
-            "no other member found a path, so this result rests on it alone".to_string()
-        } else {
-            format!("{} found a path too", self.also_found_by.join(", "))
+        let rests_on = match (self.also_found_by.is_empty(), self.disputed_by.is_empty()) {
+            (true, true) => {
+                "no other member found a path, so this result rests on it alone".to_string()
+            }
+            // A contradiction: the row is undecided, so no result rests on anything.
+            (true, false) => format!(
+                "no other member found a path, and {} proved there is none",
+                self.disputed_by.join(", ")
+            ),
+            (false, true) => format!("{} found a path too", self.also_found_by.join(", ")),
+            (false, false) => format!(
+                "{} found a path too, and {} proved there is none",
+                self.also_found_by.join(", "),
+                self.disputed_by.join(", ")
+            ),
         };
         format!(
             "{}: the path it found was not confirmed on the concrete simulator ({}); {rests_on}",
@@ -3743,6 +3762,28 @@ mod tests {
         };
         assert!(confirmed.unconfirmed().is_empty());
         assert!(confirmed.unconfirmed_notes().is_empty());
+
+        // A contradiction ships no result, so the line does not say one rests on the path: it
+        // says who proved the opposite.
+        let disputed = ReachOutcome {
+            verdict: ReachVerdict::Contradiction,
+            unreachable_by: vec!["native"],
+            ..alone.clone()
+        };
+        let line = &disputed.unconfirmed_notes()[0];
+        assert!(
+            !line.contains("rests on it alone") && line.contains("native proved there is none"),
+            "{line}"
+        );
+        let both = ReachOutcome {
+            reachable_by: vec!["sat-bmc", "ic3"],
+            ..disputed.clone()
+        };
+        let line = &both.unconfirmed_notes()[0];
+        assert!(
+            line.contains("sat-bmc found a path too, and native proved there is none"),
+            "{line}"
+        );
     }
 
     /// mununu#1143 — REPRODUCER through the public driver: an IC3-only portfolio on a design

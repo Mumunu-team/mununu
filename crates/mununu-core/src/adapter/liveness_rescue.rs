@@ -909,6 +909,11 @@ mod tests {
         let notes = member_notes(&contradiction);
         assert!(notes[0].starts_with("ic3: "), "{notes:?}");
         assert!(
+            !notes[0].contains("rests on it alone")
+                && notes[0].contains("native proved there is none"),
+            "an undecided row has no result to rest on a path: {notes:?}"
+        );
+        assert!(
             notes.iter().any(|n| n == "pono refused: absent"),
             "{notes:?}"
         );

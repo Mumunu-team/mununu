@@ -636,7 +636,7 @@ antecedent-vacuity probe and the `AG EF` trap certificate listing theirs as note
 `verify-liveness` / `verify-justice` rows, `check-fsm` rows and a `verify-recoverability` discovered assumption
 (`holds_under[].notes`) carry one line per member in `notes` — `<member>: the path it found was not confirmed on
 the concrete simulator (<reason>); no other member found a path, so this result rests on it alone` (or `<members>
-found a path too`); `sv cdc-lint` appends the line to the gray-step finding's detail; `btor2 verify --fault …
+found a path too`; on a contradiction, `… and <members> proved there is none`); `sv cdc-lint` appends the line to the gray-step finding's detail; `btor2 verify --fault …
 --target` has `trace_replay_failed` on its summary. A member
 of that second search that PROVES `bad` unreachable is a contradiction, not a note (mununu#1076): the verdict becomes
 `unknown` with `contradiction: true`, that member joins `unreachable_by` beside `reachable_by`, no trace ships, and

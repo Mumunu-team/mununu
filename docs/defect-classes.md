@@ -123,12 +123,13 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | `sv verify-auto` antecedent-vacuity probe | an item of the `antecedent-reachable` note | mununu#1175 |
 | `sv verify-auto` `AG EF` trap certificate | an item of the certificate's note (the reach step; the closure step claims only its proof) | mununu#1175 |
 | response `verify-liveness` (`btor2` and `sv`; one pair, under fairness, a conjunction) | a line of the row's notes, on a decided row too | mununu#1175 |
-| justice `verify-liveness` / `verify-justice`, the l2s rung, serial and parallel ladder | a line of the verdict's notes | mununu#1175 |
+| justice `verify-liveness` / `verify-justice`, the l2s rung, serial and parallel ladder | a line of the verdict's notes; the parallel merge keeps every rung's notes, whichever answered first (a contradiction between the rungs shows the unconfirmed side) | mununu#1175 |
 | `verify-recoverability` assumption discovery (the non-vacuity gate) | `notes` on the discovered assumption | mununu#1175 |
 | `check-fsm` (`btor2` and `sv`), with and without `--liveness` | `notes` on the register's row | mununu#1175 |
 | `sv cdc-lint` gray-step check | in the finding's detail | mununu#1175 |
 | `btor2 verify --fault … --target` | `trace_replay_failed` on the fault summary | mununu#1175 |
-| the k-liveness ladder; the recoverability vacuity probe | nothing to show: a reachable `bad` there only moves the ladder, and only the proof yields a hint | — |
+| the k-liveness ladder (the fallback of an undecided response or justice row) | no verdict rests on it — a reachable bound only moves the ladder — but `<bound> reachable` is in the row's abstention note, and the unconfirmed path is said beside it (`at <bound>, <member>: …`), as it is beside a contradiction on a bound | mununu#1175 |
+| the recoverability vacuity probe; the trap certificate's closure step | nothing to show: only the proof yields a hint, and a reachable `bad` in the closure step only rejects a candidate | — |
 
 **Enumerating test:** `policy::unconfirmed_paths_reach_every_report_1175` derives the producers (every `pub` function whose return type names a `ReachOutcome`) and the readers (every file that calls one, with the number of calls) from the source, and holds one row per reader with the call that carries the list into its report; a new producer, a new reader or one more call in a listed reader fails it. `x1175_a_path_the_simulator_did_not_confirm_reaches_the_verify_auto_row` is the reproducer; `x1175_an_unconfirmed_path_says_whether_the_result_rests_on_it_alone` pins the one wording.
 
