@@ -2,7 +2,7 @@
 
 > **Audience:** maintainers of the repositories that call `POST /api/v1/context/eval` (and the MCP `context_eval` tool) with a `template_ref` instead of a `formula` — mununu-ui, monono, rosf. Not a release note.
 >
-> Source of truth: [`resolve_template_ref_for_cache`](../../crates/mununu-core/src/api/handlers.rs#L3875) · [`template_ref_sidecar`](../../crates/mununu-core/src/api/handlers.rs#L3897) · [`context_dsl::string_literal`](../../crates/mununu-core/src/context_dsl/mod.rs#L38) — surface: API (CLI+API for the CTXDSL clause itself)
+> Source of truth: [`resolve_template_ref_for_cache`](../../crates/mununu-core/src/api/ops.rs#L420) · [`template_ref_sidecar`](../../crates/mununu-core/src/api/ops.rs#L446) · [`context_dsl::string_literal`](../../crates/mununu-core/src/context_dsl/mod.rs#L38) — surface: API (CLI+API for the CTXDSL clause itself)
 
 ## TL;DR
 

@@ -34,7 +34,7 @@ Concretely, the hole is here:
 CraigInterpolation,
 ```
 
-`PredicateSource::CraigInterpolation` returns empty today. `PredicateSource::Manual` (a caller-supplied closure) and `PredicateSource::WeakestPrecondition` (a heuristic that just grabs the next uncovered state register — *not* real WP back-substitution, see its own doc comment at [cegar.rs:104](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L104)) are the only working sources. The papers are the spec for promoting that placeholder to a real refinement engine.
+`PredicateSource::CraigInterpolation` returns empty today. `PredicateSource::Manual` (a caller-supplied closure) and `PredicateSource::WeakestPrecondition` (a heuristic that just grabs the next uncovered state register — *not* real WP back-substitution, see its own doc comment at [cegar.rs:105](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L105)) are the only working sources. The papers are the spec for promoting that placeholder to a real refinement engine.
 
 ---
 
@@ -70,7 +70,7 @@ Map to our code:
 | Spurious abstract path | `CegarIteration` abstract counterexample (lasso or prefix), recipe §4.2 |
 | Path-infeasibility proof | concrete-discharge UNSAT, recipe §4.3 ([cegar.rs](../../crates/mununu-core/src/adapter/btor2/cegar.rs) discharge query) |
 | **Per-location interpolant → new predicate** | `PredicateSource::CraigInterpolation` — **the placeholder** |
-| Add predicates, re-abstract | `predicate_cube_lift(P ∪ {I_j})`, the eager lifter (R.2.5), [cegar.rs:547](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L547) |
+| Add predicates, re-abstract | `predicate_cube_lift(P ∪ {I_j})`, the eager lifter (R.2.5), [cegar.rs:1053](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L1053) |
 | Bounded iteration / progress | `CegarOptions::max_iterations` (default 16), `CegarTermination` |
 
 The single most useful thing to carry from paper 2 into our codebase: **interpolate at every cut point of the spurious trace, not just one.** Our discharge query is a bounded-unrolling of the may-trace, so it has exactly the sequence of cut points Henzinger et al. interpolate at (`I_0, I_1, … I_{n-1}`, one per unrolled step). Harvesting the whole sequence in one refinement round is what gives the loop its empirical termination; harvesting one predicate per round (the naive reading) is what makes CEGAR oscillate. Recipe doc §6.3 cause-1 ("the interpolant repeats from earlier rounds → the loop is oscillating") is the failure mode this paper's per-cut-point harvesting is designed to avoid. When you wire `CraigInterpolation`, return `Vec<PredicateSpec>` from the cut sequence, not a single predicate.
@@ -108,7 +108,7 @@ pub enum MustEdgeInference {
 }
 ```
 
-The `SamplingConfluence` post-pass (commits `54a274c`, `cf1aaca`, `8273244`, 2026-06-06) promotes may-edges to `Sharp` and emits `MustHyperOnly` edges from sampled `(input, state)` confluence — a *cheap, unsound-until-proven* must-edge oracle, explicitly soundness-tagged as **candidate** until the SMT-backed must-proof lands ([kmts_lift.rs:846](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L846)). The interpolation work and the must-edge work are the two prongs of recipe §4.4's partition: an UNSAT core mentioning *bitvector constants* → interpolate a predicate (axis 1); a core mentioning *operator/must-witness terms* → an `R_must` proof or UF concretisation (axis 2).
+The `SamplingConfluence` post-pass (commits `54a274c`, `cf1aaca`, `8273244`, 2026-06-06) promotes may-edges to `Sharp` and emits `MustHyperOnly` edges from sampled `(input, state)` confluence — a *cheap, unsound-until-proven* must-edge oracle, explicitly soundness-tagged as **candidate** until the SMT-backed must-proof lands ([kmts_lift.rs:1587](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1587)). The interpolation work and the must-edge work are the two prongs of recipe §4.4's partition: an UNSAT core mentioning *bitvector constants* → interpolate a predicate (axis 1); a core mentioning *operator/must-witness terms* → an `R_must` proof or UF concretisation (axis 2).
 
 **The thing to internalise from Dimovski for our codebase:** interpolation alone is *not sufficient* in the 3-valued setting the way it is in the 2-valued setting. A `⊥` from a missing must-edge will not be cleared by *any* new predicate — you can split cubes forever and the diamond still can't commit. Recipe §4.7's stall detection ("a round produces neither a new predicate nor a new UF concretisation") is the guard for exactly this: it catches the case where the loop keeps interpolating against an indefiniteness whose real cause is on the must-axis. So the operational rule is: **partition the core first, then choose the axis.** Papers 1–2 give you axis 1; Dimovski tells you axis 2 exists and must be checked first when the `⊥` sits on a `◇`/must obligation.
 

@@ -192,7 +192,7 @@ After Phase 1.5 the Caliptra retry hit a single blocker: 16 input bits exceeded 
 
 **Design review surfaced a clean fit.** The audit at [`docs/design/proof-by-fire-findings.md`](./proof-by-fire-findings.md) ("Sidecar input-pruning design review") confirmed:
 
-- The `.mununu.json` schema already carries `inputs[]` ([`SvAnnotation::inputs`](../../crates/mununu-core/src/adapter/systemverilog/annotation.rs#L48), `InputAnnotation` at L108).
+- The `.mununu.json` schema already carries `inputs[]` ([`SvAnnotation::inputs`](../../crates/mununu-core/src/adapter/systemverilog/annotation.rs#L49), `InputAnnotation` at L108).
 - The sidecar resolver already has [`build_input_field_domains`](../../crates/mununu-core/src/adapter/sidecar/btor2_resolver.rs#L62).
 - The BTOR2 bit-blaster simply didn't call into either — it scoped sidecar resolution to state cells only.
 - The new capability needs **zero new surface contract**: all three surfaces (CLI `--sidecar`, API `SidecarFile`, UI `sidecars?: { name, content }[]`) already plumb the JSON shape. The patch is purely internal.
@@ -443,7 +443,7 @@ without modifying that file.
 **Recommended engineering work to unlock pipeline D for modern RTL.**
 
 - Add an `sv2v`-based preprocessing stage to the sv-yosys driver
-  ([`crates/mununu-core/src/adapter/yosys/mod.rs:541`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L541)). Source: [`zachjs/sv2v`](https://github.com/zachjs/sv2v) is the de-facto open-source preprocessor for this layer; integrates as a stdin/stdout filter.
+  ([`crates/mununu-core/src/adapter/yosys/mod.rs:3676`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3676)). Source: [`zachjs/sv2v`](https://github.com/zachjs/sv2v) is the de-facto open-source preprocessor for this layer; integrates as a stdin/stdout filter.
 - Tracking issue and scoping: outside this plan's READY-pipelines-only constraint.
 
 **Reproduction.**

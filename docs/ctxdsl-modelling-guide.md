@@ -74,8 +74,8 @@ pointer) captures the **pre-advance** value, exactly as the RTL would.
 
 ## 3. Only `i64` variables bind in formula atoms — `bool` silently evaluates *true*
 
-> Source of truth: [the numeric-valuation gate](../crates/mununu-core/src/context_dsl/realize.rs#L354)
-> and [the `IntConstant`-only emit](../crates/mununu-core/src/context_dsl/realize.rs#L3037);
+> Source of truth: [the numeric-valuation gate](../crates/mununu-core/src/context_dsl/realize.rs#L414)
+> and [the `IntConstant`-only emit](../crates/mununu-core/src/context_dsl/realize.rs#L3383);
 > a name no state carries a value for is refused by [`EvaluationError::UndeclaredVariable`](../crates/mununu-core/src/mu_calculus/evaluator.rs) (mununu#1106 item 7).
 > Surface: CLI+API+UI.
 

@@ -40,7 +40,7 @@ host is trusted. Two settings in `mununu.toml`'s `[server]` table limit what a r
 
 ## Verify a design
 
-> Source of truth: [`create_router_with_ui`](../crates/mununu-core/src/api/server.rs#L41) (the API and the UI on one origin) — surface: CLI+API+UI
+> Source of truth: [`create_router_with_ui`](../crates/mununu-core/src/api/server.rs#L64) (the API and the UI on one origin) — surface: CLI+API+UI
 
 Over the CLI, inside the container (designs in `./work`):
 

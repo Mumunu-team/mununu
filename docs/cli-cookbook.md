@@ -85,7 +85,7 @@ Agentic models live in `examples/agentic/` either as native CTXDSL or as XState 
 
 ## Selecting the predicate source for BTOR2 CEGAR
 
-> Source of truth: [`adapter/btor2/cegar.rs::PredicateSource`](../crates/mununu-core/src/adapter/btor2/cegar.rs#L87) — surface: CLI
+> Source of truth: [`adapter/btor2/cegar.rs::PredicateSource`](../crates/mununu-core/src/adapter/btor2/cegar.rs#L89) — surface: CLI
 
 The R.5 CEGAR refinement loop accepts three predicate-discovery strategies for the `mununu btor2 cegar` subcommand:
 

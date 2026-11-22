@@ -1,6 +1,6 @@
 # Consumer briefing — the licence file and its status surfaces (Track H1, 2026-11)
 
-> Source of truth: [`licence::status`](../../crates/mununu-core/src/licence.rs#L394) (CLI `mununu licence status`, API `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of `sv-verify-auto-response`) — surface: CLI+API.
+> Source of truth: [`licence::status`](../../crates/mununu-core/src/licence.rs#L641) (CLI `mununu licence status`, API `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of `sv-verify-auto-response`) — surface: CLI+API.
 
 > **Audience:** rosf (runs `sv verify-auto --json` and parses the report), monono (runs the gate through rosf and reads the same report), mununu-ui (reads `/api/v1/health`), and anyone deploying `mununu server` on their own machines.
 >

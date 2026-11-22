@@ -62,7 +62,7 @@ Every verify surface reports one of four values as a lowercase string. Wire form
 | `"unknown"` | No engine decided within budget: abstention, over-cap, timeout, or a soundness alarm (contradiction between engines). Definite in intent — never a hidden `Holds`/`Violated`. |
 | `"skipped"` | The property was not evaluated: out of the supported fragment, refused by the engine's soundness guard (input-derived antecedent, partial-write havoc, etc.), or filtered pre-run. |
 
-Rust source: [`PropertyVerdict`](../../crates/mununu-core/src/verdict.rs#L22) — `as_str()` at line 155 is the canonical mapping.
+Rust source: [`PropertyVerdict`](../../crates/mununu-core/src/verdict.rs#L23) — `as_str()` at line 155 is the canonical mapping.
 
 **Never treat `skipped` or `unknown` as `holds` in a CI gate.** The default `--fail-on violated` treats both as pass; `--fail-on none` treats both as fail. Choose the polarity your gate actually wants.
 
@@ -247,7 +247,7 @@ Unsupported assertions are **surfaced honestly**, never silently dropped. Reason
 
 ## DiscoveredAssumption — refinement-lane fields
 
-`sv verify-auto` doesn't emit `holds_under` today — that field is populated by the recoverability verb's `--discover-assumptions` flow (see [`crates/mununu-core/src/verdict.rs`](../../crates/mununu-core/src/verdict.rs#L142)). Documented here for completeness because both fields share the `PropertyVerdict` vocabulary:
+`sv verify-auto` doesn't emit `holds_under` today — that field is populated by the recoverability verb's `--discover-assumptions` flow (see [`crates/mununu-core/src/verdict.rs`](../../crates/mununu-core/src/verdict.rs#L148)). Documented here for completeness because both fields share the `PropertyVerdict` vocabulary:
 
 ```jsonc
 {

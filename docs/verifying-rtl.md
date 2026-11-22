@@ -12,7 +12,7 @@ This page answers three practical questions:
 Every verdict below is one of the canonical labels `holds` / `violated` / `unknown`
 / `skipped`.
 
-> Source of truth: [`PropertyVerdict`](../crates/mununu-core/src/verdict.rs#L22) — surface: (CLI+API+UI)
+> Source of truth: [`PropertyVerdict`](../crates/mununu-core/src/verdict.rs#L23) — surface: (CLI+API+UI)
 
 `holds` and `violated` are **definite** (sound within the engine's cap / abstraction);
 `unknown` is an honest abstention (over-cap, timeout, or an undecided abstraction);
@@ -29,7 +29,7 @@ signal/value of interest (`"state_q == 3"`).
 
 ### `btor2 verify` — safety / reachability
 
-> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1166) — surface: (CLI+API+UI)
+> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1185) — surface: (CLI+API+UI)
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
 engine, the in-house native BMC + k-induction engine (in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
@@ -219,10 +219,10 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
 remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with **half** of what
 the slice leaves (the reach portfolio's members take their bounds from it), then **k-liveness**
-(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L353)) with half of
+(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L358)) with half of
 what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
 60 s defaults and each abstention note says so, naming every member's refusal or budget abstention.
-`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L457)) races the three
+`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L558)) races the three
 rungs on threads, returns the first definite verdict and cancels the rest. In the race the l2s portfolio
 runs without its exact member, which has no cancellation point (#816), and k-liveness runs rIC3 as one
 `-e ic3` process instead of its portfolio (#986). **It is not a speed-up on a small host:** on the 129
@@ -723,7 +723,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1812) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1324) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1812) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L517) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1324) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -759,7 +759,7 @@ map does not know, such as a monitor latch, is simply not listed.
 
 ### Where in the RTL: each row's `source:` and `involves:` (2026-10-30)
 
-> Source of truth: [`property_sources_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1415) + [`attach_involves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2540) + [`cone_named_signals`](../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L296) + [`compact_lines`](../crates/mununu-core/src/trace.rs#L120) — surface: (CLI+API) — every `sv verify-auto` row, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`property_sources_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1415) + [`attach_involves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2540) + [`cone_named_signals`](../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L298) + [`compact_lines`](../crates/mununu-core/src/trace.rs#L120) — surface: (CLI+API) — every `sv verify-auto` row, and `POST /api/v1/sv/verify-auto`.
 
 Every row says where the property is written and which RTL lines it is about, whatever its verdict:
 
