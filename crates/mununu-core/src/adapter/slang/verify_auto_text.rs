@@ -1605,3 +1605,71 @@ pub(super) fn liveness_rescue_note(
         property: Some(name.to_string()),
     }
 }
+
+/// mununu#543 W3 — the exact engine died in its isolated child. The text is the one the engine
+/// loop held; it moved here when the row's mapping became a function (mununu#1196).
+pub(super) fn isolated_engine_died_note(name: &str, why: &str) -> VerificationNote {
+    VerificationNote {
+        kind: "engine-isolation".to_string(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!(
+            "`{}`: the exact-symbolic engine DIED in its isolated child — {why}. \
+             The property is `unknown`; every other property in this run is \
+             unaffected, which is what isolation buys (mununu#543).",
+            name
+        ),
+        detail: "The engine ran in a child process because \
+                 MUNUNU_ISOLATE_ENGINES is set. Without isolation this death \
+                 would have ended the whole run with no report at all. The \
+                 underlying defect is an unbounded recursion in OxiDD's \
+                 `apply_bin` on a malformed diagram; it is not a defect in the \
+                 design under verification, and this property's verdict is \
+                 absent rather than negative."
+            .to_string(),
+        items: vec![format!("property:{name}")],
+        // mununu#548 O-2 — the property is a FIELD now. `items` keeps its `property:<name>`
+        // entry for one release so a consumer already reading it does not break on the same
+        // commit that gives them the better route.
+        property: Some(name.to_string()),
+    }
+}
+
+/// mununu#1196 — the parent ended the isolated child before it answered: on the time the
+/// property had left, or because the run was cancelled. Kind `time-budget-exceeded`, the kind
+/// the in-process engine's budget stop has ([`exact_abandoned_note`]); the engine did not
+/// crash, so this is not an `engine-isolation` note.
+pub(super) fn isolated_engine_stopped_note(
+    name: &str,
+    stop: crate::adapter::engine_isolate::IsolatedStop,
+) -> VerificationNote {
+    use crate::adapter::engine_isolate::IsolatedStop;
+    let what = match stop {
+        IsolatedStop::BudgetSpent { given_ms: 0 } => {
+            "was not started: the property's budget was already spent".to_string()
+        }
+        IsolatedStop::BudgetSpent { given_ms } => {
+            format!("was ended after the {given_ms} ms the property's budget had left")
+        }
+        IsolatedStop::RunCancelled => {
+            "was ended because the run that asked for it was cancelled".to_string()
+        }
+    };
+    VerificationNote {
+        kind: "time-budget-exceeded".into(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!("`{name}`: `exact-symbolic` (first pass, in a child process) {what}"),
+        detail: format!(
+            "The engine ran in a child process because `{}` is set. The child has the time the \
+             property has left (`{}`, within the run's `{}`) and is ended at that deadline, or \
+             when the run that asked for the verdict is cancelled. The engine did not crash: \
+             the property is `unknown` because its time ran out. The stop is a wall clock, so \
+             this abstention is host-dependent. A larger budget may let the engine finish; \
+             `--engine explicit` skips it.",
+            crate::adapter::engine_isolate::ISOLATE_ENV,
+            crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+            crate::adapter::run_budget::RUN_BUDGET_ENV
+        ),
+        items: Vec::new(),
+        property: Some(name.to_string()),
+    }
+}

@@ -1,6 +1,6 @@
 # Consumer briefing — every row gains `source` and `involves`; the sv2v path's legend gets its assignment lines (2026-10)
 
-> Source of truth: [`property_sources_of`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1328) + [`attach_involves`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2368) + [`source_index_from_ast`](../../crates/mununu-core/src/adapter/slang/mod.rs#L517) + [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3332) — surface: (CLI+API) — `mununu sv verify-auto` (text and `--json`) and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`property_sources_of`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1329) + [`attach_involves`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2369) + [`source_index_from_ast`](../../crates/mununu-core/src/adapter/slang/mod.rs#L509) + [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3332) — surface: (CLI+API) — `mununu sv verify-auto` (text and `--json`) and `POST /api/v1/sv/verify-auto`.
 
 **Audience:** rosf, monono, mununu-ui, and anyone reading `sv verify-auto` rows or traces.
 

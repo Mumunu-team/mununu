@@ -215,13 +215,9 @@ fn run_slang_bounded(
 ) -> Result<std::process::Output, AdapterError> {
     let outcome = match crate::adapter::lift_timeout() {
         Some(t) => crate::adapter::run_with_timeout(cmd, None, t),
-        None => cmd.output().map(|o| {
-            Some((
-                o.status,
-                String::from_utf8_lossy(&o.stdout).into_owned(),
-                String::from_utf8_lossy(&o.stderr).into_owned(),
-            ))
-        }),
+        // mununu#1196 — with the wall turned off the tool is still waited on through the
+        // helper: no deadline, and a cancelled run ends it.
+        None => crate::adapter::run_to_end(cmd).map(Some),
     }
     .map_err(|e| AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
@@ -297,13 +293,9 @@ pub fn run_ast_json_with_params(
     // known about the design, so a hang here loses the run with no output and nothing to report.
     let outcome = match crate::adapter::lift_timeout() {
         Some(t) => crate::adapter::run_with_timeout(&mut cmd, None, t),
-        None => cmd.output().map(|o| {
-            Some((
-                o.status,
-                String::from_utf8_lossy(&o.stdout).into_owned(),
-                String::from_utf8_lossy(&o.stderr).into_owned(),
-            ))
-        }),
+        // mununu#1196 — with the wall turned off the tool is still waited on through the
+        // helper: no deadline, and a cancelled run ends it.
+        None => crate::adapter::run_to_end(&mut cmd).map(Some),
     }
     .map_err(|e| AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,

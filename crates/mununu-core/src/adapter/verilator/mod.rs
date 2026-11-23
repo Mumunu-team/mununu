@@ -326,7 +326,8 @@ pub fn compile_verilator(
 ///   `"make -f Vtop.mk Vtop in obj_dir"`).
 ///
 /// **Behaviour**:
-/// 1. Spawn via `cmd.output()`. On `Err`, return a
+/// 1. Run the command to its end through the adapter's one waiting helper (mununu#1196: no
+///    wall, and a cancelled run ends it). On `Err`, return a
 ///    `ParseError`-kind `AdapterError` naming the bin_label +
 ///    the I/O error.
 /// 2. If the child exited non-success, return a `ParseError`-kind
@@ -335,19 +336,18 @@ pub fn compile_verilator(
 ///    construct gaps inline).
 /// 3. Otherwise return `Ok(())`.
 fn run_and_check(mut cmd: Command, bin_label: &str, context: &str) -> Result<(), AdapterError> {
-    let out = cmd.output().map_err(|e| AdapterError {
-        kind: AdapterErrorKind::ParseError,
-        message: format!("adapter/verilator: failed to spawn {bin_label}: {e}"),
-        location: None,
-    })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
+    let (status, stdout, stderr) =
+        crate::adapter::run_to_end(&mut cmd).map_err(|e| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!("adapter/verilator: failed to spawn {bin_label}: {e}"),
+            location: None,
+        })?;
+    if !status.success() {
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
                 "adapter/verilator: {context} exited with status {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                out.status,
+                status,
             ),
             location: None,
         });
@@ -924,29 +924,29 @@ pub fn run_reset_simulation(
     let tb_cpp_content = build_reset_simulation_tb_cpp(config)?;
     let bin_path = compile_verilator(verilator, &opts, sv_path, &tb_cpp_content, workdir)?;
 
-    let out = Command::new(&bin_path).output().map_err(|e| AdapterError {
-        kind: AdapterErrorKind::ParseError,
-        message: format!(
-            "adapter/verilator: failed to spawn reset-simulation binary {}: {e}",
-            bin_path.display()
-        ),
-        location: None,
-    })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
+    // mununu#1196 — through the adapter's one waiting helper: no wall (mununu#1223), and a
+    // cancelled run ends the simulation.
+    let (status, stdout, stderr) = crate::adapter::run_to_end(&mut Command::new(&bin_path))
+        .map_err(|e| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/verilator: failed to spawn reset-simulation binary {}: {e}",
+                bin_path.display()
+            ),
+            location: None,
+        })?;
+    if !status.success() {
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
                 "adapter/verilator: reset-simulation binary {} exited with status {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
                 bin_path.display(),
-                out.status
+                status
             ),
             location: None,
         });
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
     let valuations = parse_reset_simulation_dump(&stdout);
 
     let missing = missing_observed_registers(config, &valuations);
