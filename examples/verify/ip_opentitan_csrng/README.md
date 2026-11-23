@@ -52,7 +52,7 @@ output of this closure with `syntax error, unexpected TOK_DEFAULT`). The first y
 BTOR backend with `Found topological loop while processing cell $6638` on a design `check` finds
 loop-free — yosys-slang emits 4,035 `$buf` cells and the backend's cell-level walk reads a wide buffer
 chained through the command arbiter's grant vector as a cycle — and succeeds on the lift's one retry
-with `opt_clean` before `write_btor` (2026-10-23; reported as the `lift-retry` note and
+with the named nets kept and `opt_clean` before `write_btor` (2026-10-23; the keep since mununu#1229; reported as the `lift-retry` note and
 `diagnostics.lift_retry`). Both facts are in the JSON: `diagnostics.frontend` (`"yosys-slang
 (read_slang)"`, provenance) and `lift_retry`.
 

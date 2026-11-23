@@ -51,7 +51,11 @@ pub(super) fn dropped_immediate_notes(
                 "{} immediate assert / cover statement(s) in procedural code were not checked",
                 checks.len()
             ),
-            detail: "The lift reads the design with `read_slang --ignore-assertions`, which drops                      every immediate assertion, and verify-auto extracts only concurrent ones.                      These statements are not in the property set: rewrite each as a concurrent                      `assert property` / `cover property` (or an `@mununu_guarantee`) to have it                      checked."
+            detail: "The lift reads the design with `read_slang --ignore-assertions`, which \
+                     drops every immediate assertion, and verify-auto extracts only concurrent \
+                     ones. These statements are not in the property set: rewrite each as a \
+                     concurrent `assert property` / `cover property` (or an `@mununu_guarantee`) \
+                     to have it checked."
                 .into(),
             items: checks.iter().map(|s| s.describe()).collect(),
             property: None,
@@ -65,7 +69,12 @@ pub(super) fn dropped_immediate_notes(
                 "{} immediate assume statement(s) in procedural code were not applied",
                 assumes.len()
             ),
-            detail: "The model allows the behaviour these assumptions exclude, so it                      over-approximates the assumed environment. A universal HOLDS (assert                      property, AG, nu) still holds under them. A VIOLATED may be a counterexample                      that breaks one of them. An existential or branching HOLDS (cover, EF, AG EF)                      does not transfer. Rewrite each as a concurrent `assume property` to have it                      applied as a precondition."
+            detail: "The model allows the behaviour these assumptions exclude, so it \
+                     over-approximates the assumed environment. A universal HOLDS (assert \
+                     property, AG, nu) still holds under them. A VIOLATED may be a \
+                     counterexample that breaks one of them. An existential or branching HOLDS \
+                     (cover, EF, AG EF) does not transfer. Rewrite each as a concurrent `assume \
+                     property` to have it applied as a precondition."
                 .into(),
             items: assumes.iter().map(|s| s.describe()).collect(),
             property: None,
@@ -384,7 +393,8 @@ pub(super) fn build_notes(
     notes.extend(merged_clock_domains_note(&d.merged_clock_domains));
     // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
     // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
-    // the model is the same design, and a reader diffing two runs wants to know the script moved.
+    // the model is the same design (the retry keeps every named net first, mununu#1229), and a
+    // reader diffing two runs wants to know the script moved.
     if let Some(reason) = &d.lift_retry {
         notes.push(VerificationNote {
             kind: "lift-retry".into(),
@@ -392,10 +402,12 @@ pub(super) fn build_notes(
             summary: format!("lift: retried — {reason}."),
             detail: "The yosys BTOR backend walks the netlist cell by cell and can report a \
                      topological loop where `check` finds none (wide `$buf` cells from \
-                     yosys-slang chained bit-wise through other cells). `opt_clean` folds the \
-                     buffers into connections and drops unused cells; it removes nothing the \
-                     design reads, so the verdicts are over the same design. The retry runs \
-                     only on that error."
+                     yosys-slang chained bit-wise through other cells). The retry marks every \
+                     net that has a name in the design as kept and runs `opt_clean`, which \
+                     folds the buffers into connections and drops only cells that reach no \
+                     named net and no output port. The backend writes none of those, so the \
+                     model has the same registers and the verdicts are over the same design. \
+                     The retry runs only on that error."
                 .to_string(),
             items: Vec::new(),
             property: None,
@@ -803,9 +815,11 @@ impl BottomReason {
                 crate::adapter::reach_rescue::accepted_safety_shapes(),
                 crate::adapter::reach_rescue::SHAPE_REMEDY
             ),
-            Self::NoStateModelNonSafety => "no-state-model-non-safety — the design has zero state                  registers; a modelling issue, not an engine cap"
+            Self::NoStateModelNonSafety => "no-state-model-non-safety — the design has zero \
+                                            state registers; a modelling issue, not an engine cap"
                 .to_string(),
-            Self::UnclassifiedBottom => "unclassified — cause not established; do NOT read as                  distinct-from-abstain"
+            Self::UnclassifiedBottom => "unclassified — cause not established; do NOT read as \
+                                         distinct-from-abstain"
                 .to_string(),
             Self::EngineDidNotComplete { engine, detail } => {
                 format!("engine `{engine}` did not complete on this design: {detail}")

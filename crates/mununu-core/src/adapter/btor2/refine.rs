@@ -29,10 +29,11 @@ use z3::ast::{Ast, BV, Bool};
 
 use crate::adapter::btor2::ast::{Btor2File, Nid};
 use crate::adapter::btor2::native_interp::{
-    extract_interpolant_body, run_cvc5_raw, serialize_term,
+    QueryError, QueryStop, extract_interpolant_body, run_cvc5_raw, serialize_term,
 };
 use crate::adapter::btor2::predicate_expr::PredicateExpr;
 use crate::adapter::cvc5::parse_interpolant_to_predicate_expr;
+use crate::adapter::owner::{mununu_defect, mununu_limitation};
 use crate::adapter::sidecar::predicate_image::btor2_encode::{SignalKind, encode_design};
 
 /// Outcome of a refinement query.
@@ -44,10 +45,216 @@ pub enum RefineOutcome {
     /// The step is concretely realizable under the exact transition — not
     /// spurious, so no refinement is needed (the driver must look elsewhere).
     Realizable,
-    /// cvc5 absent / timed out / produced an interpolant outside the parseable
-    /// grammar, encode failed, or a predicate referenced an unknown register.
-    /// The caller falls back (a different predicate source, or abstains).
-    Unavailable(String),
+    /// No predicate, and why ([`RefineGap`]): the query could not be posed, the solver did
+    /// not answer it, or it answered with nothing usable. The caller falls back (a different
+    /// predicate source, or abstains) — and says which of these it was (mununu#1188).
+    Unavailable(RefineGap),
+}
+
+/// Why a refinement query gave no predicate (mununu#1188). The kind is what a caller branches
+/// on; before it was typed, every caller read every gap as "the solver had nothing to say" and
+/// reported a grammar ceiling for a query that had stopped at its limit, or fell back without
+/// a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GapKind {
+    /// The query was never sent: the design could not be encoded, an atom names a register
+    /// the query cannot address, a term did not serialize, the design has no `bad`.
+    NotPosed,
+    /// The solver binary (cvc5, MathSAT) was not found.
+    SolverMissing,
+    /// A solver stopped at the query's limit without an answer: z3 on the realizability or
+    /// reachability check, cvc5 or MathSAT on the interpolation query.
+    SolverStopped,
+    /// The solver died or could not be started.
+    SolverFailed,
+    /// The run that asked was cancelled.
+    Cancelled,
+    /// The solver answered: there is no interpolant.
+    NoInterpolant,
+    /// The solver answered with an interpolant the predicate grammar does not take.
+    OutsideGrammar,
+}
+
+impl GapKind {
+    /// Every kind, for the tests that enumerate them.
+    pub const ALL: [GapKind; 7] = [
+        GapKind::NotPosed,
+        GapKind::SolverMissing,
+        GapKind::SolverStopped,
+        GapKind::SolverFailed,
+        GapKind::Cancelled,
+        GapKind::NoInterpolant,
+        GapKind::OutsideGrammar,
+    ];
+
+    /// Did the solver answer the query? Only then is "no predicate" a statement about the
+    /// interpolant (none exists, or the grammar does not take it). On every other kind the
+    /// question is still open, and a report that says "grammar ceiling" is false.
+    pub fn solver_answered(self) -> bool {
+        match self {
+            GapKind::NoInterpolant | GapKind::OutsideGrammar => true,
+            GapKind::NotPosed
+            | GapKind::SolverMissing
+            | GapKind::SolverStopped
+            | GapKind::SolverFailed
+            | GapKind::Cancelled => false,
+        }
+    }
+
+    /// Which unanswered gap a report names when a step collected several: the one the reader
+    /// can least afford to miss. A cancelled run explains everything after it; a missing
+    /// solver is the one the user can fix; a stop at the limit says the answer may exist; a
+    /// failure is a tool problem; a query never posed is the design's shape. `None` for the
+    /// answered kinds, which [`telling_gap`] never returns.
+    fn precedence(self) -> Option<u8> {
+        match self {
+            GapKind::Cancelled => Some(4),
+            GapKind::SolverMissing => Some(3),
+            GapKind::SolverStopped => Some(2),
+            GapKind::SolverFailed => Some(1),
+            GapKind::NotPosed => Some(0),
+            GapKind::NoInterpolant | GapKind::OutsideGrammar => None,
+        }
+    }
+}
+
+/// A refinement query that gave no predicate: the kind, and the fact as its producer words
+/// it. `what` names no remedy for a query limit — the caller knows which surface it reports
+/// on and whether anything there changes the limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefineGap {
+    pub kind: GapKind,
+    pub what: String,
+}
+
+impl RefineGap {
+    pub(crate) fn new(kind: GapKind, what: impl Into<String>) -> Self {
+        RefineGap {
+            kind,
+            what: what.into(),
+        }
+    }
+
+    /// What a report says of a refinement step this gap cut short; `None` when the solver
+    /// answered the gap's query, because the step was then not cut short (mununu#1188).
+    ///
+    /// One wording per kind, for every caller: `step` is the subject in the caller's words,
+    /// and `instead` what the caller's surface offers in the step's place. The limit of a
+    /// refinement query is a literal at its call site — no flag, variable or sidecar key
+    /// reaches it — so a stop at it is said to be fixed, and the reader is never told to
+    /// raise a budget that does not govern it.
+    pub(crate) fn cut_short(&self, step: &str, instead: Option<&str>) -> Option<String> {
+        let what = &self.what;
+        Some(match self.kind {
+            GapKind::NoInterpolant | GapKind::OutsideGrammar => return None,
+            GapKind::SolverStopped => mununu_limitation(
+                &format!("{step} did not finish: {what}; the query limit is fixed on this engine"),
+                instead,
+            ),
+            GapKind::SolverMissing => format!("{step} did not run: {what}"),
+            GapKind::Cancelled => format!("{step} did not finish: {what}"),
+            GapKind::SolverFailed => mununu_defect(&format!("{step} did not finish: {what}")),
+            GapKind::NotPosed => {
+                mununu_limitation(&format!("{step} could not be posed: {what}"), instead)
+            }
+        })
+    }
+
+    /// The gap a solver query that gave no reply leaves.
+    fn of_query(e: QueryError) -> Self {
+        let kind = match e.stop {
+            QueryStop::Missing => GapKind::SolverMissing,
+            QueryStop::Limit => GapKind::SolverStopped,
+            QueryStop::Cancelled => GapKind::Cancelled,
+            QueryStop::Failed => GapKind::SolverFailed,
+        };
+        RefineGap::new(kind, e.what)
+    }
+
+    /// z3 returned `unknown` on one of the checks that decide whether to interpolate at all.
+    /// Its only limit here is the query's, so this is a stop at that limit.
+    fn z3_stopped(check: &str, timeout_ms: u32) -> Self {
+        RefineGap::new(
+            GapKind::SolverStopped,
+            format!(
+                "z3 gave no answer on the {check} check within its {timeout_ms} ms query limit \
+                 — a budget stop, not an interpolation gap"
+            ),
+        )
+    }
+
+    fn not_serialized(side: &str) -> Self {
+        RefineGap::new(
+            GapKind::NotPosed,
+            format!("side {side} of the interpolation query did not serialize"),
+        )
+    }
+
+    /// The design did not encode, so no query over it exists.
+    fn not_encoded(e: &impl std::fmt::Display) -> Self {
+        RefineGap::new(GapKind::NotPosed, format!("encode: {e}"))
+    }
+
+    /// The predicate in cvc5's reply, or the gap the reply leaves.
+    fn of_cvc5_reply(stdout: &str) -> Result<PredicateExpr, RefineGap> {
+        if cvc5_reply_has_no_interpolant(stdout) {
+            return Err(RefineGap::of_unusable_cvc5_reply(stdout));
+        }
+        parse_interpolant_to_predicate_expr(stdout)
+            .ok_or_else(|| RefineGap::of_unusable_cvc5_reply(stdout))
+    }
+
+    /// The gap a cvc5 reply that gave no predicate leaves: it said there is no interpolant,
+    /// or it gave one the grammar does not take. Both are answers.
+    fn of_unusable_cvc5_reply(stdout: &str) -> Self {
+        if cvc5_reply_has_no_interpolant(stdout) {
+            return RefineGap::new(GapKind::NoInterpolant, "cvc5 produced no interpolant");
+        }
+        RefineGap::new(
+            GapKind::OutsideGrammar,
+            format!(
+                "interpolant outside the parseable grammar: {}",
+                extract_interpolant_body(stdout)
+                    .as_deref()
+                    .unwrap_or("<none>")
+            ),
+        )
+    }
+}
+
+/// Does cvc5's reply to a `get-interpolant` say it has none (nothing, an error, `fail`,
+/// `none`)?
+fn cvc5_reply_has_no_interpolant(stdout: &str) -> bool {
+    stdout.trim().is_empty()
+        || stdout.contains("(error")
+        || stdout
+            .lines()
+            .any(|l| l.trim() == "fail" || l.trim() == "none")
+}
+
+impl std::fmt::Display for RefineGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.what)
+    }
+}
+
+/// The gap a report names for a step that asked several queries and got no predicate: the
+/// highest-ranked gap among the queries the solver did NOT answer (cancelled, then a missing
+/// solver, a stop at the limit, a failure, a query never posed). `None` means every query was
+/// answered — only then did the step meet the interpolant itself, and only then may its
+/// report say "grammar ceiling".
+pub fn telling_gap(gaps: &[RefineGap]) -> Option<&RefineGap> {
+    gaps.iter()
+        .filter_map(|g| g.kind.precedence().map(|rank| (rank, g)))
+        // `max_by_key` keeps the last of equals; the first is the one that happened first.
+        .fold(
+            None,
+            |best: Option<(u8, &RefineGap)>, (rank, g)| match best {
+                Some((top, _)) if top >= rank => best,
+                _ => Some((rank, g)),
+            },
+        )
+        .map(|(_, g)| g)
 }
 
 /// P2.1 — synthesise a separating predicate for a (possibly spurious) one-step
@@ -63,7 +270,7 @@ pub fn synthesize_refinement_predicate(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e}")),
+            Err(e) => return RefineOutcome::Unavailable(RefineGap::not_encoded(&e)),
         };
 
         // Register symbol → NID (only named state cells are addressable predicates).
@@ -136,20 +343,26 @@ pub fn synthesize_refinement_predicate(
         let source_bool = match build(source, &cur) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable(PredicateExpr::unknown_register_reason(
-                    "source references an unknown register",
-                    source,
-                    name_to_nid.keys().map(String::as_str),
+                return RefineOutcome::Unavailable(RefineGap::new(
+                    GapKind::NotPosed,
+                    PredicateExpr::unknown_register_reason(
+                        "source references an unknown register",
+                        source,
+                        name_to_nid.keys().map(String::as_str),
+                    ),
                 ));
             }
         };
         let target_bool = match build(target, &nx) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable(PredicateExpr::unknown_register_reason(
-                    "target references an unknown register",
-                    target,
-                    name_to_nid.keys().map(String::as_str),
+                return RefineOutcome::Unavailable(RefineGap::new(
+                    GapKind::NotPosed,
+                    PredicateExpr::unknown_register_reason(
+                        "target references an unknown register",
+                        target,
+                        name_to_nid.keys().map(String::as_str),
+                    ),
                 ));
             }
         };
@@ -171,7 +384,10 @@ pub fn synthesize_refinement_predicate(
             match s.check() {
                 z3::SatResult::Sat => return RefineOutcome::Realizable,
                 z3::SatResult::Unknown => {
-                    return RefineOutcome::Unavailable("solver timeout on realizability".into());
+                    return RefineOutcome::Unavailable(RefineGap::z3_stopped(
+                        "realizability",
+                        timeout_ms,
+                    ));
                 }
                 z3::SatResult::Unsat => {} // spurious → interpolate
             }
@@ -182,11 +398,11 @@ pub fn synthesize_refinement_predicate(
         let b = target_bool.not();
         let (a_decls, a_body) = match serialize_term(&a) {
             Some(x) => x,
-            None => return RefineOutcome::Unavailable("serialize A".into()),
+            None => return RefineOutcome::Unavailable(RefineGap::not_serialized("A")),
         };
         let (b_decls, b_body) = match serialize_term(&b) {
             Some(x) => x,
-            None => return RefineOutcome::Unavailable("serialize B".into()),
+            None => return RefineOutcome::Unavailable(RefineGap::not_serialized("B")),
         };
         let mut decls: BTreeSet<String> = BTreeSet::new();
         decls.extend(a_decls);
@@ -203,24 +419,11 @@ pub fn synthesize_refinement_predicate(
 
         let stdout = match run_cvc5_raw(&query, timeout_ms) {
             Ok(s) => s,
-            Err(e) => return RefineOutcome::Unavailable(e),
+            Err(e) => return RefineOutcome::Unavailable(RefineGap::of_query(e)),
         };
-        if stdout.trim().is_empty()
-            || stdout.contains("(error")
-            || stdout
-                .lines()
-                .any(|l| l.trim() == "fail" || l.trim() == "none")
-        {
-            return RefineOutcome::Unavailable("cvc5 produced no interpolant".into());
-        }
-        match parse_interpolant_to_predicate_expr(&stdout) {
-            Some(pe) => RefineOutcome::Predicate(pe),
-            None => RefineOutcome::Unavailable(format!(
-                "interpolant outside the parseable grammar: {}",
-                extract_interpolant_body(&stdout)
-                    .as_deref()
-                    .unwrap_or("<none>")
-            )),
+        match RefineGap::of_cvc5_reply(&stdout) {
+            Ok(pe) => RefineOutcome::Predicate(pe),
+            Err(gap) => RefineOutcome::Unavailable(gap),
         }
     })
 }
@@ -249,7 +452,7 @@ pub fn must_precondition_interpolant(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e}")),
+            Err(e) => return RefineOutcome::Unavailable(RefineGap::not_encoded(&e)),
         };
         let name_to_nid: HashMap<String, Nid> = view
             .signals
@@ -357,28 +560,39 @@ pub fn must_precondition_interpolant(
         let source_bool = match build(source, &cur, &in_cur) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable("source over an unresolvable register".into());
+                return RefineOutcome::Unavailable(RefineGap::new(
+                    GapKind::NotPosed,
+                    "source over an unresolvable register",
+                ));
             }
         };
         let good_a = match build(good, &nx_a, &in_a) {
             Some(b) => b,
             None => {
-                return RefineOutcome::Unavailable("good over an unresolvable register".into());
+                return RefineOutcome::Unavailable(RefineGap::new(
+                    GapKind::NotPosed,
+                    "good over an unresolvable register",
+                ));
             }
         };
         let good_b = match build(good, &nx_b, &in_b) {
             Some(b) => b,
-            None => return RefineOutcome::Unavailable("good over a non-state register".into()),
+            None => {
+                return RefineOutcome::Unavailable(RefineGap::new(
+                    GapKind::NotPosed,
+                    "good over a non-state register",
+                ));
+            }
         };
         let a = Bool::and(&[&source_bool, &t_a, &good_a]);
         let b = Bool::and(&[&source_bool, &t_b, &good_b.not()]);
         let (a_decls, a_body) = match serialize_term(&a) {
             Some(x) => x,
-            None => return RefineOutcome::Unavailable("serialize A".into()),
+            None => return RefineOutcome::Unavailable(RefineGap::not_serialized("A")),
         };
         let (b_decls, b_body) = match serialize_term(&b) {
             Some(x) => x,
-            None => return RefineOutcome::Unavailable("serialize B".into()),
+            None => return RefineOutcome::Unavailable(RefineGap::not_serialized("B")),
         };
         let mut decls: BTreeSet<String> = BTreeSet::new();
         decls.extend(a_decls);
@@ -396,7 +610,7 @@ pub fn must_precondition_interpolant(
         let stdout = match crate::adapter::btor2::native_interp::run_mathsat_raw(&query, timeout_ms)
         {
             Ok(s) => s,
-            Err(e) => return RefineOutcome::Unavailable(e),
+            Err(e) => return RefineOutcome::Unavailable(RefineGap::of_query(e)),
         };
         parse_mathsat_interpolant(&stdout)
     })
@@ -413,14 +627,20 @@ fn parse_mathsat_interpolant(stdout: &str) -> RefineOutcome {
         .find(|l| l.starts_with('(') && !l.starts_with("(error"))
     else {
         let head = stdout.lines().next().unwrap_or("").trim();
-        return RefineOutcome::Unavailable(format!("mathsat: no interpolant (status `{head}`)"));
+        return RefineOutcome::Unavailable(RefineGap::new(
+            GapKind::NoInterpolant,
+            format!("mathsat: no interpolant (status `{head}`)"),
+        ));
     };
     let candidate = ite_condition(term).unwrap_or_else(|| term.to_string());
     // Reuse the rich #318 parser by wrapping the candidate in cvc5's `define-fun` envelope.
     let wrapped = format!("(define-fun I () Bool {candidate})");
     match parse_interpolant_to_predicate_expr(&wrapped) {
         Some(pe) => RefineOutcome::Predicate(pe),
-        None => RefineOutcome::Unavailable(format!("mathsat interpolant outside grammar: {term}")),
+        None => RefineOutcome::Unavailable(RefineGap::new(
+            GapKind::OutsideGrammar,
+            format!("mathsat interpolant outside grammar: {term}"),
+        )),
     }
 }
 
@@ -468,7 +688,7 @@ fn interpolant_at_cut(
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(e) => return RefineOutcome::Unavailable(format!("encode: {e}")),
+            Err(e) => return RefineOutcome::Unavailable(RefineGap::not_encoded(&e)),
         };
         let nid_to_name: HashMap<Nid, String> = view
             .signals
@@ -539,7 +759,10 @@ fn interpolant_at_cut(
             })
             .collect();
         if bad_ops.is_empty() {
-            return RefineOutcome::Unavailable("design has no `bad`".into());
+            return RefineOutcome::Unavailable(RefineGap::new(
+                GapKind::NotPosed,
+                "design has no `bad`",
+            ));
         }
         let bad_over = |st: &HashMap<Nid, BV>, iv: &HashMap<Nid, BV>| -> Bool {
             let mut subs: Vec<(&BV, &BV)> = Vec::new();
@@ -630,7 +853,10 @@ fn interpolant_at_cut(
             match solver.check() {
                 z3::SatResult::Sat => return RefineOutcome::Realizable,
                 z3::SatResult::Unknown => {
-                    return RefineOutcome::Unavailable("timeout (reachability)".into());
+                    return RefineOutcome::Unavailable(RefineGap::z3_stopped(
+                        "reachability",
+                        timeout_ms,
+                    ));
                 }
                 z3::SatResult::Unsat => {}
             }
@@ -638,11 +864,11 @@ fn interpolant_at_cut(
 
         let (a_decls, a_body) = match serialize_term(&a) {
             Some(x) => x,
-            None => return RefineOutcome::Unavailable("serialize A".into()),
+            None => return RefineOutcome::Unavailable(RefineGap::not_serialized("A")),
         };
         let (b_decls, b_body) = match serialize_term(&b) {
             Some(x) => x,
-            None => return RefineOutcome::Unavailable("serialize B".into()),
+            None => return RefineOutcome::Unavailable(RefineGap::not_serialized("B")),
         };
         let mut decls: BTreeSet<String> = BTreeSet::new();
         decls.extend(a_decls);
@@ -658,24 +884,11 @@ fn interpolant_at_cut(
         ));
         let stdout = match run_cvc5_raw(&query, timeout_ms) {
             Ok(s) => s,
-            Err(e) => return RefineOutcome::Unavailable(e),
+            Err(e) => return RefineOutcome::Unavailable(RefineGap::of_query(e)),
         };
-        if stdout.trim().is_empty()
-            || stdout.contains("(error")
-            || stdout
-                .lines()
-                .any(|l| l.trim() == "fail" || l.trim() == "none")
-        {
-            return RefineOutcome::Unavailable("cvc5 produced no interpolant".into());
-        }
-        match parse_interpolant_to_predicate_expr(&stdout) {
-            Some(pe) => RefineOutcome::Predicate(pe),
-            None => RefineOutcome::Unavailable(format!(
-                "interpolant outside the parseable grammar: {}",
-                extract_interpolant_body(&stdout)
-                    .as_deref()
-                    .unwrap_or("<none>")
-            )),
+        match RefineGap::of_cvc5_reply(&stdout) {
+            Ok(pe) => RefineOutcome::Predicate(pe),
+            Err(gap) => RefineOutcome::Unavailable(gap),
         }
     })
 }
@@ -690,13 +903,18 @@ pub fn synthesize_reachability_predicate(
     interpolant_at_cut(file, 1, suffix_depth, timeout_ms)
 }
 
-/// P2.3b — the SEQUENCE of predicates from interpolating the depth-`depth` BMC
-/// unrolling at every cut `1..=depth` (the targeted per-trace refinement IC3ia
-/// needs). Returns the parseable, deduplicated interpolant predicates — a SET that
-/// collectively rules out the spurious depth-`depth` counterexample, rather than
-/// the single (often redundant) predicate a one-cut interpolation gives. Empty when
-/// `bad` is reachable within `depth` (a real CEX — the caller confirms elsewhere) or
-/// every interpolant is outside the `#318` grammar.
+/// What [`discover_relational_predicates`] found, and why it stopped when the reason was not
+/// its own (mununu#1188).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Discovery {
+    /// The discovered predicates, most-general last.
+    pub predicates: Vec<PredicateExpr>,
+    /// Why the iteration ended, when it did not end at a fixpoint, at its iteration cap or on
+    /// `bad` being one step from the region. A gap whose kind is not
+    /// [`GapKind::solver_answered`] means the discovery was cut short, not exhausted.
+    pub stopped: Option<RefineGap>,
+}
+
 /// **Emergent-K** — discover RELATIONAL invariants by ITERATIVE forward
 /// interpolation. Starting from `R = Init`, repeatedly interpolate
 /// `A = R(s0) ∧ T(s0,s1)` against `B = ¬bad(s1)`; the interpolant `I(s1)` (a
@@ -706,18 +924,25 @@ pub fn synthesize_reachability_predicate(
 /// span a relational region cvc5 GENERALISES the interpolant to the relation
 /// (e.g. `data == target`) — an "emergent" predicate that no *syntactic* extractor
 /// finds. Returns the discovered predicates (the relational ones are the payoff),
-/// most-general last. Stops at a fixpoint, an unparseable interpolant (grammar
-/// ceiling), or when `bad` is one-step reachable from `R` (the invariant fails).
+/// most-general last. Stops at a fixpoint, at `max_iters`, when `bad` is one-step
+/// reachable from `R` (the invariant fails) — or on a gap, which [`Discovery::stopped`]
+/// carries: an interpolant the grammar does not take (the grammar ceiling), a solver that
+/// stopped at `timeout_ms` or was not there, a query that could not be posed.
 pub fn discover_relational_predicates(
     file: &Btor2File,
     max_iters: usize,
     timeout_ms: u32,
-) -> Vec<PredicateExpr> {
+) -> Discovery {
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
         let view = match encode_design(file) {
             Ok(v) => v,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                return Discovery {
+                    predicates: Vec::new(),
+                    stopped: Some(RefineGap::not_encoded(&e)),
+                };
+            }
         };
         let nid_to_name: HashMap<Nid, String> = view
             .signals
@@ -840,13 +1065,20 @@ pub fn discover_relational_predicates(
 
         let mut r = init.clone();
         let mut discovered: Vec<PredicateExpr> = Vec::new();
+        let mut stopped: Option<RefineGap> = None;
         for _ in 0..max_iters.max(1) {
-            // If `bad` is one-step reachable from R, the invariant fails — stop.
+            // If `bad` is one-step reachable from R, the invariant fails — stop. That is the
+            // discovery's own end; z3 giving no answer is not.
             {
                 let s = mk();
                 s.assert(Bool::and(&[&r, &transition, &bad_s1]));
-                if s.check() != z3::SatResult::Unsat {
-                    break;
+                match s.check() {
+                    z3::SatResult::Unsat => {}
+                    z3::SatResult::Sat => break,
+                    z3::SatResult::Unknown => {
+                        stopped = Some(RefineGap::z3_stopped("reachability", timeout_ms));
+                        break;
+                    }
                 }
             }
             // Interpolate A = R ∧ T  vs  B = ¬bad(s1).  I over s1 (register names).
@@ -854,11 +1086,17 @@ pub fn discover_relational_predicates(
             let b = bad_s1.not();
             let (a_decls, a_body) = match serialize_term(&a) {
                 Some(x) => x,
-                None => break,
+                None => {
+                    stopped = Some(RefineGap::not_serialized("A"));
+                    break;
+                }
             };
             let (b_decls, b_body) = match serialize_term(&b) {
                 Some(x) => x,
-                None => break,
+                None => {
+                    stopped = Some(RefineGap::not_serialized("B"));
+                    break;
+                }
             };
             let mut decls: BTreeSet<String> = BTreeSet::new();
             decls.extend(a_decls);
@@ -874,16 +1112,29 @@ pub fn discover_relational_predicates(
             ));
             let stdout = match run_cvc5_raw(&query, timeout_ms) {
                 Ok(s) => s,
-                Err(_) => break,
+                Err(e) => {
+                    stopped = Some(RefineGap::of_query(e));
+                    break;
+                }
             };
             let p = match parse_interpolant_to_predicate_expr(&stdout) {
                 Some(p) => p,
-                None => break, // grammar ceiling
+                None => {
+                    // The grammar ceiling, or no interpolant: cvc5 answered either way.
+                    stopped = Some(RefineGap::of_unusable_cvc5_reply(&stdout));
+                    break;
+                }
             };
             // Grow R by the new predicate; stop at a fixpoint (nothing new).
             let grown = match over_s0(&p) {
                 Some(pb) => pb,
-                None => break,
+                None => {
+                    stopped = Some(RefineGap::new(
+                        GapKind::NotPosed,
+                        "an interpolant names a register the next query cannot address",
+                    ));
+                    break;
+                }
             };
             let is_new = !discovered.contains(&p);
             if is_new {
@@ -901,22 +1152,46 @@ pub fn discover_relational_predicates(
                 break;
             }
         }
-        discovered
+        Discovery {
+            predicates: discovered,
+            stopped,
+        }
     })
 }
 
+/// What [`sequence_interpolant_predicates`] gave: the predicates, and the gap of every cut
+/// that gave none (mununu#1188). With no predicate, [`telling_gap`] over `gaps` says whether
+/// the sequence met the grammar or was cut short.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SequencePredicates {
+    pub predicates: Vec<PredicateExpr>,
+    pub gaps: Vec<RefineGap>,
+}
+
+/// P2.3b — the SEQUENCE of predicates from interpolating the depth-`depth` BMC
+/// unrolling at every cut `1..=depth` (the targeted per-trace refinement IC3ia
+/// needs). Returns the parseable, deduplicated interpolant predicates — a SET that
+/// collectively rules out the spurious depth-`depth` counterexample, rather than
+/// the single (often redundant) predicate a one-cut interpolation gives. No predicate
+/// when `bad` is reachable within `depth` (a real CEX — the caller confirms elsewhere:
+/// no gap either), when every interpolant is outside the `#318` grammar, or when the
+/// queries were not answered — the gaps say which.
 pub fn sequence_interpolant_predicates(
     file: &Btor2File,
     depth: usize,
     timeout_ms: u32,
-) -> Vec<PredicateExpr> {
+) -> SequencePredicates {
     let depth = depth.clamp(1, 24);
-    let mut out: Vec<PredicateExpr> = Vec::new();
+    let mut out = SequencePredicates::default();
     for cut in 1..=depth {
-        if let RefineOutcome::Predicate(p) = interpolant_at_cut(file, cut, depth, timeout_ms)
-            && !out.contains(&p)
-        {
-            out.push(p);
+        match interpolant_at_cut(file, cut, depth, timeout_ms) {
+            RefineOutcome::Predicate(p) => {
+                if !out.predicates.contains(&p) {
+                    out.predicates.push(p);
+                }
+            }
+            RefineOutcome::Realizable => {}
+            RefineOutcome::Unavailable(gap) => out.gaps.push(gap),
         }
     }
     out
@@ -994,7 +1269,7 @@ mod tests {
                          9 add 1 5 4\n10 next 1 5 9\n11 add 1 7 4\n12 next 1 7 11\n\
                          13 neq 2 5 7\n14 bad 13\n";
         let file = parser::parse(D).expect("parse");
-        let preds = discover_relational_predicates(&file, 8, 5_000);
+        let preds = discover_relational_predicates(&file, 8, 5_000).predicates;
         if preds.is_empty() {
             eprintln!("SKIP (cvc5 absent / grammar): no predicates discovered");
             return;
@@ -1021,7 +1296,7 @@ mod tests {
                          6 state 1 cnt\n7 init 1 6 5\n8 ugte 2 6 3\n9 add 1 6 4\n\
                          10 ite 1 8 3 9\n11 next 1 6 10\n12 ugt 2 6 3\n13 bad 12\n";
         let file = parser::parse(D).expect("parse");
-        let preds = discover_relational_predicates(&file, 8, 5_000);
+        let preds = discover_relational_predicates(&file, 8, 5_000).predicates;
         if preds.is_empty() {
             // mununu#981: under MUNUNU_REQUIRE_TOOLS=1 (cvc5 is in the image) an empty discovery
             // fails instead of skipping.
@@ -1071,10 +1346,15 @@ mod tests {
             parse_mathsat_interpolant("unsat\n(bvule cnt (_ bv5 8))\n"),
             RefineOutcome::Predicate(PredicateExpr::Cmp { op: CmpOp::Le, .. })
         ));
-        // No interpolant (SAT / empty) → Unavailable, never a fabricated predicate.
+        // No interpolant (SAT / empty) → Unavailable, never a fabricated predicate: MathSAT
+        // answered, so the gap is the interpolant's, not a stop.
         assert!(matches!(
             parse_mathsat_interpolant("sat\n"),
-            RefineOutcome::Unavailable(_)
+            RefineOutcome::Unavailable(gap) if gap.kind == GapKind::NoInterpolant
+        ));
+        assert!(matches!(
+            parse_mathsat_interpolant("unsat\n(bvslt cnt (_ bv5 8))\n"),
+            RefineOutcome::Unavailable(gap) if gap.kind == GapKind::OutsideGrammar
         ));
         // `ite_condition` peels the condition; a term with no ite returns None.
         assert_eq!(
@@ -1090,7 +1370,7 @@ mod tests {
     /// and still discover `data==target` — the same invariant as the state-register case. `#[ignore]`d
     /// (needs MathSAT; run in `mununu-sva` with `MUNUNU_MATHSAT_PATH`).
     #[test]
-    #[ignore = "manual: requires MathSAT (mununu-sva image); run with --ignored + MUNUNU_MATHSAT_PATH"]
+    #[ignore = "manual: requires MathSAT, which the mununu-sva image lacks; run with --ignored and MUNUNU_MATHSAT_PATH=<binary>"]
     fn must_precondition_resolves_combinational_good() {
         // MathSAT is not in the `mununu-sva` image (it ships in `mununu-sva-pono`).
         // Skip rather than fail: an absent optional tool is not a regression, and a
@@ -1168,7 +1448,7 @@ mod tests {
             let Ok(file) = parser::parse(&content) else {
                 continue;
             };
-            let preds = discover_relational_predicates(&file, 8, 4_000);
+            let preds = discover_relational_predicates(&file, 8, 4_000).predicates;
             if preds.is_empty() {
                 continue;
             }
@@ -1205,5 +1485,152 @@ mod tests {
             RefineOutcome::Predicate(pe) => panic!("x==0 → x==1 IS realizable, got {pe:?}"),
             RefineOutcome::Unavailable(w) => eprintln!("SKIP: {w}"),
         }
+    }
+
+    /// ENUMERATING (mununu#1188) — a step is cut short exactly by the gaps whose query the
+    /// solver did not answer: those have words ([`RefineGap::cut_short`]) and are what
+    /// [`telling_gap`] returns; an answered query has neither. The words carry the caller's
+    /// step and the gap's fact. Exhaustive over [`GapKind::ALL`].
+    #[test]
+    fn x1188_a_step_is_cut_short_exactly_by_the_gaps_the_solver_did_not_answer() {
+        for kind in GapKind::ALL {
+            let gap = RefineGap::new(kind, "the fact");
+            let said = gap.cut_short("the step", Some("the other engine"));
+            assert_eq!(said.is_none(), kind.solver_answered(), "{kind:?}: {said:?}");
+            assert_eq!(
+                telling_gap(std::slice::from_ref(&gap)).is_none(),
+                kind.solver_answered(),
+                "{kind:?}"
+            );
+            if let Some(text) = said {
+                assert!(
+                    text.contains("the step") && text.contains("the fact"),
+                    "{kind:?}: {text}"
+                );
+            }
+        }
+    }
+
+    /// mununu#1188 — which gap a step that collected several is reported by: a cancelled run,
+    /// then a missing solver, a stop at the limit, a failure, a query never posed; in either
+    /// order of arrival, with answered queries among them; the first of two of one kind; and
+    /// none when every query was answered or none was asked.
+    #[test]
+    fn x1188_the_telling_gap_is_the_highest_ranked_unanswered_one_in_either_order() {
+        const ORDER: [GapKind; 5] = [
+            GapKind::Cancelled,
+            GapKind::SolverMissing,
+            GapKind::SolverStopped,
+            GapKind::SolverFailed,
+            GapKind::NotPosed,
+        ];
+        for kind in GapKind::ALL {
+            assert_eq!(
+                ORDER.contains(&kind),
+                !kind.solver_answered(),
+                "{kind:?}: every unanswered kind has a rank, and no answered one"
+            );
+        }
+        let gap = |kind: GapKind| RefineGap::new(kind, format!("{kind:?}"));
+        assert_eq!(telling_gap(&[]), None);
+        assert_eq!(
+            telling_gap(&[gap(GapKind::NoInterpolant), gap(GapKind::OutsideGrammar)]),
+            None
+        );
+        for (i, high) in ORDER.iter().enumerate() {
+            for low in &ORDER[i + 1..] {
+                for gaps in [
+                    [gap(*high), gap(GapKind::NoInterpolant), gap(*low)],
+                    [gap(*low), gap(GapKind::OutsideGrammar), gap(*high)],
+                ] {
+                    assert_eq!(
+                        telling_gap(&gaps).map(|g| g.kind),
+                        Some(*high),
+                        "{high:?} over {low:?}"
+                    );
+                }
+            }
+        }
+        let first = RefineGap::new(GapKind::SolverStopped, "the first query");
+        let second = RefineGap::new(GapKind::SolverStopped, "the second query");
+        assert_eq!(telling_gap(&[first.clone(), second]), Some(&first));
+    }
+
+    /// SEAM (mununu#1188) — every way cvc5 ends a refinement query, read where the refinement
+    /// reads it: the same spurious step (`x == 0 → x == 2` on the counter) with a stand-in
+    /// cvc5 per row. A stop at the limit, a missing binary and a failure are three kinds, and
+    /// none of them is the answered kind a reply the grammar does not take leaves. z3 decides
+    /// the step is spurious for real, so each row reaches the interpolation query.
+    #[test]
+    fn x1188_every_way_cvc5_ends_a_refinement_query_has_its_kind() {
+        use crate::adapter::btor2::native_interp::stand_in_solver::{StandIn, stand_in};
+        let file = parser::parse(COUNTER).expect("parse");
+        let rows: [(&str, Option<StandIn>, GapKind); 4] = [
+            (
+                "exits the way cvc5 does at its time limit",
+                Some(StandIn::Exits {
+                    code: 134,
+                    stderr: "cvc5 interrupted by timeout.",
+                }),
+                GapKind::SolverStopped,
+            ),
+            (
+                "exits with a failure",
+                Some(StandIn::Exits {
+                    code: 3,
+                    stderr: "boom",
+                }),
+                GapKind::SolverFailed,
+            ),
+            ("is not there", None, GapKind::SolverMissing),
+            (
+                "replies with something that is no interpolant the grammar takes",
+                Some(StandIn::Replies { bytes: 4 }),
+                GapKind::OutsideGrammar,
+            ),
+        ];
+        for (row, what, want) in rows {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cvc5 = match what {
+                Some(what) => stand_in(dir.path(), what),
+                None => dir.path().join("no-such-solver"),
+            };
+            let _env = crate::adapter::env_var::override_for_test("MUNUNU_CVC5_PATH", &cvc5);
+            match synthesize_refinement_predicate(&file, &[cmp("x", 0)], &[cmp("x", 2)], 5_000) {
+                RefineOutcome::Unavailable(gap) => {
+                    assert_eq!(gap.kind, want, "a cvc5 that {row}: {gap}")
+                }
+                other => panic!("a cvc5 that {row} gives no predicate: {other:?}"),
+            }
+        }
+    }
+
+    /// mununu#1188 — the discovery says why it stopped: with a cvc5 that stops at the query
+    /// limit it has no predicate and carries the stop, where it used to return an empty list
+    /// that read as "nothing to find". `a` holds at 0, `b = a + 1`, `bad = (b == 2)`: `bad` is
+    /// not one step from the initial states, so the first interpolation query is asked.
+    #[test]
+    fn x1188_a_discovery_cut_short_at_the_query_limit_carries_the_stop() {
+        use crate::adapter::btor2::native_interp::stand_in_solver::{StandIn, stand_in};
+        const D: &str = "1 sort bitvec 2\n2 zero 1\n3 state 1 a\n4 init 1 3 2\n5 next 1 3 3\n\
+                         6 state 1 b\n7 init 1 6 2\n8 one 1\n9 add 1 3 8\n10 next 1 6 9\n\
+                         11 constd 1 2\n12 sort bitvec 1\n13 eq 12 6 11\n14 bad 13\n";
+        let file = parser::parse(D).expect("parse");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = stand_in(
+            dir.path(),
+            StandIn::Exits {
+                code: 134,
+                stderr: "cvc5 interrupted by timeout.",
+            },
+        );
+        let _env = crate::adapter::env_var::override_for_test("MUNUNU_CVC5_PATH", &fake);
+        let found = discover_relational_predicates(&file, 8, 4_000);
+        assert!(found.predicates.is_empty(), "{found:?}");
+        assert_eq!(
+            found.stopped.as_ref().map(|gap| gap.kind),
+            Some(GapKind::SolverStopped),
+            "{found:?}"
+        );
     }
 }

@@ -1,6 +1,6 @@
 # Consumer briefing: the isolated exact-engine child is ended at the property's budget (2026-11)
 
-> Source of truth: [`exact_symbolic_with_exe`](../../crates/mununu-core/src/adapter/engine_isolate.rs#L120) and [`run_to_end`](../../crates/mununu-core/src/adapter/mod.rs#L1282) — surface: CLI+API — `mununu sv verify-auto` / `POST /api/v1/sv/verify-auto` with `MUNUNU_ISOLATE_ENGINES` set
+> Source of truth: [`exact_symbolic_with_exe`](../../crates/mununu-core/src/adapter/engine_isolate.rs#L120) and [`run_to_end`](../../crates/mununu-core/src/adapter/mod.rs#L1303) — surface: CLI+API — `mununu sv verify-auto` / `POST /api/v1/sv/verify-auto` with `MUNUNU_ISOLATE_ENGINES` set
 
 **Audience:** anyone who sets `MUNUNU_ISOLATE_ENGINES`, and anyone who runs `mununu server` and cares what a request leaves running after its client has gone.
 

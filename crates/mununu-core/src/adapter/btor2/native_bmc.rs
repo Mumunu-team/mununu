@@ -810,6 +810,20 @@ pub fn decide_bad_safety_cancellable(
     nominal_ms: Option<u32>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<SafetyVerdict, BmcError> {
+    let grace = crate::adapter::MEMBER_CANCEL_GRACE;
+    decide_bad_safety_within(file, max_k, nominal_ms, cancel, grace)
+}
+
+/// [`decide_bad_safety_cancellable`] with the window a cancelled run keeps as a parameter. The
+/// engine's window is always the member grace; a test passes another to pin each side of it
+/// without a clock (mununu#1236).
+fn decide_bad_safety_within(
+    file: &Btor2File,
+    max_k: u32,
+    nominal_ms: Option<u32>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    grace: std::time::Duration,
+) -> Result<SafetyVerdict, BmcError> {
     let (bad_ops, init_pairs, constraint_ops) = extract_props(file);
     if bad_ops.is_empty() {
         return Err(BmcError::NoBadProperty);
@@ -842,16 +856,17 @@ pub fn decide_bad_safety_cancellable(
         let gate = QueryGate::default();
         with_cancel_watchdog(
             cancel,
+            grace,
             &gate,
             || handle.interrupt(),
-            || decide_bad_safety_ladder(&u, &init_pairs, n, max_k, nominal_ms, cancel, &gate),
+            || decide_bad_safety_ladder(&u, &init_pairs, max_k, nominal_ms, cancel, grace, &gate),
         )
     })
 }
 
-/// N0.5 / mununu#878 — run `body` with a scoped watchdog that, once `cancel` has been set for the
-/// member grace, calls `interrupt` while the gate reports a check in flight. The watchdog stops
-/// when `body` ends, however it ends.
+/// N0.5 / mununu#878 — run `body` with a scoped watchdog that, once `cancel` has been set for
+/// `grace` (the member grace), calls `interrupt` while the gate reports a check in flight. The
+/// watchdog stops when `body` ends, however it ends.
 ///
 /// mununu#951 — "however it ends" is the point. The stop flag used to be set after `body`
 /// returned normally; a panic in `body` left the watchdog polling forever, `thread::scope` waited
@@ -859,6 +874,7 @@ pub fn decide_bad_safety_cancellable(
 /// unwind too, inside the scope, before the scope joins its threads.
 fn with_cancel_watchdog<T>(
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    grace: std::time::Duration,
     gate: &QueryGate,
     interrupt: impl Fn() + Sync,
     body: impl FnOnce() -> T,
@@ -876,7 +892,7 @@ fn with_cancel_watchdog<T>(
                 use std::sync::atomic::Ordering::Relaxed;
                 // The member grace applies here as at the depth boundary: a query that is
                 // about to finish still lands; one still running past the grace is cut.
-                let mut latch = crate::adapter::CancelLatch::new();
+                let mut latch = crate::adapter::CancelLatch::with_grace(grace);
                 while !done.load(Relaxed) {
                     if latch.past_grace(Some(c)) {
                         gate.interrupt_if_in_query(&interrupt);
@@ -955,12 +971,13 @@ impl QueryGate {
 fn decide_bad_safety_ladder(
     u: &Unroller,
     init_pairs: &[(Nid, Operand)],
-    n: usize,
     max_k: u32,
     nominal_ms: Option<u32>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    grace: std::time::Duration,
     gate: &QueryGate,
 ) -> Result<SafetyVerdict, BmcError> {
+    let n = max_k as usize;
     {
         // Base: an init-constrained path (as in `bmc_bad_reachable`).
         let base = z3::Solver::new();
@@ -974,7 +991,7 @@ fn decide_bad_safety_ladder(
         u.seed_init_path(&base, init_pairs);
         u.seed_free_path(&step);
 
-        let mut latch = crate::adapter::CancelLatch::new();
+        let mut latch = crate::adapter::CancelLatch::with_grace(grace);
         for k in 0..=n {
             if latch.past_grace(cancel) {
                 return Ok(SafetyVerdict::Unknown { k: k as u32 });
@@ -1076,6 +1093,7 @@ pub fn bmc_cex_until(
         let gate = QueryGate::default();
         with_cancel_watchdog(
             Some(cancel),
+            crate::adapter::MEMBER_CANCEL_GRACE,
             &gate,
             || handle.interrupt(),
             || cex_search(&u, &init_pairs, n, per_query_ms, deadline, cancel, &gate),
@@ -1836,19 +1854,40 @@ mod tests {
     /// (the flag is set from the start here and the depth-1 counterexample is still found,
     /// identical to the uncancelled run), while a long unrolling abstains at the first depth
     /// past the grace with `Unknown`, never a verdict and never its full `max_k` of queries.
+    ///
+    /// mununu#1236 — the two sides of the window are pinned with a window no clock decides.
+    /// With the member grace itself, "the depth-1 run finishes inside it" was a fact about the
+    /// host: under the loaded host suite the watchdog cut the first check and the run read
+    /// `Unknown { k: 0 }`. So the landing is asserted under a window the run cannot outlast,
+    /// and the abstention under no window at all; the member grace is pinned by the long run
+    /// below, whose lower bound a slower host only helps.
     #[test]
     fn decide_bad_safety_cancel_lands_inside_the_grace_and_abstains_past_it() {
         use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
         let cancelled = AtomicBool::new(true);
         let reach = parser::parse(REACH).expect("parse");
+        let uncancelled = decide_bad_safety(&reach, 5, None).expect("k-ind ok");
+        assert_eq!(uncancelled, SafetyVerdict::Violated { depth: 1 });
+        let a_day = Duration::from_secs(24 * 60 * 60);
         assert_eq!(
-            decide_bad_safety_cancellable(&reach, 5, None, Some(&cancelled)).expect("k-ind ok"),
-            decide_bad_safety(&reach, 5, None).expect("k-ind ok")
+            decide_bad_safety_within(&reach, 5, None, Some(&cancelled), a_day).expect("k-ind ok"),
+            uncancelled,
+            "a cancelled run that finishes inside the window lands its verdict"
         );
-        assert!(matches!(
-            decide_bad_safety(&reach, 5, None).expect("k-ind ok"),
-            SafetyVerdict::Violated { depth: 1 }
-        ));
+        assert_eq!(
+            decide_bad_safety_within(&reach, 5, None, Some(&cancelled), Duration::ZERO)
+                .expect("k-ind ok"),
+            SafetyVerdict::Unknown { k: 0 },
+            "past the window the run abstains before its next depth, here the first"
+        );
+        // An unset flag never stops a run, whatever the window.
+        let never = AtomicBool::new(false);
+        assert_eq!(
+            decide_bad_safety_within(&reach, 5, None, Some(&never), Duration::ZERO)
+                .expect("k-ind ok"),
+            uncancelled
+        );
         // A 64-bit free counter whose `bad` (all ones) is 2^64 - 1 steps away and not
         // k-inductive at any small k: 401 depths of base + step queries is well past the
         // grace, so the cancelled run stops early with the depth it reached.
@@ -2262,6 +2301,7 @@ mod tests {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 with_cancel_watchdog(
                     Some(&cancel),
+                    crate::adapter::MEMBER_CANCEL_GRACE,
                     &gate,
                     || {},
                     || -> () { panic!("a ladder bug") },
@@ -2282,8 +2322,12 @@ mod tests {
     fn the_watchdog_returns_the_bodys_value() {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let gate = QueryGate::default();
-        assert_eq!(with_cancel_watchdog(Some(&cancel), &gate, || {}, || 7), 7);
-        assert_eq!(with_cancel_watchdog(None, &gate, || {}, || 8), 8);
+        let grace = crate::adapter::MEMBER_CANCEL_GRACE;
+        assert_eq!(
+            with_cancel_watchdog(Some(&cancel), grace, &gate, || {}, || 7),
+            7
+        );
+        assert_eq!(with_cancel_watchdog(None, grace, &gate, || {}, || 8), 8);
     }
 
     /// mununu#1106 (U2 sibling of item 4) — the budget-stop message names a remedy that works on

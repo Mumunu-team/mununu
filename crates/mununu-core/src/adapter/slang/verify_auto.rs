@@ -572,9 +572,9 @@ pub struct ModelDiagnostics {
     /// `Some(reason)` when the lift's first yosys run died in the BTOR backend with a
     /// "topological loop" (`check` sees none: yosys-slang's `$buf` cells chain wide vectors
     /// through other cells) and the script succeeded rerun with `opt_clean` before `write_btor`.
-    /// The model is the same design — `opt_clean` folds buffers into connections and drops unused
-    /// cells — so this is Info (the `lift-retry` note), not a scope caveat. `None` when the first
-    /// run succeeded (every lift that succeeded before 2026-10-22 is byte-identical).
+    /// The model is the same design — the named nets are kept first (mununu#1229), so `opt_clean`
+    /// drops only cells the backend would not write — so this is Info (the `lift-retry` note),
+    /// not a scope caveat. `None` when the first run succeeded (such a lift is untouched).
     pub lift_retry: Option<String>,
     /// The clock domains the lift MERGED onto the model's one implicit clock, each
     /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain,
@@ -7953,7 +7953,15 @@ pub(crate) fn verify_auto_impl(
                 crate::adapter::run_budget::RESCUE_SLICE_ENV,
             ),
             detail: format!(
-                "mununu#504 — a wall-clock budget expired. `{}` bounds a single property and                  `{}` bounds the whole run; the per-property budget is additionally clamped to                  the run deadline, so it can never extend it. On expiry the current property and                  every remaining one abstain (`unknown`) and PRIOR VERDICTS ARE PRESERVED — the                  point being that a run which used to hang, or be killed with no output at all,                  now reports everything it managed to decide. An abstention here is `unknown`,                  never `skipped`, so a strict `--fail-on unknown` gate still fails rather than                  passing green on a property that was never decided. Set either to `0` to                  disable.",
+                "mununu#504 — a wall-clock budget expired. `{}` bounds a single property and \
+                 `{}` bounds the whole run; the per-property budget is additionally clamped to \
+                 the run deadline, so it can never extend it. On expiry the current property and \
+                 every remaining one abstain (`unknown`) and PRIOR VERDICTS ARE PRESERVED — the \
+                 point being that a run which used to hang, or be killed with no output at all, \
+                 now reports everything it managed to decide. An abstention here is `unknown`, \
+                 never `skipped`, so a strict `--fail-on unknown` gate still fails rather than \
+                 passing green on a property that was never decided. Set either to `0` to \
+                 disable.",
                 crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
                 crate::adapter::run_budget::RUN_BUDGET_ENV,
             ),
