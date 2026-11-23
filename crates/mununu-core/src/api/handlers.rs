@@ -2380,7 +2380,8 @@ fn attach_testbenches(
     response: &mut SvVerifyAutoResponse,
 ) -> ApiResult<()> {
     use crate::adapter::verilator::replay::{
-        ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save, has_path, run_replay,
+        BenchRemedies, ReplayDesign, bench_refusal, counterexample_testbench, gtkwave_save,
+        has_path, run_replay,
     };
     use crate::trace::ReplayResultView;
     let clock = match &request.tb_clock {
@@ -2433,12 +2434,15 @@ fn attach_testbenches(
     // mununu#1176 — whether a bench can be generated at all is a property of the request's
     // names, asked once; a row with a path to replay then carries the reason where it would
     // have carried the bench. The additional sources' names were checked at the lift;
-    // `source_name` is not staged under its own name there, so it is first checked here.
+    // `source_name` is not staged under its own name there, so it is first checked here. The
+    // clock is the request's own `tb_clock` whenever it is outside a port name (the names the
+    // search above tries are all inside it).
     let refusal = bench_refusal(&design).map(|r| {
-        r.message(
-            "name the sources with only those characters (`source_name`, \
-             `additional_sources[].name`)",
-        )
+        r.message(&BenchRemedies {
+            sources: "name the sources with only those characters (`source_name`, \
+                      `additional_sources[].name`)",
+            clock: "set `tb_clock` to the name of the top module's clock port",
+        })
     });
     for (idx, (row, p)) in response
         .properties

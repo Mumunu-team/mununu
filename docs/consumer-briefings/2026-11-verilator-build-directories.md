@@ -1,6 +1,6 @@
 # Consumer briefing: a Verilator build that cannot run where it was asked to says so (2026-11)
 
-> Source of truth: [`build_dir_refusal`](../../crates/mununu-core/src/adapter/verilator/mod.rs#L366) and [`bench_refusal`](../../crates/mununu-core/src/adapter/verilator/replay.rs#L113) — surface: CLI+API — `sv verify-auto --emit-testbench DIR [--replay]` / `POST /api/v1/sv/verify-auto` with `emit_testbench: true` (and `replay: true`), and the reset simulation that seeds `sv verify-auto`
+> Source of truth: [`build_dir_refusal`](../../crates/mununu-core/src/adapter/verilator/mod.rs#L366) and [`bench_refusal`](../../crates/mununu-core/src/adapter/verilator/replay.rs#L175) — surface: CLI+API — `sv verify-auto --emit-testbench DIR [--replay]` / `POST /api/v1/sv/verify-auto` with `emit_testbench: true` (and `replay: true`), and the reset simulation that seeds `sv verify-auto`
 
 **Audience:** anyone who replays a counterexample under Verilator (`--emit-testbench`, `--replay`, `emit_testbench` / `replay` over HTTP), who runs mununu with a `TMPDIR` or a source tree whose path has a space, or who matches on the `replay testbench:` lines of the CLI.
 
