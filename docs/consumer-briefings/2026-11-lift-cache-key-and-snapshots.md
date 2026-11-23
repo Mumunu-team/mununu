@@ -1,6 +1,6 @@
 # Consumer briefing — the lift cache keys every input, and a lift needs its JSON snapshots (mununu#956, #957, 2026-11)
 
-> Source of truth: [`read_lift_snapshot`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L1171), [`key_include_directives`](../../crates/mununu-core/src/adapter/yosys/lift_cache.rs#L439) — surface: CLI+API (every SV lift: `mununu sv verify-auto`, `btor2`-from-SV verbs, `POST /api/v1/sv/*`).
+> Source of truth: [`read_lift_snapshot`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L1192), [`key_include_directives`](../../crates/mununu-core/src/adapter/yosys/lift_cache.rs#L439) — surface: CLI+API (every SV lift: `mununu sv verify-auto`, `btor2`-from-SV verbs, `POST /api/v1/sv/*`).
 
 > **Audience:** rosf and monono (they lift SV through the CLI or the API), anyone running `make e2e` with `MUNUNU_LIFT_CACHE_DIR`.
 >

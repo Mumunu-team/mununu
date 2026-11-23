@@ -81,8 +81,10 @@ RUN rustup component add rustfmt clippy
 # cargo-nextest: the test runner `make test` selects when available. The
 # image always carries it so CI's `make ci` always exercises the nextest
 # path; doctests are invoked separately by `make test` via cargo test
-# --doc (nextest does not run doctests).
-RUN cargo install --locked cargo-nextest
+# --doc (nextest does not run doctests). A version, always: without one the
+# build takes the newest release, and a release whose minimum rustc is above
+# RUST_VERSION fails the image build (mununu#1242). Raise it with RUST_VERSION.
+RUN cargo install --locked cargo-nextest --version 0.9.152
 
 # Use a container-side cargo target directory so the host's target/ is
 # never touched by container builds. This avoids cargo cache thrashing
