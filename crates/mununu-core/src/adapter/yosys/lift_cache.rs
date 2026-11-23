@@ -279,26 +279,45 @@ impl LiftCache {
             return None;
         }
         let bytes = std::fs::read(entry.join("lift.json")).ok()?;
-        match serde_json::from_slice::<CachedLift>(&bytes) {
-            Ok(lift) if frontend_from_tag(&lift.frontend_used).is_some() => Some(lift),
-            Ok(lift) => {
-                tracing::warn!(
-                    target: "mununu::lift_cache",
-                    index = key.index(),
-                    tag = lift.frontend_used,
-                    "lift cache: entry names an unknown front end; treating as a miss"
-                );
-                None
-            }
+        let lift = match serde_json::from_slice::<CachedLift>(&bytes) {
+            Ok(lift) => lift,
             Err(e) => {
                 tracing::warn!(
                     target: "mununu::lift_cache",
                     index = key.index(),
                     "lift cache: entry does not parse ({e}); treating as a miss"
                 );
-                None
+                return None;
+            }
+        };
+        if frontend_from_tag(&lift.frontend_used).is_none() {
+            tracing::warn!(
+                target: "mununu::lift_cache",
+                index = key.index(),
+                tag = lift.frontend_used,
+                "lift cache: entry names an unknown front end; treating as a miss"
+            );
+            return None;
+        }
+        // mununu#1198 — a stored snapshot that is not a netlist (one an earlier build stored
+        // from a yosys run that wrote a partial file, one written by hand) is a miss: read as
+        // one, the clock scan and the black-box scan find nothing in it, and the hit would be a
+        // lift with neither check. The lift that follows the miss replaces the entry.
+        for (what, snapshot) in [
+            ("hierarchy", &lift.hier_json),
+            ("flattened netlist", &lift.flat_netlist_json),
+        ] {
+            if let Err(damage) = super::snapshot_modules(snapshot) {
+                tracing::warn!(
+                    target: "mununu::lift_cache",
+                    index = key.index(),
+                    "lift cache: the entry's {what} snapshot cannot be used ({damage}); \
+                     treating as a miss"
+                );
+                return None;
             }
         }
+        Some(lift)
     }
 
     /// Publish `lift` under `key`: written to a staging directory, then renamed into place,
@@ -537,11 +556,14 @@ mod tests {
         );
     }
 
+    /// The smallest text that is a `write_json` snapshot: one module with no cell.
+    const SNAPSHOT: &str = r#"{"modules":{"m":{"cells":{}}}}"#;
+
     fn lift() -> CachedLift {
         CachedLift {
             btor2: "1 sort bitvec 1\n2 state 1 q\n".into(),
-            hier_json: "{}".into(),
-            flat_netlist_json: "{}".into(),
+            hier_json: SNAPSHOT.into(),
+            flat_netlist_json: SNAPSHOT.into(),
             staged_primary: "work.sv".into(),
             frontend_used: "verilog".into(),
             backend_retry: None,
@@ -596,6 +618,42 @@ mod tests {
         bad_tag.frontend_used = "verific".into();
         cache.store(&key, &bad_tag).unwrap();
         assert!(cache.lookup(&key).is_none());
+        cache.store(&key, &lift()).unwrap();
+        assert_eq!(cache.lookup(&key), Some(lift()));
+    }
+
+    /// mununu#1198 — an entry whose hierarchy or flattened-netlist snapshot is not a netlist
+    /// (cut short, empty, JSON of another shape) is a miss, and `store` replaces it. The parent
+    /// returned it as a hit, and the hit was a lift whose clock scan found nothing to refuse.
+    #[test]
+    fn x1198_an_entry_with_a_damaged_snapshot_is_a_miss_and_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LiftCache::at(dir.path().to_path_buf());
+        let key = LiftCacheKey::new(&manifest("module m; endmodule")).unwrap();
+        type SetSnapshot = fn(&mut CachedLift, &str);
+        let fields: [(&str, SetSnapshot); 2] = [
+            ("hierarchy", |l, text| l.hier_json = text.into()),
+            ("flattened netlist", |l, text| {
+                l.flat_netlist_json = text.into()
+            }),
+        ];
+        let damaged = [
+            &SNAPSHOT[..SNAPSHOT.len() - 3],
+            "",
+            "[]",
+            "{}",
+            r#"{"modules":[]}"#,
+            r#"{"modules":{}}"#,
+            r#"{"modules":{"m":{}}}"#,
+        ];
+        for (which, set) in fields {
+            for text in damaged {
+                let mut bad = lift();
+                set(&mut bad, text);
+                cache.store(&key, &bad).unwrap();
+                assert!(cache.lookup(&key).is_none(), "{which}: {text:?}");
+            }
+        }
         cache.store(&key, &lift()).unwrap();
         assert_eq!(cache.lookup(&key), Some(lift()));
     }
