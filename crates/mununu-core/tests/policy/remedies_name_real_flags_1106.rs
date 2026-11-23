@@ -158,8 +158,36 @@ fn cited_flags(lit: &str) -> BTreeSet<String> {
     out
 }
 
-/// The string literals of a file's non-test code that read as prose (six or more words).
+/// The string literals of a file's non-test code that read as prose (six or more words), each
+/// escape reduced to the character after its backslash.
 pub(crate) fn prose_literals(src: &str) -> Vec<(usize, String)> {
+    string_literals(src)
+        .into_iter()
+        .filter_map(|(line, raw)| {
+            let mut text = String::with_capacity(raw.len());
+            let mut escaped = false;
+            for c in raw.chars() {
+                if escaped || c != '\\' {
+                    escaped = false;
+                    text.push(c);
+                } else {
+                    escaped = true;
+                }
+            }
+            let words = text
+                .split(|ch: char| !ch.is_ascii_alphabetic())
+                .filter(|w| w.len() >= 3)
+                .count();
+            (words >= 6).then_some((line, text))
+        })
+        .collect()
+}
+
+/// mununu#1209 — every string literal of a file's non-test code as the source writes it, escapes
+/// kept (`\n` is a backslash and an `n`, a line continuation is a backslash and a newline), with
+/// the line it opens on. [`prose_literals`] drops the backslashes, and with them the difference
+/// between a newline the program emits and one the source merely wraps at.
+pub(crate) fn string_literals(src: &str) -> Vec<(usize, String)> {
     // mununu#1144 — every test module blanked, lines kept: the scan used to stop at the first
     // `#[cfg(test)]`, a test-only helper well before the end of four large files.
     let blanked = crate::source_scan::blank_test_modules_keeping_lines(src);
@@ -217,14 +245,9 @@ pub(crate) fn prose_literals(src: &str) -> Vec<(usize, String)> {
                     buf.push(c);
                 } else if c == '\\' {
                     escaped = true;
+                    buf.push(c);
                 } else if c == '"' {
-                    let words = buf
-                        .split(|ch: char| !ch.is_ascii_alphabetic())
-                        .filter(|w| w.len() >= 3)
-                        .count();
-                    if words >= 6 {
-                        out.push((body[..start].matches('\n').count() + 1, buf.clone()));
-                    }
+                    out.push((body[..start].matches('\n').count() + 1, buf.clone()));
                     in_lit = None;
                 } else {
                     buf.push(c);

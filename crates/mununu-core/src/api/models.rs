@@ -2530,7 +2530,8 @@ impl ExpectationsRequest {
         for (name, verdict) in &self.named {
             let v = ExpectedVerdict::parse(verdict).ok_or_else(|| {
                 format!(
-                    "expectations.named[{name}]: `{verdict}` is not a verdict — use holds |                      violated | unknown | skipped"
+                    "expectations.named[{name}]: `{verdict}` is not a verdict — use holds | \
+                     violated | unknown | skipped"
                 )
             })?;
             named.push((name.clone(), v));

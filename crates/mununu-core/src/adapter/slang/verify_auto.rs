@@ -7878,7 +7878,15 @@ pub(crate) fn verify_auto_impl(
                 crate::adapter::run_budget::RESCUE_SLICE_ENV,
             ),
             detail: format!(
-                "mununu#504 — a wall-clock budget expired. `{}` bounds a single property and                  `{}` bounds the whole run; the per-property budget is additionally clamped to                  the run deadline, so it can never extend it. On expiry the current property and                  every remaining one abstain (`unknown`) and PRIOR VERDICTS ARE PRESERVED — the                  point being that a run which used to hang, or be killed with no output at all,                  now reports everything it managed to decide. An abstention here is `unknown`,                  never `skipped`, so a strict `--fail-on unknown` gate still fails rather than                  passing green on a property that was never decided. Set either to `0` to                  disable.",
+                "mununu#504 — a wall-clock budget expired. `{}` bounds a single property and \
+                 `{}` bounds the whole run; the per-property budget is additionally clamped to \
+                 the run deadline, so it can never extend it. On expiry the current property and \
+                 every remaining one abstain (`unknown`) and PRIOR VERDICTS ARE PRESERVED — the \
+                 point being that a run which used to hang, or be killed with no output at all, \
+                 now reports everything it managed to decide. An abstention here is `unknown`, \
+                 never `skipped`, so a strict `--fail-on unknown` gate still fails rather than \
+                 passing green on a property that was never decided. Set either to `0` to \
+                 disable.",
                 crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
                 crate::adapter::run_budget::RUN_BUDGET_ENV,
             ),

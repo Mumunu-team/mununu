@@ -46,7 +46,7 @@ changes what the tool *reports*, never what the engine *decides*.
 
 ## Client configuration
 
-> Source of truth: [`Commands::Mcp`](../crates/mununu-cli/src/main.rs#L660) — surface: CLI+API
+> Source of truth: [`Commands::Mcp`](../crates/mununu-cli/src/main.rs#L661) — surface: CLI+API
 
 Claude Code:
 
