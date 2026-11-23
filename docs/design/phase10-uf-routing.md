@@ -10,7 +10,7 @@
 
 The naive reading of the §Phase 10 stage-3 plan ("BTOR2 rewriting + Z3 Array theory in `kripke_smt`") suggests UF rides the same `bit_blast::translate` path that `havoc` rides today. **That reading is wrong.** The bit-blaster fundamentally cannot process Read/Write on array-sorted operands — it enumerates concrete state cubes (`combo: usize` indexing each state-cell's value space). An array-sorted state cell has no finite-width enumeration, so any combo-indexed enumeration over an array is undefined. The havoc rewriting sidesteps this by deleting the array entirely (Read → Input, Write/Init/Next dropped). UF mode must preserve the array semantics — havoc-style deletion would defeat the abstraction's purpose.
 
-The right routing is to dispatch UF-declared memories to the **predicate-cube lift** path ([`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs)), which already operates symbolically (R.5b UF wrapping at [`kmts_lift.rs:1400`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1400)). The bit-blaster stays out of the UF-mode loop entirely.
+The right routing is to dispatch UF-declared memories to the **predicate-cube lift** path ([`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs)), which already operates symbolically (R.5b UF wrapping at [`kmts_lift.rs:1400`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1411)). The bit-blaster stays out of the UF-mode loop entirely.
 
 ## Routing decision
 
@@ -36,7 +36,7 @@ When `SvAnnotation::memories[].abstraction == Uf` for at least one memory, the B
 
 ### Why the predicate-cube path, not an extended bit-blaster
 
-- **R.5b UF wrapping infrastructure is already there.** [`kmts_lift.rs::collect_uf_wrapped_nids`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs) reads the sidecar's `uf_wrap` list and walks them through the predicate-image SMT queries. Extending the same map to carry array sorts (in addition to bit-vector sorts) is the "narrow extension" the §Phase 10 stage-3 plan called for — it matches `evaluate_pure`'s existing UF-substitution shape ([`kmts_lift.rs:2296`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2296)).
+- **R.5b UF wrapping infrastructure is already there.** [`kmts_lift.rs::collect_uf_wrapped_nids`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs) reads the sidecar's `uf_wrap` list and walks them through the predicate-image SMT queries. Extending the same map to carry array sorts (in addition to bit-vector sorts) is the "narrow extension" the §Phase 10 stage-3 plan called for — it matches `evaluate_pure`'s existing UF-substitution shape ([`kmts_lift.rs:2296`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2307)).
 - **The predicate-cube state space is symbolic.** Each cube is a conjunction of predicate equalities `{p_1, ¬p_2, p_3, ...}`; there is no per-cell concrete enumeration. Array-typed cells coexist with bit-vector cells naturally; the predicate-image SMT query handles all sorts uniformly.
 - **`kripke_smt::discover_significant_values`** (`systemverilog/kripke_smt.rs:20`) already operates at the SMT layer. Extending it to emit Z3 Array `select`/`store` for memory-typed registers is a localized addition — no bit-blaster surgery required.
 - **Future cohesion.** Once stage 3.b + 3.c ship, the routing decision is: small fixtures with no memory → bit-blast (cheap); fixtures with memory → predicate-cube lift. The two paths stay disjoint per the §Phase 10 plan's "no parallel pipelines" discipline.

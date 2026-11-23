@@ -197,6 +197,9 @@ pub struct JusticeOptions {
     pub rung: JusticeRung,
     /// The whole run's wall-clock budget per justice set (`None` = the engines' own budgets).
     pub budget_ms: Option<u64>,
+    /// Who sets `budget_ms` — the verb's flag, the request's field, or nothing a user writes
+    /// (mununu#1197): a portfolio member stopped at a limit derived from it names that setting.
+    pub budget_set_by: crate::adapter::run_budget::SetBy,
     /// Run the exact ladder, the l2s rung and the k-liveness rung CONCURRENTLY, first definite
     /// verdict wins and the others are cancelled; `false` = `exact ≤ EXACT_SLICE → l2s →
     /// kliveness → exact with the remainder`.
@@ -215,6 +218,7 @@ pub fn verify_justice(btor2: &str, rung: JusticeRung) -> Result<Vec<JusticeVerdi
         &JusticeOptions {
             rung,
             budget_ms: None,
+            budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
             parallel_rungs: false,
         },
     )
@@ -290,16 +294,17 @@ fn l2s_rung(
     named: &str,
     lits: &[String],
     budget: Option<std::time::Duration>,
+    budget_set_by: crate::adapter::run_budget::SetBy,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
     use crate::adapter::run_budget;
     let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
-    let scoped = budget.map(|b| {
-        let ms = u64::try_from(b.as_millis()).unwrap_or(u64::MAX);
-        run_budget::Budget::child(&run_budget::current(), Some(ms))
-    });
-    let _guard = scoped.as_ref().map(run_budget::enter);
+    // Entered with or without a deadline: an unbounded child still says whose setting would
+    // bound the rung (mununu#1197), and shares the outer cancel flag as before.
+    let ms = budget.map(|b| u64::try_from(b.as_millis()).unwrap_or(u64::MAX));
+    let scoped = run_budget::Budget::child(&run_budget::current(), ms, budget_set_by);
+    let _guard = run_budget::enter(&scoped);
     match response_liveness_rescue_under_fairness_cancellable(
         named,
         &atom("mununu_true"),
@@ -359,6 +364,7 @@ fn kliveness_rung(
     design: &str,
     justice_index: usize,
     budget: Option<std::time::Duration>,
+    budget_set_by: crate::adapter::run_budget::SetBy,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
@@ -366,11 +372,11 @@ fn kliveness_rung(
         KlivenessLadder, emit_kliveness_monitor, kliveness_ladder,
     };
     use crate::adapter::run_budget;
-    let scoped = budget.map(|b| {
-        let ms = u64::try_from(b.as_millis()).unwrap_or(u64::MAX);
-        run_budget::Budget::child(&run_budget::current(), Some(ms))
-    });
-    let _guard = scoped.as_ref().map(run_budget::enter);
+    // Entered with or without a deadline: an unbounded child still says whose setting would
+    // bound the rung (mununu#1197), and shares the outer cancel flag as before.
+    let ms = budget.map(|b| u64::try_from(b.as_millis()).unwrap_or(u64::MAX));
+    let scoped = run_budget::Budget::child(&run_budget::current(), ms, budget_set_by);
+    let _guard = run_budget::enter(&scoped);
     let (tried, member_notes) = match kliveness_ladder(
         &|w| emit_kliveness_monitor(design, justice_index, w),
         cancel,
@@ -588,6 +594,7 @@ pub fn verify_justice_with(
                     &named,
                     &lits,
                     total,
+                    opts.budget_set_by,
                     None,
                     crate::adapter::reach_portfolio::ReachMembers::ALL,
                 );
@@ -600,6 +607,7 @@ pub fn verify_justice_with(
                     &named,
                     index,
                     total,
+                    opts.budget_set_by,
                     None,
                     crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
                 );
@@ -656,6 +664,7 @@ pub fn verify_justice_with(
                                 named,
                                 lits,
                                 total,
+                                opts.budget_set_by,
                                 Some(cancel),
                                 crate::adapter::reach_portfolio::ReachMembers::cancellable(),
                             );
@@ -685,6 +694,7 @@ pub fn verify_justice_with(
                                 named,
                                 index,
                                 total,
+                                opts.budget_set_by,
                                 Some(cancel),
                                 crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED_RACED,
                             );
@@ -741,6 +751,7 @@ pub fn verify_justice_with(
                         &named,
                         &lits,
                         l2s_budget,
+                        opts.budget_set_by,
                         None,
                         crate::adapter::reach_portfolio::ReachMembers::ALL,
                     );
@@ -759,6 +770,7 @@ pub fn verify_justice_with(
                         &named,
                         index,
                         kl_budget,
+                        opts.budget_set_by,
                         None,
                         crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
                     );
@@ -1164,6 +1176,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1184,6 +1197,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: true,
             },
         )
@@ -1213,6 +1227,7 @@ mod policy_tests {
                 &JusticeOptions {
                     rung: JusticeRung::Both,
                     budget_ms: Some(60_000),
+                    budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                     parallel_rungs: true,
                 },
             )
@@ -1266,6 +1281,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: true,
             },
         )
@@ -1308,6 +1324,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::L2s,
                 budget_ms: Some(0),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1359,6 +1376,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Kliveness,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1390,6 +1408,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Kliveness,
                 budget_ms: Some(10_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1413,6 +1432,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1434,6 +1454,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Exact,
                 budget_ms: Some(0),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )

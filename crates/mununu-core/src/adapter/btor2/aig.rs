@@ -33,6 +33,7 @@ use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node, Op, Operand, 
 use crate::adapter::btor2::bit_blast::eval_const_value;
 use crate::adapter::btor2::parser::bv_width;
 use crate::adapter::btor2::term_backend::{BvTermBackend, walk_design};
+use crate::adapter::run_budget::SetBy;
 
 /// An AIG literal: `2 * node + complement`. Node 0 is FALSE, so `Lit(0)` is FALSE and `Lit(1)` TRUE.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -99,8 +100,9 @@ pub enum BuildStop {
     NodeCap { nodes: u32, cap: u32 },
     /// The member's deadline expired during the build.
     Deadline { nodes: u32 },
-    /// The thread's run budget expired during the build.
-    RunBudget { nodes: u32 },
+    /// The thread's run budget expired during the build. `set_by` is who set that budget
+    /// (mununu#1197), so the text names the setting to raise.
+    RunBudget { nodes: u32, set_by: SetBy },
     /// The member's cancel flag went up during the build (a peer decided).
     Cancelled { nodes: u32 },
 }
@@ -121,15 +123,18 @@ impl std::fmt::Display for BuildStop {
                  {cap}); MUNUNU_AIG_NODE_CAP raises the cap (at most {MAX_NODES}), or the SMT \
                  members take the design"
             ),
+            // mununu#1197 — the fact alone: the builder is not told who set a member's deadline,
+            // and "the verb's timeout" named a setting most verbs do not have.
             BuildStop::Deadline { nodes } => write!(
                 f,
                 "aig: the member's deadline expired while the model was being built ({nodes} \
-                 nodes so far); more time on the verb's timeout, or a smaller design"
+                 nodes so far)"
             ),
-            BuildStop::RunBudget { nodes } => write!(
+            BuildStop::RunBudget { nodes, set_by } => write!(
                 f,
                 "aig: the run budget expired while the model was being built ({nodes} nodes so \
-                 far); more time on the run's budget, or a smaller design"
+                 far); {}",
+                set_by.remedy()
             ),
             BuildStop::Cancelled { nodes } => {
                 write!(f, "aig: the build was cancelled ({nodes} nodes so far)")
@@ -285,7 +290,10 @@ impl Aig {
             } else if self.deadline.is_some_and(|d| Instant::now() >= d) {
                 Some(BuildStop::Deadline { nodes })
             } else if crate::adapter::run_budget::expired() {
-                Some(BuildStop::RunBudget { nodes })
+                Some(BuildStop::RunBudget {
+                    nodes,
+                    set_by: crate::adapter::run_budget::current().set_by(),
+                })
             } else {
                 None
             }
@@ -1350,7 +1358,10 @@ mod tests {
         let _g = crate::adapter::run_budget::enter(&expired);
         assert!(matches!(
             AigModel::build(&file),
-            Err(BuildStop::RunBudget { nodes: 1 })
+            Err(BuildStop::RunBudget {
+                nodes: 1,
+                set_by: SetBy::Mununu
+            })
         ));
         // Every stop names its count, and the texts are told apart.
         for stop in [
@@ -1360,7 +1371,10 @@ mod tests {
                 cap: MAX_NODES,
             },
             BuildStop::Deadline { nodes: 7 },
-            BuildStop::RunBudget { nodes: 7 },
+            BuildStop::RunBudget {
+                nodes: 7,
+                set_by: SetBy::RunBudgetEnv,
+            },
             BuildStop::Cancelled { nodes: 7 },
         ] {
             let text = stop.to_string();
@@ -1368,6 +1382,26 @@ mod tests {
                 text.starts_with("aig: ") && text.contains(" nodes"),
                 "{text}"
             );
+        }
+        // mununu#1197 — the run-budget stop names the setting that set the budget, and only
+        // that one; a budget of mununu's own says no setting changes it.
+        for by in SetBy::ALL {
+            let text = BuildStop::RunBudget {
+                nodes: 7,
+                set_by: by,
+            }
+            .to_string();
+            for other in SetBy::ALL {
+                if let Some(setting) = other.setting() {
+                    assert_eq!(text.contains(setting), other == by, "{by:?}: {text}");
+                }
+            }
+            if by.setting().is_none() {
+                assert!(
+                    text.ends_with(crate::adapter::run_budget::NO_SETTING),
+                    "{text}"
+                );
+            }
         }
         assert!(
             BuildStop::NodeCap { nodes: 40, cap: 40 }

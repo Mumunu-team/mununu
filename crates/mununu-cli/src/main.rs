@@ -4084,6 +4084,7 @@ fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
         &JusticeOptions {
             rung,
             budget_ms: args.timeout_ms,
+            budget_set_by: mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
             parallel_rungs: args.parallel_rungs,
         },
     )?;
@@ -4418,7 +4419,11 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
         // `--timeout-ms` bounds the attack's trace search too (it polls this thread's budget,
         // mununu#1045); without it, the members' own defaults.
-        let budget = mununu_core::adapter::run_budget::Budget::with_ms_opt(args.timeout_ms);
+        let budget = mununu_core::adapter::run_budget::Budget::child(
+            &mununu_core::adapter::run_budget::current(),
+            args.timeout_ms,
+            mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
+        );
         let _budget = mununu_core::adapter::run_budget::enter(&budget);
         let o = mununu_core::adapter::fault_adversary::verify_fault_reach(
             &content,
@@ -4577,6 +4582,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         mununu_core::adapter::reach_portfolio::decide_reach_owned_only_with_witness(
             &file,
             u32::try_from(ms).unwrap_or(u32::MAX),
+            mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
             args.witness,
         )
     } else {
@@ -4589,7 +4595,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             wall,
             None,
             mununu_core::adapter::reach_portfolio::ReachMembers::shipped()
-                .with_witness(args.witness),
+                .with_witness(args.witness)
+                .with_wall_set_by(mununu_core::adapter::run_budget::SetBy::TimeoutFlag),
         )
     };
 
@@ -4610,6 +4617,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                 &file,
                 args.witness_max_k,
                 deadline,
+                mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
                 &outcome,
                 args.owned_only,
             )

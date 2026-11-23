@@ -831,9 +831,10 @@ impl BottomReason {
             }
             Self::BudgetExpired => "a WALL-CLOCK budget expired — retrying with more time is the \
                  right response here (MUNUNU_PROPERTY_BUDGET_MS for the property as a whole, \
-                 MUNUNU_RESCUE_SLICE_MS for the ⊥ re-plan's per-step slice). HOST-DEPENDENT: the \
-                 same command on a quieter or faster machine may DECIDE this property, so treat a \
-                 gate failure here as a configuration result, not a verdict about the design"
+                 MUNUNU_RESCUE_SLICE_MS for the ⊥ re-plan's per-step slice, \
+                 MUNUNU_VERIFY_BUDGET_MS for the whole run). HOST-DEPENDENT: the same command on \
+                 a quieter or faster machine may DECIDE this property, so treat a gate failure \
+                 here as a configuration result, not a verdict about the design"
                 .to_string(),
             Self::MemoryCeilingExceeded => "the process-RSS ceiling was exceeded \
                  (MUNUNU_MAX_PROCESS_MEMORY_BYTES) — retrying with more TIME cannot help; more \
@@ -1504,7 +1505,9 @@ pub(super) fn escalation_stopped_note(
     pass: &str,
     why: EscalationStop,
 ) -> VerificationNote {
-    let (kind, cause) = match why {
+    // mununu#1197 — the closing clause names the setting of the budget that stopped the pass:
+    // "raise or disable the budget" named none.
+    let (kind, cause, remedy) = match why {
         EscalationStop::Memory(hit) => (
             "memory-budget-exceeded",
             format!(
@@ -1513,10 +1516,21 @@ pub(super) fn escalation_stopped_note(
                 hit.limit_bytes,
                 crate::adapter::memory_budget::ceiling_provenance(),
             ),
+            format!(
+                "the ceiling follows `{}`: raise it, or set it to `0` for no ceiling, to attempt \
+                 them",
+                crate::adapter::memory_budget::MEMORY_BUDGET_ENV
+            ),
         ),
-        EscalationStop::Time => (
+        EscalationStop::Time(set_by) => (
             "time-budget-exceeded",
             "the run's wall-clock budget was reached".to_string(),
+            match set_by.setting() {
+                Some(setting) => {
+                    format!("the budget follows {setting}: raise it to attempt them")
+                }
+                None => crate::adapter::run_budget::NO_SETTING.to_string(),
+            },
         ),
     };
     VerificationNote {
@@ -1526,10 +1540,11 @@ pub(super) fn escalation_stopped_note(
             "`{name}`: the {pass} stopped here because {cause}; this row and every later one it \
              would have attempted keep their earlier verdict"
         ),
-        detail: "mununu#871 — the stop is a budget, not an engine: the rows it skipped were never \
-                 attempted by this pass, so their `unknown` / `skipped` says nothing about what \
-                 the engines can decide. Raise or disable the budget (`0`) to attempt them."
-            .into(),
+        detail: format!(
+            "mununu#871 — the stop is a budget, not an engine: the rows it skipped were never \
+             attempted by this pass, so their `unknown` / `skipped` says nothing about what the \
+             engines can decide; {remedy}."
+        ),
         items: Vec::new(),
         property: Some(name.to_string()),
     }

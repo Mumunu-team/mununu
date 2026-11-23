@@ -1,6 +1,6 @@
 # Consumer briefing: one wording for a solver query stopped at its limit, and a cancelled member names no cause (2026-11)
 
-> Source of truth: [`query_limit_fact`](../../crates/mununu-core/src/adapter/btor2/native_interp.rs#L955) — surface: CLI+API — the `interp` member's reason in the member lists of `btor2 verify` / `POST /api/v1/btor2/verify` and in the `portfolio` block of `sv verify-auto` rows
+> Source of truth: [`query_limit_fact`](../../crates/mununu-core/src/adapter/btor2/native_interp.rs#L971) — surface: CLI+API — the `interp` member's reason in the member lists of `btor2 verify` / `POST /api/v1/btor2/verify` and in the `portfolio` block of `sv verify-auto` rows
 
 **Audience:** anyone who reads or matches the `reason` text of the `interp` member in `abstained` / `undecided` (`btor2 verify`) or `portfolio.abstained` / `portfolio.undecided` (`sv verify-auto`).
 
