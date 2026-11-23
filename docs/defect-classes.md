@@ -236,6 +236,19 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 **Enumerating test:** none recorded. **Open:** no list of the tests that anchor on prose.
 
+### `source-layout-in-message`
+
+**What varies:** how the layout of a wrapped source line reaches the text a string literal produces. A message is written over several source lines, joined by a `\` at the end of each. The compiler checks none of it: every variant below compiles, and no test reads the text, because a test that pinned the wording would be the `prose-anchored-test` class.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| the `\` lost and the lines joined (a scripted edit, a conflict resolved by hand): the next line's indentation stays inside the sentence | refused by the gate: no string literal of the non-test code under `crates/*/src` holds a run of six or more spaces between two characters of one output line. Text laid out in columns on purpose is listed by file and item, and an entry that matches nothing fails the gate | mununu#1209 (seven literals in four files) |
+| the `\` lost and the line break kept: the message breaks in mid-sentence and the next line is indented | no site on 2026-11-23 at `b7b997d5` (no ordinary literal of the non-test code holds a line break; raw strings do, on purpose). Not gated: the gates' scanner reads a raw string as an ordinary one | open: mununu#1220 |
+| the space before the `\` lost: two words glued | no site on the same date and commit: every wrap with no space before it opens the literal, follows an emitted `\n`, or follows `/`, `-` or a placeholder. Not gated, because such a wrap is legitimate | — |
+| a run after an emitted `\n`, at either end of a literal, or in a test module | an indentation or padding the program means: passed by construction | the control test |
+
+**Enumerating test:** `no_message_keeps_the_indentation_of_a_wrapped_source_line` (`tests/policy`), over every source file of every crate; its control is `the_scan_tells_a_lost_continuation_from_a_line_the_program_indents`.
+
 ### `trace-minimality-across-members`
 
 **What varies:** which member's counterexample ships, and whether that member's search returns the shortest one.
