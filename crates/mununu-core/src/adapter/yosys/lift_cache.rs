@@ -30,6 +30,9 @@
 //! that cannot be built (an include tree over the cap, an unreadable file) or an entry that
 //! cannot be read is a *bypass* — the lift runs as if the cache were off — and the outcome
 //! reaches the caller as [`LiftCacheOutcome::Bypassed`] with its reason, logged at `warn`.
+//! A lift asked to show its tool run (`MUNUNU_KEEP_YOSYS_TMP`, `MUNUNU_DEBUG_YOSYS_SCRIPT`) is a
+//! bypass too: a hit runs no tool, so it has no staging directory to keep and no script to print
+//! (mununu#1232).
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -223,7 +226,8 @@ pub enum LiftCacheOutcome {
     Hit,
     /// The tools ran and the result was stored (or storing failed — logged, never fatal).
     Miss,
-    /// The cache was configured but could not be used for this lift; the tools ran.
+    /// The cache was configured but was not used for this lift, because it could not be or
+    /// because the lift was asked to show its tool run; the tools ran and nothing was stored.
     Bypassed(String),
 }
 

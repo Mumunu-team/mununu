@@ -205,6 +205,22 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 
 **Enumerating test:** `policy::server_paths_resolve_through_one_function` (`crates/mununu-core/tests/policy/`). The decision "this path lies under the root" is one function, `deployment::resolve_under`; the request's path fields, `base_dir`, the paths inside a verify config and the headers the include scan follows all reach it. The test holds four exact tables: the callers of that function, the calls that confine a request's field, every place `src/api/` and `codesign/include_scan.rs` turn text into a path or read the filesystem, and every path-like field name of the API's types. A new site fails it until it is routed through the function or classified with its reason. The executable row and the config's option keys are held by `every_option_key_the_orchestrator_reads_is_classified` (`verify/config.rs`); the lift-script row is not part of this test. **Open:** the test is a scan of that layer, not of the code it calls.
 
+### `cache-hit-observer`
+
+**What varies:** what a caller observes of a SystemVerilog lift that a lift-cache hit does not reproduce. A hit (`MUNUNU_LIFT_CACHE_DIR`) returns the stored raw tool outputs and runs no tool; everything mununu computes from those outputs runs as on a miss. So whatever a caller reads off the *run* — and not off the outputs — is absent on a hit. The cases were enumerated from what `run_sv_flatten_btor2_concrete` does besides returning the outputs, and from the tests that lift under a cache the sweep sets (`make e2e` keeps one in the target volume between sweeps).
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| the staging directory kept by `MUNUNU_KEEP_YOSYS_TMP` | the lift does not use the cache: the tools run, nothing is read or stored, and the bypass is logged at `warn` with the variable's name | mununu#1232 |
+| the script printed by `MUNUNU_DEBUG_YOSYS_SCRIPT` | the same | mununu#1232 |
+| a test of the cache outcome itself (hit, miss) | it owns its cache directory and unsets the two variables, so a developer's shell cannot turn its hit into a bypass | mununu#1232 |
+| a test that two lifts of one design agree run to run (`e2e_lifted_register_names_carry_no_per_run_temp_path`) | open: under the sweep's cache the second lift is the first one, served again | mununu#1233 |
+| what mununu computes from the raw outputs (clock domains, the multi-clock refusal, black-box names, port directions) | recomputed on a hit; correct by construction | N0.2 (2026-11-03) |
+| a failed lift | never stored, so never served: the store follows a successful tool run | N0.2 (2026-11-03); a lift missing a snapshot is an error since mununu#957 |
+| how long a lift took | some `e2e_` tests print it; none asserts on it | not a defect |
+
+**Enumerating test:** `adapter::yosys::lift_cache_tests::x1232_every_variable_that_shows_a_tool_run_bypasses_the_lift_cache` runs over `TOOL_RUN_OBSERVERS`, the one table the lift consults, and needs no tool; `e2e_x1232_a_lift_that_shows_its_tool_run_runs_the_tools_on_a_warm_cache` is the same through the real lift in the image. A variable that shows what a tool run did belongs in that table. The detector that found the class is `e2e_the_lift_runs_under_a_staging_root_with_a_space`, which failed on every sweep after the first in a volume (the nightly of 2026-11-23).
+
 ### `os-dependent-test-expectation`
 
 **What varies:** what a test assumes about the host that only the Linux gate satisfies.
