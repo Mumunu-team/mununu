@@ -1,6 +1,6 @@
 # Consumer briefing: a constant clock, a port of unknown direction and several drivers are named (2026-11)
 
-> Source of truth: [`clock_domains_with_hierarchy`](../../crates/mununu-core/src/adapter/yosys/mod.rs) and `clock_root_notes` in [`adapter/slang/verify_auto.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API — every `sv` verb that lifts; the notes on `sv verify-auto` / `POST /api/v1/sv/verify-auto` and `sv cdc-lint` / `POST /api/v1/sv/cdc-lint`
+> Source of truth: [`clock_domains_with_hierarchy`](../../crates/mununu-core/src/adapter/yosys/mod.rs) and `clock_root_notes` in [`adapter/slang/verify_auto_text.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs) — surface: CLI+API — every `sv` verb that lifts; the notes on `sv verify-auto` / `POST /api/v1/sv/verify-auto` and `sv cdc-lint` / `POST /api/v1/sv/cdc-lint`
 
 **Audience:** anyone who lifts SystemVerilog with a tied-off clock, a stubbed or black-boxed clock source, or a pad on a clock net; anyone who reads `notes[]`, `diagnostics.merged_clock_domains` or the lint's `domains`, or gates on note kinds. It follows [the briefing of mununu#1148](2026-11-clock-rooted-at-black-box-note.md) and closes the cases that one left open.
 
