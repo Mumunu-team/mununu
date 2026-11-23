@@ -7835,7 +7835,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
             lift_notes,
             result: btor2,
         } = lift
-            .lift_with_notes()
+            .lift_with_notes(mununu_core::adapter::sv_verify::LiftReader::MutationTargets)
             .map_err(|e| format!("sv mutate --list: {e}"))?;
         let t = list_targets(&btor2)?;
         let mut summary = serde_json::json!({

@@ -1329,6 +1329,32 @@ mod tests {
         assert_eq!(kinds(&r), vec![("unsynchronized", "violated")], "{r:#?}");
     }
 
+    /// mununu#1189 — what the lint's cut-point line says, on the netlist a cut leaves: the crossing
+    /// of `a_capture_read_by_logic_is_unsynchronized` with the crossing net cut. Yosys `cutpoint`
+    /// drives the net from an `$anyseq` cell and leaves the register's output dangling, so the
+    /// capture reads a net with no clocked source and the lint finds no crossing.
+    #[test]
+    fn x1189_a_crossing_through_a_cut_net_is_not_seen() {
+        let free = r#""cut": {"type": "$anyseq", "port_directions": {"Y": "output"},
+            "connections": {"Y": [8]}}"#;
+        let cells = [
+            dff("ra", 2, "4", "30"),
+            free.to_string(),
+            dff("m", 3, "8", "11"),
+            and("g", 11, 5, 10),
+            dff("y", 3, "10", "12"),
+        ]
+        .join(",");
+        let nets = r#""ra": {"bits": [8]}, "m": {"bits": [11]}, "y": {"bits": [12]}"#;
+        let r = lint(&netlist(&cells, nets));
+        assert!(r.crossings.is_empty(), "{r:#?}");
+        assert_eq!(
+            r.domains.len(),
+            2,
+            "both clocks still clock a register: {r:#?}"
+        );
+    }
+
     #[test]
     fn parallel_synchronisers_on_one_register_are_a_bus() {
         // A 2-bit register st[1:0] in clk_a, each bit through its own 2-FF chain into clk_b.

@@ -15866,6 +15866,68 @@ module uart_tx(); endmodule"#;
     }
     impl<T> Pipe for T {}
 
+    /// mununu#1189 — `sv verify-auto` is one row of the decision × verb table: its notes name the
+    /// lift's five decisions under the kinds every other `sv` verb puts in its `lift_notes`
+    /// (the other rows are `x1189_every_reader_reports_every_lift_decision`), each once.
+    #[test]
+    fn x1189_verify_auto_reports_the_lift_decisions_under_the_shared_kinds() {
+        use crate::adapter::lift_decisions::LIFT_DECISION_KINDS;
+        let report = AutoVerifyReport {
+            diagnostics: ModelDiagnostics {
+                blackboxed_modules: vec!["vendor_ram".into()],
+                auto_provided_stubs: vec!["prim_flop".into()],
+                lift_retry: Some("the backend refused the first script".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let notes = build_notes(
+            &report,
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[("WIDTH".to_string(), "8".to_string())],
+            &[],
+            &["busy".to_string()],
+            &NotePosture::Cube,
+        );
+        let items_of = |kind: &str| -> Vec<Vec<String>> {
+            notes
+                .iter()
+                .filter(|n| n.kind == kind)
+                .map(|n| n.items.clone())
+                .collect()
+        };
+        let want: [Vec<String>; 5] = [
+            Vec::new(),
+            vec!["WIDTH=8".to_string()],
+            vec!["busy".to_string()],
+            vec!["prim_flop".to_string()],
+            vec!["vendor_ram".to_string()],
+        ];
+        for (kind, items) in LIFT_DECISION_KINDS.iter().zip(want) {
+            assert_eq!(
+                items_of(kind),
+                vec![items],
+                "`sv verify-auto` reports the lift decision `{kind}` once, with what it applies to"
+            );
+        }
+        let none = build_notes(
+            &AutoVerifyReport::default(),
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[],
+            &[],
+            &[],
+            &NotePosture::Cube,
+        );
+        assert!(
+            !none
+                .iter()
+                .any(|n| LIFT_DECISION_KINDS.contains(&n.kind.as_str())),
+            "a lift that decided nothing is not reported as one that did"
+        );
+    }
+
     #[test]
     fn lift_retry_note_is_info_and_names_the_backend_loop() {
         let with = AutoVerifyReport {

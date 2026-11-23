@@ -11,7 +11,9 @@
 //!
 //! Every verb returns a [`Lifted`]: its result beside the notes the lift owes the report
 //! (clock domains merged under `--merge-clock-domains`, a clock with a free-source root —
-//! mununu#1181). The handler and the CLI put them in the report's `lift_notes`.
+//! mununu#1181; a module or a net cut to free values, a parameter override, a retried lift,
+//! each worded for the verb that reads the model — mununu#1189). The handler and the CLI put
+//! them in the report's `lift_notes`.
 //!
 //! Atoms are validated **before** the (toolchain-gated) lift, so a malformed
 //! request fails fast and identically to the BTOR2-direct verbs.
@@ -24,24 +26,30 @@
 use crate::adapter::btor2::kmts_lift::PredicateSpec;
 use crate::adapter::btor2::parser;
 use crate::adapter::btor2::predicate_expr::parse_predicate_expr;
+pub use crate::adapter::lift_decisions::LiftReader;
+use crate::adapter::lift_decisions::{LiftDecisions, cdc_lint_lift_lines, lift_decision_notes};
 use crate::adapter::liveness_rescue::{
     Atom, LivenessVerdict, parse_response_atom, parse_response_pairs,
     response_liveness_rescue_atoms, response_liveness_rescue_conjunction,
 };
 use crate::adapter::reach_portfolio::ReachOutcome;
-use crate::adapter::slang::verify_auto::{VerificationNote, lift_clock_notes};
+use crate::adapter::slang::verify_auto::VerificationNote;
 use crate::adapter::yosys::{SvFrontend, SvLiftResult, YosysOptions, sv_to_btor2_with_blackboxes};
 use crate::verdict::PropertyVerdict;
 
-/// A verb's result with what the lift must say beside it (mununu#1181): the clock notes of the
-/// lift — `clock-domains-merged` when [`SvLift::merge_clock_domains`] put several domains, a
-/// derived clock or a free-source clock on the one implicit clock, and one note per free-source
-/// root. Every SV-direct verb returns one, so a caller reads the verdict through `.result` with
-/// the caveat in its hand; the policy test `every_lift_that_can_merge_clock_domains_reports_them`
-/// checks that each surface puts `lift_notes` in its report.
+/// A verb's result with what the lift must say beside it. The clock notes of the lift
+/// (mununu#1181): `clock-domains-merged` when [`SvLift::merge_clock_domains`] put several
+/// domains, a derived clock or a free-source clock on the one implicit clock, and one note per
+/// free-source root. Then one note per other decision the lift made (mununu#1189): a retried
+/// lift, a parameter override, a cut point, a module cut for having no body, each saying what it
+/// means for the [`LiftReader`] that asked. Every SV-direct verb returns one, so a caller reads
+/// the verdict through `.result` with the caveats in its hand; the policy test
+/// `every_lift_that_can_merge_clock_domains_reports_them` checks that each surface puts
+/// `lift_notes` in its report.
 #[derive(Debug, Clone)]
 pub struct Lifted<T> {
-    /// What the report must say about the lift; empty for a design on one input clock.
+    /// What the report must say about the lift; empty for a design on one input clock that the
+    /// lift neither cut, re-sized nor retried.
     pub lift_notes: Vec<VerificationNote>,
     /// The verb's own result.
     pub result: T,
@@ -126,48 +134,60 @@ impl SvLift {
 
     /// The one lift of every verb here (yosys-slang), through the entry that returns the clock
     /// domains: the model-only entry refuses the merge opt-in, because it could not report it.
+    /// The notes come back with the result, built here once for every caller from the options
+    /// the lift ran with (after `lift_overrides` and `adjust`), so no verb can keep the model and
+    /// drop what the lift decided (mununu#1189).
     fn lift_domains(
         &self,
+        reader: LiftReader,
         adjust: impl FnOnce(YosysOptions) -> YosysOptions,
-    ) -> Result<SvLiftResult, String> {
+    ) -> Result<(SvLiftResult, Vec<VerificationNote>), String> {
         let (source, yopts) = self.staged()?;
-        sv_to_btor2_with_blackboxes(&source, &adjust(yopts))
-            .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))
+        let yopts = adjust(yopts);
+        let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
+            .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))?;
+        let notes = lift_decision_notes(reader, LiftDecisions::of_lift(&lifted, &yopts));
+        Ok((lifted, notes))
     }
 
     /// [`Self::lift_with_notes`] plus how a counterexample names the lift's registers and clocks
     /// ([`crate::trace::TraceNames`]: the design's aliases for bound-checker port names, the clock
     /// nets).
-    fn lift_named(&self) -> Result<Lifted<(String, crate::trace::TraceNames)>, String> {
-        let lifted = self.lift_domains(|yopts| yopts)?;
+    fn lift_named(
+        &self,
+        reader: LiftReader,
+    ) -> Result<Lifted<(String, crate::trace::TraceNames)>, String> {
+        let (lifted, lift_notes) = self.lift_domains(reader, |yopts| yopts)?;
         let names = crate::trace::TraceNames {
             aliases: crate::adapter::yosys::trace_aliases(&lifted.flat_netlist_json),
             clocks: lifted.clock_domains.iter().map(|d| d.net.clone()).collect(),
             ..Default::default()
         };
         Ok(Lifted {
-            lift_notes: lift_clock_notes(&lifted.clock_domains),
+            lift_notes,
             result: (lifted.btor2, names),
         })
     }
 
     /// Lift to a single flattened BTOR2 string (yosys-slang), beside the notes its report owes
-    /// the reader (mununu#1181). A verb that lifts by hand (`sv mutate --list`, the `sv cegar`
-    /// route) calls this, so no lift that takes the merge opt-in returns the model alone.
-    pub fn lift_with_notes(&self) -> Result<Lifted<String>, String> {
-        self.lift_with_notes_under(|yopts| yopts)
+    /// the reader (mununu#1181, mununu#1189). `reader` is what will read the model: the notes on
+    /// a cut say what its result may conclude. A verb that lifts by hand (`sv mutate --list`, the
+    /// `sv cegar` route) calls this, so no lift returns the model alone.
+    pub fn lift_with_notes(&self, reader: LiftReader) -> Result<Lifted<String>, String> {
+        self.lift_with_notes_under(reader, |yopts| yopts)
     }
 
     /// [`Self::lift_with_notes`] with the yosys options adjusted first (the `sv cegar` route's
-    /// `setundef` pair). The notes are read off the lift's result, so whatever the adjustment
-    /// turns on is reported.
+    /// `setundef` pair). The notes are read off the lift's result and the adjusted options, so a
+    /// cut or a parameter the adjustment adds is reported.
     pub fn lift_with_notes_under(
         &self,
+        reader: LiftReader,
         adjust: impl FnOnce(YosysOptions) -> YosysOptions,
     ) -> Result<Lifted<String>, String> {
-        let lifted = self.lift_domains(adjust)?;
+        let (lifted, lift_notes) = self.lift_domains(reader, adjust)?;
         Ok(Lifted {
-            lift_notes: lift_clock_notes(&lifted.clock_domains),
+            lift_notes,
             result: lifted.btor2,
         })
     }
@@ -222,13 +242,13 @@ pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport,
             *step = step.replace("(work.sv:", &format!("({primary_name}:"));
         }
     }
-    if !lifted.blackboxed_modules.is_empty() {
-        report.notes.push(format!(
-            "black-boxed modules ({}): their outputs are unclocked, so crossings inside or through \
-             them are not seen",
-            lifted.blackboxed_modules.join(", ")
-        ));
-    }
+    // mununu#1189 — the lint's own lines for what the lift decided: a cut module, a cut point,
+    // a parameter override, a retried lift.
+    report
+        .notes
+        .extend(cdc_lint_lift_lines(&LiftDecisions::of_lift(
+            &lifted, &yopts,
+        )));
     Ok(report)
 }
 
@@ -242,12 +262,13 @@ pub fn sv_verify_liveness(
 ) -> Result<Lifted<(LivenessVerdict, ReachOutcome)>, String> {
     let ante: Atom = parse_response_atom(request)?;
     let cons: Atom = parse_response_atom(grant)?;
-    lift.lift_with_notes()?.try_map(|btor2| {
-        response_liveness_rescue_atoms(&btor2, &ante, &cons, false).ok_or_else(|| {
+    lift.lift_with_notes(LiftReader::ResponseLiveness)?
+        .try_map(|btor2| {
+            response_liveness_rescue_atoms(&btor2, &ante, &cons, false).ok_or_else(|| {
             "could not build the liveness monitor — an atom likely binds no signal in the design"
                 .to_string()
         })
-    })
+        })
 }
 
 /// `sv verify-liveness --fairness` — lift SV and decide `AG(request → AF grant)` under the
@@ -262,15 +283,16 @@ pub fn sv_verify_liveness_under_fairness(
     let ante: Atom = parse_response_atom(request)?;
     let cons: Atom = parse_response_atom(grant)?;
     let fair = crate::adapter::liveness_rescue::parse_fairness_atoms(fairness)?;
-    lift.lift_with_notes()?.try_map(|btor2| {
-        crate::adapter::liveness_rescue::response_liveness_rescue_under_fairness(
+    lift.lift_with_notes(LiftReader::ResponseLiveness)?
+        .try_map(|btor2| {
+            crate::adapter::liveness_rescue::response_liveness_rescue_under_fairness(
             &btor2, &ante, &cons, &fair, false,
         )
         .ok_or_else(|| {
             "could not build the fair-cycle monitor — an atom likely binds no signal in the design"
                 .to_string()
         })
-    })
+        })
 }
 
 /// `sv verify-liveness --response` — lift SV and decide the **conjunction** of
@@ -286,13 +308,14 @@ pub fn sv_verify_liveness_all(
     responses: &[String],
 ) -> Result<Lifted<(LivenessVerdict, Vec<ReachOutcome>)>, String> {
     let pairs = parse_response_pairs(responses)?;
-    lift.lift_with_notes()?.try_map(|btor2| {
-        response_liveness_rescue_conjunction(&btor2, &pairs, false).ok_or_else(|| {
+    lift.lift_with_notes(LiftReader::ResponseLiveness)?
+        .try_map(|btor2| {
+            response_liveness_rescue_conjunction(&btor2, &pairs, false).ok_or_else(|| {
             "could not build a liveness monitor — an atom likely binds no signal in the design, \
              or no responses were given"
                 .to_string()
         })
-    })
+        })
 }
 
 /// `sv verify-recoverability` — lift SV and decide `AG EF target`. The target atom is
@@ -334,7 +357,7 @@ pub fn sv_verify_recoverability_explained(
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e}")
     })?;
-    lift.lift_named()?
+    lift.lift_named(LiftReader::Recoverability)?
         .try_map(|(lifted, names)| -> Result<_, String> {
             let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
             let (verdict, mut attribution) =
@@ -394,7 +417,7 @@ pub fn sv_verify_recoverability_refined_explained(
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e}")
     })?;
-    lift.lift_named()?
+    lift.lift_named(LiftReader::Recoverability)?
         .try_map(|(lifted, names)| -> Result<_, String> {
             let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
             let (verdict, refinement, mut attribution) =
@@ -418,7 +441,7 @@ pub fn sv_check_fsm(
     lift: &SvLift,
     max_width: u32,
 ) -> Result<Lifted<Vec<crate::adapter::fsm_scan::FsmFinding>>, String> {
-    lift.lift_with_notes()?
+    lift.lift_with_notes(LiftReader::FsmEncoding)?
         .try_map(|btor2| crate::adapter::fsm_scan::fsm_encoding_scan(&btor2, max_width))
 }
 
@@ -429,7 +452,7 @@ pub fn sv_check_fsm_liveness(
     max_width: u32,
     terminal: &[(String, u64)],
 ) -> Result<Lifted<Vec<crate::adapter::fsm_scan::FsmLivenessFinding>>, String> {
-    lift.lift_with_notes()?
+    lift.lift_with_notes(LiftReader::FsmLiveness)?
         .try_map(|btor2| crate::adapter::fsm_scan::fsm_liveness_scan(&btor2, max_width, terminal))
 }
 
@@ -525,7 +548,7 @@ impl SvLintFinding {
 /// Findings are deterministic (sorted by name, deduplicated); a name that is both
 /// a register alias and an output is reported once, as a `Register`.
 pub fn sv_lint_registers(lift: &SvLift) -> Result<Lifted<Vec<SvLintFinding>>, String> {
-    lift.lift_with_notes()?
+    lift.lift_with_notes(LiftReader::Lint)?
         .try_map(|btor2| -> Result<_, String> {
             let mut findings = lint_undriven_partial_writes(&btor2)?;
             findings.extend(lint_registered_array_read_moving_address(&btor2)?);
@@ -1687,7 +1710,10 @@ endmodule
             merge_clock_domains: false,
             ..Default::default()
         };
-        let btor2 = lift.lift_with_notes().expect("the slang lift runs").result;
+        let btor2 = lift
+            .lift_with_notes(LiftReader::Lint)
+            .expect("the slang lift runs")
+            .result;
         // An anonymous free input is an `input` line with no symbol — the design's
         // own ports (`clk`, `rst_n`, `val`) carry theirs.
         let anonymous_inputs = btor2
@@ -1934,7 +1960,10 @@ endmodule
             "{findings:?}"
         );
         // The same naming on the mutation surface.
-        let btor2 = lift.lift_with_notes().expect("lift").result;
+        let btor2 = lift
+            .lift_with_notes(LiftReader::MutationTargets)
+            .expect("lift")
+            .result;
         let targets = crate::adapter::btor2::mutate::list_targets(&btor2).expect("list");
         assert!(
             targets.stick.contains(&"state_q".to_string()),

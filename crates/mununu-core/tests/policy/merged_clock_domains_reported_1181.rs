@@ -81,14 +81,21 @@ const CALLERS: &[(&str, &[ReportingCall])] = &[
                 ".extend(clock_root_notes(&clock_domains))",
                 1,
             ),
+            // `sv mutate` and `sv plan` read the lift's decisions off that report
+            // (mununu#1189); the clock notes are among them.
             (
                 "crates/mununu-core/src/planner/entry.rs",
-                "clock_notes_of_report(&baseline)",
+                "LiftDecisions::of_report(&baseline, yosys_opts)",
                 1,
             ),
             (
                 "crates/mununu-core/src/planner/entry.rs",
-                "clock_notes_of_report(&m.report)",
+                "LiftDecisions::of_report(&m.report, yosys_opts)",
+                1,
+            ),
+            (
+                "crates/mununu-core/src/adapter/lift_decisions.rs",
+                "clock_notes: clock_notes_of_report(report)",
                 1,
             ),
         ],
@@ -99,9 +106,15 @@ const CALLERS: &[(&str, &[ReportingCall])] = &[
         &[
             (
                 "crates/mununu-core/src/adapter/sv_verify.rs",
-                // `lift_named` and `lift_with_notes_under`.
-                "lift_notes: lift_clock_notes(&lifted.clock_domains)",
+                // `lift_domains` (the notes of every verb's lift) and `sv_cdc_lint` (its lines
+                // for the lift's other decisions; its domains go by the two calls below).
+                "LiftDecisions::of_lift(",
                 2,
+            ),
+            (
+                "crates/mununu-core/src/adapter/lift_decisions.rs",
+                "clock_notes: lift_clock_notes(&lifted.clock_domains)",
+                1,
             ),
             (
                 "crates/mununu-core/src/adapter/sv_verify.rs",

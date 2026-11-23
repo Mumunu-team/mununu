@@ -6,6 +6,7 @@
 
 #![allow(clippy::wildcard_imports)]
 
+use crate::adapter::lift_decisions::{LiftDecisions, LiftReader, lift_decision_notes};
 use crate::adapter::slang::verify_auto::*;
 use crate::adapter::yosys::YosysOptions;
 use crate::adapter::{AdapterError, AdapterErrorKind};
@@ -41,9 +42,10 @@ pub struct MutateReport {
     pub flipped: usize,
     /// Number the mutation did NOT flip (the adequacy finding).
     pub unflipped: usize,
-    /// mununu#1181 — what the lift of the design says about its clocks (clock domains merged
-    /// under `--merge-clock-domains`, a clock with a free-source root): both runs verify that
-    /// lift, so every verdict compared here is one on the merged model.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189): clock domains merged
+    /// under `--merge-clock-domains`, a clock with a free-source root, a module or a net cut, a
+    /// parameter set, a flop primitive stubbed, a retried lift. Both runs verify that lift, so
+    /// every verdict compared here is one on that model.
     pub lift_notes: Vec<VerificationNote>,
 }
 
@@ -111,8 +113,12 @@ pub fn mutate_and_compare(
         properties,
         flipped,
         unflipped,
-        // The mutation is applied to the lifted model, so the mutant's lift has the same clocks.
-        lift_notes: clock_notes_of_report(&baseline),
+        // The mutation is applied to the lifted model, so the mutant's lift made the same
+        // decisions (clocks, cut modules, cut points, parameters, a retry: mununu#1189).
+        lift_notes: lift_decision_notes(
+            LiftReader::Mutation,
+            LiftDecisions::of_report(&baseline, yosys_opts),
+        ),
     })
 }
 
@@ -193,8 +199,10 @@ pub struct PlanReport {
     pub unsupported: Vec<(String, String)>,
     /// The lift's wall, milliseconds — paid once per run, not per property.
     pub lift_ms: u64,
-    /// mununu#1181 — what the lift says about its clocks, as the run's `notes` would: the plan
-    /// is a plan for the merged model. Empty when no property translated (nothing is lifted).
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), under the kinds the
+    /// run's `notes` would use: merged clocks, a module or a net cut, a parameter set, a flop
+    /// primitive stubbed, a retried lift. The plan is a plan for that model. Empty when the lift
+    /// made none of these decisions, and when no property translated (nothing is lifted).
     pub lift_notes: Vec<VerificationNote>,
 }
 
@@ -233,6 +241,8 @@ pub fn plan_auto(
     let prepared = prepare_model(sources, yosys_opts, opts)?;
     let lift_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(match prepared {
+        // No property, so `prepare_model` returned before the lift: there is no lift for
+        // `lift_notes` to describe.
         Prepared::Empty(report) => PlanReport {
             unsupported: report.unsupported,
             lift_ms,
@@ -274,7 +284,10 @@ pub fn plan_auto(
                     .collect(),
                 unsupported: m.report.unsupported.clone(),
                 lift_ms,
-                lift_notes: clock_notes_of_report(&m.report),
+                lift_notes: lift_decision_notes(
+                    LiftReader::Plan,
+                    LiftDecisions::of_report(&m.report, yosys_opts),
+                ),
             }
         }
     })

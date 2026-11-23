@@ -382,25 +382,13 @@ pub(super) fn build_notes(
     notes.push(coverage_summary_note(report));
 
     notes.extend(merged_clock_domains_note(&d.merged_clock_domains));
-    // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
-    // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
-    // the model is the same design, and a reader diffing two runs wants to know the script moved.
-    if let Some(reason) = &d.lift_retry {
-        notes.push(VerificationNote {
-            kind: "lift-retry".into(),
-            level: NoteLevel::Info,
-            summary: format!("lift: retried — {reason}."),
-            detail: "The yosys BTOR backend walks the netlist cell by cell and can report a \
-                     topological loop where `check` finds none (wide `$buf` cells from \
-                     yosys-slang chained bit-wise through other cells). `opt_clean` folds the \
-                     buffers into connections and drops unused cells; it removes nothing the \
-                     design reads, so the verdicts are over the same design. The retry runs \
-                     only on that error."
-                .to_string(),
-            items: Vec::new(),
-            property: None,
-        });
-    }
+    // The lift re-ran its yosys script (Info). The note is the one every other `sv` verb puts in
+    // its `lift_notes` (mununu#1189).
+    notes.extend(
+        d.lift_retry
+            .as_deref()
+            .map(crate::adapter::lift_decisions::lift_retry_note),
+    );
 
     // Config concretization (ScopeCaveat) — H.J.b; present only when the user
     // pinned config inputs to constants.
@@ -425,29 +413,13 @@ pub(super) fn build_notes(
         });
     }
 
-    // Parameter overrides (ScopeCaveat) — present only when the user passed
-    // `--param` / `params`. The design was re-elaborated with these module
-    // parameters, so the verdicts are scoped to them (a different parameter value
-    // could size a different design).
+    // Parameter overrides (ScopeCaveat) — present only when the user passed `--param` /
+    // `params`. The note is the one every other `sv` verb puts in its `lift_notes`
+    // (mununu#1189).
     if !applied_params.is_empty() {
-        notes.push(VerificationNote {
-            kind: "parameter-override".into(),
-            level: NoteLevel::ScopeCaveat,
-            summary: format!(
-                "{} module parameter(s) overridden before the lift (yosys chparam / slang -G) — verdicts hold for THESE parameter values.",
-                applied_params.len()
-            ),
-            detail: "A module parameter was set before elaboration (e.g. to shrink a timing \
-                     interval so its counters fit the exact engine), so the design verified here \
-                     is the one sized by these parameters. A different parameter value would size \
-                     a different design; re-run to cover other values."
-                .into(),
-            items: applied_params
-                .iter()
-                .map(|(lhs, v)| format!("{lhs}={v}"))
-                .collect(),
-            property: None,
-        });
+        notes.push(crate::adapter::lift_decisions::parameter_override_note(
+            applied_params,
+        ));
     }
 
     // Control-slice cut points (ScopeCaveat) — present only when the user cut nets
@@ -503,7 +475,7 @@ pub(super) fn build_notes(
             ""
         };
         notes.push(VerificationNote {
-            kind: "control-slice".into(),
+            kind: crate::adapter::lift_decisions::CONTROL_SLICE.into(),
             level: NoteLevel::ScopeCaveat,
             summary: format!(
                 "{} net(s) cut to free inputs (control-slice) — an over-approximation of the design.",
@@ -599,28 +571,18 @@ pub(super) fn build_notes(
         });
     }
 
-    // Flop stubs (Info).
+    // Flop stubs (Info). The note is the one `sv plan` and `sv mutate` put in their
+    // `lift_notes` (mununu#1189).
     if !d.auto_provided_stubs.is_empty() {
-        notes.push(VerificationNote {
-            kind: "flop-stub".into(),
-            level: NoteLevel::Info,
-            summary: format!(
-                "{} flop primitive(s) behaviorally stubbed.",
-                d.auto_provided_stubs.len()
-            ),
-            detail: "A cut flop primitive (no body in the source set) was auto-replaced with an \
-                     EXACT behavioral model of its datapath, so the register it drives survives \
-                     the lift (no soundness loss — the stub is functionally identical)."
-                .into(),
-            items: d.auto_provided_stubs.clone(),
-            property: None,
-        });
+        notes.push(crate::adapter::lift_decisions::flop_stub_note(
+            &d.auto_provided_stubs,
+        ));
     }
 
     // Black-boxed / cut modules (SoundnessCaveat).
     if !d.blackboxed_modules.is_empty() {
         notes.push(VerificationNote {
-            kind: "blackbox-cut".into(),
+            kind: crate::adapter::lift_decisions::BLACKBOX_CUT.into(),
             level: NoteLevel::SoundnessCaveat,
             summary: format!(
                 "{} module(s) cut (no body) — state behind them is not modeled.",

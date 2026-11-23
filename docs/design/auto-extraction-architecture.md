@@ -60,7 +60,7 @@ evaluates each `[[properties]]` entry.
 
 ### 1.2 Adapters
 
-> Source of truth: [`crates/mununu-core/src/adapter/mod.rs`](../../crates/mununu-core/src/adapter/mod.rs#L227) — surface: CLI+API+UI
+> Source of truth: [`crates/mununu-core/src/adapter/mod.rs`](../../crates/mununu-core/src/adapter/mod.rs#L228) — surface: CLI+API+UI
 
 mununu ships eleven adapters that all implement `FormatAdapter`:
 

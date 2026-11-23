@@ -110,7 +110,7 @@ When `--predicate-source craig` is selected but CVC5 isn't found at runtime, mun
 
 ## Preflight a SystemVerilog design for unfaithful partial-write registers
 
-> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L527) — surface: (CLI+API+UI)
+> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L550) — surface: (CLI+API+UI)
 
 `mununu sv lint` lifts a SystemVerilog design and runs purely structural checks — at CI time (~lift cost, **no** model checking, ~0.1 s). Each finding carries a `rule` tag:
 
@@ -203,7 +203,7 @@ Declaring an expectation **supersedes** `--fail-on` (it must — `--expect-viola
 
 ## Check that a design's properties are adequate (mutation testing)
 
-> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/planner/entry.rs#L67) — surface: (CLI+API+UI)
+> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/planner/entry.rs#L69) — surface: (CLI+API+UI)
 
 `mununu sv mutate` applies a **named structural mutation** to a SystemVerilog design, re-verifies, and reports whether each property's verdict **flips**. A flip (`holds` → `violated`) confirms the property constrains the mutated behaviour; a property that does *not* flip is the finding — the spec is vacuous with respect to that fault. This is a statement about the **properties**, never a bug report about the design.
 
