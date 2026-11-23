@@ -133,8 +133,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A version, always: without one `cargo install` builds the newest release, and a release
+      # whose minimum rustc is above the pinned toolchain (rust-toolchain.toml) fails here on
+      # every pull request (mununu#1242). Raise this version when the toolchain is raised.
       - name: Install cargo-outdated
-        run: cargo install cargo-outdated --locked
+        run: cargo install cargo-outdated --locked --version 0.19.0
       - name: Check for outdated dependencies
         run: |
           echo "Checking for outdated dependencies..."

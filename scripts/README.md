@@ -17,7 +17,7 @@ Comprehensive dependency auditing script that checks for:
 ```bash
 # Install audit tools (one-time setup)
 cargo install cargo-audit --locked
-cargo install cargo-outdated
+cargo install cargo-outdated --locked --version 0.19.0
 ```
 
 **What it does:**

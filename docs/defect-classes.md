@@ -262,3 +262,19 @@ An entry's heading is `### ` followed by the slug in backticks; the gate reads e
 | the SAT BMC dynamic step (one query per window) | the trace is the first found; the report says how far below it was refuted | mununu#1057, mununu#1080 |
 
 **Enumerating test:** none recorded. **Open:** constraints asserted past the bad frame in the dynamic step (mununu#1141).
+
+### `unpinned-source-built-tool`
+
+**What varies:** which tool a CI job or an image build compiles from source, and whether the step names the version it builds. With no version the step builds the newest release with the toolchain the repository pins, so a release whose minimum rustc is above the pin fails the step on every pull request, whatever the pull request changes.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| `cargo-outdated` in the `dependency-check` job | installed at a named version, the newest whose minimum rustc the pinned toolchain satisfies | mununu#1242 |
+| `cargo-nextest` in the dev image | installed at a named version (the one an unpinned build fetched on the day of the fix, so the image does not change) | mununu#1242 |
+| `cargo-audit`, which an action built from source | installed as a prebuilt binary | mununu#356 |
+| any later `cargo install` in a workflow or a Dockerfile | refused by the test unless it names a `--version`, or a source the tree or a revision fixes (`--path`, `--rev`, `--tag`) | mununu#1242 |
+| a tool installed as a prebuilt binary (`cargo-audit`, `cargo-deny`, `cargo-machete`, `tokei`) | not this class: nothing is compiled, so the pinned toolchain is not an input. The version still floats; no failure from it is recorded | — |
+| the tool-suite and `sv2v` downloads of the images | already correct: a named release, checked against a checksum the Dockerfile records | — |
+| an install hint a script prints for a developer | not scanned: it is text, not a step of a build. The `cargo-outdated` hint names the same version as the job | mununu#1242 |
+
+**Enumerating test:** `every_tool_a_build_compiles_from_source_names_its_version` (`tests/policy`), over every workflow and every Dockerfile; its controls are `an_install_with_no_version_is_seen_in_a_workflow_and_in_a_dockerfile`, `the_version_is_read_from_the_command_it_belongs_to` and `a_comment_and_a_fixed_source_are_not_findings`. **Upkeep:** the named versions are raised by hand, together with the toolchain pin.
