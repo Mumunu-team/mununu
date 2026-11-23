@@ -31,6 +31,7 @@ use crate::adapter::btor2::{emit, parser};
 use crate::adapter::btormc::McVerdict;
 use crate::adapter::reach_portfolio::ReachOutcome;
 use crate::adapter::ric3;
+use crate::adapter::run_budget::SetBy;
 
 /// A parsed BTOR2 witness: the falsified `bad`, every state's initial value and the input
 /// assignment of each frame (`frames[j]` drives the transition out of frame `j`; the last block is
@@ -625,7 +626,9 @@ fn fallback_view(
 /// carried out of the portfolio ([`ReachOutcome::trace`], replayed on the design before it got
 /// there) — else, under the caller's wall clock (mununu#1045: `deadline`, the remainder of
 /// `--timeout-ms` / the request's `timeout_ms`, installed as this thread's
-/// [`run_budget`](crate::adapter::run_budget); `None` = unbounded), the fallback: the portfolio
+/// [`run_budget`](crate::adapter::run_budget); `None` = unbounded; `deadline_set_by` names which
+/// of the two it is, so a member the clock stops names the setting to raise, mununu#1197), the
+/// fallback: the portfolio
 /// again restricted to the trace-carrying members ([`ReachMembers::TRACE_CARRIERS`], minus every
 /// member whose own witness already failed to replay — the same run would fail the same way),
 /// then native BMC to `max_k`, the one step that can set `unavailable_within_k`. Every way of
@@ -641,6 +644,7 @@ pub fn witness_for_violation(
     file: &Btor2File,
     max_k: u32,
     deadline: Option<std::time::Instant>,
+    deadline_set_by: SetBy,
     outcome: &ReachOutcome,
     owned_only: bool,
 ) -> ShippedWitness {
@@ -659,6 +663,7 @@ pub fn witness_for_violation(
         file,
         max_k,
         deadline,
+        deadline_set_by,
         &outcome.trace_replay_failed,
         owned_only,
         run_carriers,
@@ -672,17 +677,26 @@ pub fn witness_for_violation(
 /// owned ones only under `owned_only`) race under the time left, every witness replayed on
 /// `file`; then native BMC to `max_k`. The budget is a CHILD of this thread's current
 /// [`run_budget`](crate::adapter::run_budget) (a `verify-auto` per-property budget bounds it as
-/// well as `deadline`); every miss is named.
+/// well as `deadline`, whose setter is `deadline_set_by`); every miss is named.
 ///
 /// engine: as [`witness_for_violation`]'s fallback.
 pub fn search_witness(
     file: &Btor2File,
     max_k: u32,
     deadline: Option<std::time::Instant>,
+    deadline_set_by: SetBy,
     skip: &[(&'static str, String)],
     owned_only: bool,
 ) -> ShippedWitness {
-    search_witness_with(file, max_k, deadline, skip, owned_only, true)
+    search_witness_with(
+        file,
+        max_k,
+        deadline,
+        deadline_set_by,
+        skip,
+        owned_only,
+        true,
+    )
 }
 
 /// mununu#1057 — the shortest path behind a shipped witness, for the consumers that read a
@@ -744,6 +758,7 @@ fn search_witness_with(
     file: &Btor2File,
     max_k: u32,
     deadline: Option<std::time::Instant>,
+    deadline_set_by: SetBy,
     skip: &[(&'static str, String)],
     owned_only: bool,
     run_carriers: bool,
@@ -775,7 +790,7 @@ fn search_witness_with(
         )
         .unwrap_or(u64::MAX)
     });
-    let budget = Budget::child(&current(), own_ms);
+    let budget = Budget::child(&current(), own_ms, deadline_set_by);
     let left = budget.remaining_ms().map(std::time::Duration::from_millis);
     if budget.expired() || left.is_some_and(|l| l.is_zero()) {
         notes.push("the time budget was spent by the verdict; no witness search ran".into());
@@ -1176,6 +1191,7 @@ mod tests {
             &file,
             3000,
             Some(t0 + Duration::from_millis(1)),
+            SetBy::Mununu,
             &ReachOutcome::default(),
             false,
         );
@@ -1189,7 +1205,14 @@ mod tests {
         assert!(reason.contains("budget"), "{reason}");
         assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
         // Unbounded, the same search ships the path: the stop above was the deadline's.
-        let full = witness_for_violation(&file, 3000, None, &ReachOutcome::default(), false);
+        let full = witness_for_violation(
+            &file,
+            3000,
+            None,
+            SetBy::Mununu,
+            &ReachOutcome::default(),
+            false,
+        );
         assert_eq!(full.by, Some("native-bmc"));
         assert_eq!(full.trace.map(|t| t.states.len()), Some(3001));
         assert_eq!(full.unavailable_reason, None);
@@ -1199,7 +1222,14 @@ mod tests {
     #[test]
     fn a_bound_searched_without_a_path_names_the_bound() {
         let file = parser::parse(DEEP).unwrap();
-        let w = witness_for_violation(&file, 5, None, &ReachOutcome::default(), false);
+        let w = witness_for_violation(
+            &file,
+            5,
+            None,
+            SetBy::Mununu,
+            &ReachOutcome::default(),
+            false,
+        );
         assert!(w.trace.is_none());
         assert_eq!(w.unavailable_within_k, Some(5));
         let reason = w.unavailable_reason.unwrap();
@@ -1213,6 +1243,7 @@ mod tests {
             &file,
             3000,
             Some(std::time::Instant::now()),
+            SetBy::Mununu,
             &ReachOutcome::default(),
             false,
         );
@@ -1242,7 +1273,14 @@ mod tests {
             ..ReachOutcome::default()
         };
         // An already-spent deadline would refuse any search; the carried trace needs none.
-        let w = witness_for_violation(&file, 1, Some(std::time::Instant::now()), &outcome, false);
+        let w = witness_for_violation(
+            &file,
+            1,
+            Some(std::time::Instant::now()),
+            SetBy::Mununu,
+            &outcome,
+            false,
+        );
         assert_eq!(w.by, Some("sat-bmc"));
         assert_eq!(w.trace, Some(carried));
         assert_eq!(w.unavailable_reason, None);
@@ -1413,7 +1451,14 @@ mod tests {
         // named beside the strike-out; the native re-derivation then has no time left, or
         // searches its bound of 5: either way no trace, and the reason says what each did.
         let t0 = std::time::Instant::now();
-        let w = witness_for_violation(&file, 5, Some(t0 + Duration::from_secs(2)), &outcome, true);
+        let w = witness_for_violation(
+            &file,
+            5,
+            Some(t0 + Duration::from_secs(2)),
+            SetBy::Mununu,
+            &outcome,
+            true,
+        );
         let elapsed = t0.elapsed();
         assert!(w.trace.is_none(), "{w:?}");
         let reason = w.unavailable_reason.unwrap();
@@ -1441,7 +1486,14 @@ mod tests {
         let outer = Budget::with_ms(1);
         let _guard = enter(&outer);
         std::thread::sleep(Duration::from_millis(5));
-        let w = witness_for_violation(&file, 3000, None, &ReachOutcome::default(), false);
+        let w = witness_for_violation(
+            &file,
+            3000,
+            None,
+            SetBy::Mununu,
+            &ReachOutcome::default(),
+            false,
+        );
         assert!(w.trace.is_none(), "the outer budget was spent: {:?}", w.by);
         let reason = w.unavailable_reason.unwrap();
         assert!(reason.contains("budget"), "{reason}");

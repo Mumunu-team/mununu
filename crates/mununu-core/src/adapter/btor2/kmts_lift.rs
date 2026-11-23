@@ -705,8 +705,9 @@ pub enum InitialCubeDoubt {
     /// The cycle-0 query returned `Unknown`: a timeout, the `MUNUNU_CUBE_SMT_RLIMIT` resource
     /// bound, or a predicate the encoded view cannot resolve.
     QueryInconclusive,
-    /// The run budget had expired before the cube's query ran.
-    BudgetExpired,
+    /// The run budget had expired before the cube's query ran. The setter is who set that
+    /// budget (mununu#1197): the remedy names the setting to raise.
+    BudgetExpired(crate::adapter::run_budget::SetBy),
     /// The design did not encode for the query, so no cube was queried.
     DesignNotEncoded(String),
     /// A memory `init` did not encode, so the query ran with the memory free at cycle 0: a `Sat`
@@ -793,7 +794,7 @@ impl InitialCubeDoubt {
     /// of the input — the [`BottomDeterminism`](crate::adapter::slang::verify_auto::BottomDeterminism)
     /// reading of a verdict withheld over it.
     pub fn is_host_dependent(&self) -> bool {
-        matches!(self, Self::QueryInconclusive | Self::BudgetExpired)
+        matches!(self, Self::QueryInconclusive | Self::BudgetExpired(_))
     }
 
     /// What decides a cube kept on this doubt — one sentence per cause, since the causes
@@ -804,7 +805,13 @@ impl InitialCubeDoubt {
                 "a re-run with a larger `MUNUNU_CUBE_SMT_RLIMIT` or query clock may decide it"
                     .to_string()
             }
-            Self::BudgetExpired => "a re-run with a larger run budget may decide it".to_string(),
+            // mununu#1197 — "a larger run budget" named no setting.
+            Self::BudgetExpired(set_by) => match set_by.setting() {
+                Some(setting) => format!(
+                    "the budget follows {setting}: a re-run with a larger one may decide it"
+                ),
+                None => crate::adapter::run_budget::NO_SETTING.to_string(),
+            },
             Self::DesignNotEncoded(_) => {
                 "the design is outside the cycle-0 encoder; decide the row with another engine"
                     .to_string()
@@ -829,7 +836,9 @@ impl std::fmt::Display for InitialCubeDoubt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::QueryInconclusive => f.write_str("the cycle-0 query was inconclusive"),
-            Self::BudgetExpired => f.write_str("the run budget expired before its cycle-0 query"),
+            Self::BudgetExpired(_) => {
+                f.write_str("the run budget expired before its cycle-0 query")
+            }
             Self::DesignNotEncoded(e) => write!(f, "the design did not encode for the query ({e})"),
             Self::MemoryInitNotEncoded { detail, cause } => {
                 write!(
@@ -983,7 +992,9 @@ pub(crate) fn cycle_zero_feasible_cubes(
             // (a kept infeasible cube is more ⊥ for `holds`; for `violated` it is a doubt the
             // verdict path reads).
             let doubt = if crate::adapter::run_budget::expired() {
-                Some(InitialCubeDoubt::BudgetExpired)
+                Some(InitialCubeDoubt::BudgetExpired(
+                    crate::adapter::run_budget::current().set_by(),
+                ))
             } else {
                 match smt_cube_feasible_at_cycle_zero(
                     &view,
@@ -4409,7 +4420,7 @@ mod tests {
     /// control drops the contradictory cube `q == 0 ∧ q == 1`.
     #[test]
     fn cycle_zero_filter_keeps_every_candidate_on_expiry() {
-        use crate::adapter::run_budget::{Budget, enter};
+        use crate::adapter::run_budget::{Budget, NO_SETTING, SetBy, enter};
         const B: &str = "1 sort bitvec 2\n2 state 1 q\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
         let file = crate::adapter::btor2::parser::parse(B).expect("parse");
         let preds = vec![
@@ -4455,9 +4466,22 @@ mod tests {
         assert_eq!(
             starved.doubtful,
             (0..4)
-                .map(|c| (c, InitialCubeDoubt::BudgetExpired))
+                .map(|c| (c, InitialCubeDoubt::BudgetExpired(SetBy::Mununu)))
                 .collect::<Vec<_>>()
         );
+        // mununu#1197 — the doubt's remedy names the setting that set the budget, and only that
+        // one; a budget of mununu's own says no setting changes it.
+        for by in SetBy::ALL {
+            let remedy = InitialCubeDoubt::BudgetExpired(by).remedy();
+            for other in SetBy::ALL {
+                if let Some(setting) = other.setting() {
+                    assert_eq!(remedy.contains(setting), other == by, "{by:?}: {remedy}");
+                }
+            }
+            if by.setting().is_none() {
+                assert_eq!(remedy, NO_SETTING);
+            }
+        }
     }
 
     /// mununu#1085 — the filter names the cubes it keeps without a cycle-0 state proved to

@@ -327,7 +327,7 @@ pub fn one_step_interpolant(file: &Btor2File) -> OneStepInterp {
                 }
             }
             InterpStep::NoInterpolant => OneStepInterp::Reachable,
-            InterpStep::Unavailable(e) => OneStepInterp::Unavailable(e),
+            InterpStep::QueryLimit(e) | InterpStep::Unavailable(e) => OneStepInterp::Unavailable(e),
         }
     })
 }
@@ -359,9 +359,21 @@ pub enum InterpSafetyVerdict {
     /// The engine abstained (never a wrong verdict): the one-step forward
     /// interpolation did not converge within the iteration cap, a spurious
     /// one-step-to-bad appeared (the suffix depth `k=1` is too shallow — a larger
-    /// `k` schedule is the next increment), cvc5 was unavailable, or a solver
-    /// query timed out.
+    /// `k` schedule is the next increment), or cvc5 was unavailable.
     Undecided { reason: String },
+    /// The search stopped at one of its two time limits (mununu#1197). `reason` is the fact
+    /// alone. What moves the limit depends on who set it, and only the caller knows that, so the
+    /// caller adds the remedy: the reach portfolio does, from the origin it recorded for `limit`.
+    OutOfTime { limit: InterpLimit, reason: String },
+}
+
+/// Which of the search's two time limits stopped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterpLimit {
+    /// The per-query limit (`timeout_ms`): one cvc5 or z3 query did not finish within it.
+    Query,
+    /// The search's own deadline (`overall_timeout_ms`), read between queries.
+    Overall,
 }
 
 /// Multi-frame unrolling for the k-step suffix: fresh controlled-name state/input
@@ -571,10 +583,10 @@ pub(crate) fn verify_safety_interp_cancellable(
                 };
             }
             if std::time::Instant::now() >= deadline {
-                return InterpSafetyVerdict::Undecided {
+                return InterpSafetyVerdict::OutOfTime {
+                    limit: InterpLimit::Overall,
                     reason: format!(
-                        "overall timeout ({overall_timeout_ms}ms) at suffix depth {ksfx}; \
-                         {RUN_BUDGET_REMEDY}"
+                        "overall timeout ({overall_timeout_ms}ms) at suffix depth {ksfx}"
                     ),
                 };
             }
@@ -624,10 +636,9 @@ pub(crate) fn verify_safety_interp_cancellable(
                     };
                 }
                 if std::time::Instant::now() >= deadline {
-                    return InterpSafetyVerdict::Undecided {
-                        reason: format!(
-                            "overall timeout ({overall_timeout_ms}ms); {RUN_BUDGET_REMEDY}"
-                        ),
+                    return InterpSafetyVerdict::OutOfTime {
+                        limit: InterpLimit::Overall,
+                        reason: format!("overall timeout ({overall_timeout_ms}ms)"),
                     };
                 }
                 let mut a_terms = vec![r.clone()];
@@ -672,12 +683,23 @@ pub(crate) fn verify_safety_interp_cancellable(
                                 };
                             }
                             z3::SatResult::Unknown => {
-                                return InterpSafetyVerdict::Undecided {
-                                    reason: "solver timeout confirming reachability".into(),
+                                // The z3 query runs under the same `timeout_ms` as cvc5's.
+                                return InterpSafetyVerdict::OutOfTime {
+                                    limit: InterpLimit::Query,
+                                    reason: format!(
+                                        "z3 gave no answer within its {timeout_ms} ms query \
+                                         limit while confirming reachability"
+                                    ),
                                 };
                             }
                         }
                         break;
+                    }
+                    InterpStep::QueryLimit(e) => {
+                        return InterpSafetyVerdict::OutOfTime {
+                            limit: InterpLimit::Query,
+                            reason: format!("{UNAVAILABLE_PREFIX}{e}"),
+                        };
                     }
                     InterpStep::Unavailable(e) => {
                         return InterpSafetyVerdict::Undecided {
@@ -706,6 +728,8 @@ enum InterpStep {
     Interpolant(Bool),
     /// `A ⊭ B` — no interpolant exists (cvc5 `fail` / `(error …)` / empty).
     NoInterpolant,
+    /// cvc5 stopped at the query's time limit ([`QueryStop::Limit`]): the fact, no remedy.
+    QueryLimit(String),
     /// cvc5 absent, or a reply we could not parse back into z3.
     Unavailable(String),
 }
@@ -754,9 +778,10 @@ fn interpolate_bool_cancellable(
 
     let stdout = match run_cvc5_raw_cancellable(&query, timeout_ms, cancel) {
         Ok(s) => s,
-        // This is the reach portfolio's member, whose query limit follows the run budget:
-        // `member_text` adds that remedy to a limit stop.
-        Err(e) => return InterpStep::Unavailable(e.member_text()),
+        // A limit stop keeps its kind: the search reports it as `OutOfTime`, and whoever set
+        // the limit says what moves it (mununu#1197).
+        Err(e) if e.stop == QueryStop::Limit => return InterpStep::QueryLimit(e.what),
+        Err(e) => return InterpStep::Unavailable(e.what),
     };
     if stdout.trim().is_empty()
         || stdout.contains("(error")
@@ -806,10 +831,10 @@ pub(crate) enum QueryStop {
 /// A solver query that gave no reply: the kind, and the fact in one clause.
 ///
 /// `what` carries NO remedy, because the remedy depends on who asked. The reach portfolio's
-/// interpolation member derives its query limit from the run budget, so for it a limit stop is
-/// answered by a larger budget ([`QueryError::member_text`]). The refinement queries of
-/// `refine.rs` run under limits no flag reaches, and each of their callers says so in its own
-/// words (mununu#1188: they used to inherit the member's remedy, or drop the reason).
+/// interpolation member runs under limits the portfolio derives, and the portfolio says what
+/// moves each one (mununu#1197: `LimitOrigin` in `adapter/reach_portfolio.rs`). The refinement
+/// queries of `refine.rs` run under limits no flag reaches, and each of their callers says so in
+/// its own words (mununu#1188: they used to inherit the member's remedy, or drop the reason).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QueryError {
     pub(crate) stop: QueryStop,
@@ -821,15 +846,6 @@ impl QueryError {
         QueryError {
             stop,
             what: what.into(),
-        }
-    }
-
-    /// The reason as the reach portfolio's interpolation member reports it: the fact, and on a
-    /// limit stop the one remedy that member has.
-    pub(crate) fn member_text(&self) -> String {
-        match self.stop {
-            QueryStop::Limit => format!("{}; {RUN_BUDGET_REMEDY}", self.what),
-            QueryStop::Missing | QueryStop::Cancelled | QueryStop::Failed => self.what.clone(),
         }
     }
 }
@@ -951,7 +967,7 @@ pub(crate) enum LimitStop {
 /// (mununu#1186). The backstop used to say "cvc5 exceeded <n>ms", and a test of the `--tlimit`
 /// wording failed whenever a loaded host let the backstop win the race. The sentence is the
 /// fact alone: who may change the limit depends on the caller (mununu#1188), so the remedy is
-/// the caller's — [`QueryError::member_text`] for the interpolation member.
+/// the caller's — the reach portfolio's, for the interpolation member (mununu#1197).
 pub(crate) fn query_limit_fact(tool: &str, timeout_ms: u32, how: LimitStop) -> String {
     let how = match how {
         LimitStop::SolverExit(code) => code.map(|c| format!(" (exit {c})")).unwrap_or_default(),
@@ -964,13 +980,6 @@ pub(crate) fn query_limit_fact(tool: &str, timeout_ms: u32, how: LimitStop) -> S
          interpolation gap"
     )
 }
-
-/// What a user can change when the interpolation member ran out of time: both its per-query
-/// limit and its overall deadline are derived from the run budget (`member_timeouts` in
-/// `adapter/reach_portfolio.rs`), so one clause serves the query-limit stop and the search's
-/// own deadline (mununu#1186: the deadline's reason named no remedy).
-pub(crate) const RUN_BUDGET_REMEDY: &str = "the member's budget follows the run budget \
-    (`--timeout-ms` on the `btor2` verbs, the run budget on `sv verify-auto`)";
 
 /// What a solver child's exit says about its stdout (mununu#1129). A child that stopped at its
 /// own time limit, or died, produced no reply: that is a budget stop or a tool failure, reported
@@ -1272,14 +1281,10 @@ mod tests {
         let stop = run_cvc5_raw_cancellable(query, 1, None)
             .expect_err("a 1 ms limit on this query is a stop, not a reply");
         assert_eq!(stop.stop, QueryStop::Limit, "{stop:?}");
-        let err = stop.member_text();
+        let err = stop.what;
         assert!(
             err.contains("query limit") && err.contains("budget stop"),
             "the stop names the limit and what it is: {err}"
-        );
-        assert!(
-            err.contains("`--timeout-ms` on the `btor2` verbs"),
-            "and the knob of the verb that raises it: {err}"
         );
     }
 
@@ -1331,15 +1336,20 @@ mod tests {
         assert!(signalled.what.contains("signal"), "{signalled:?}");
     }
 
-    /// The text of a query stopped at its limit as the interpolation member reports it.
-    fn member_limit_text(tool: &str, timeout_ms: u32, how: LimitStop) -> String {
-        QueryError::new(QueryStop::Limit, query_limit_fact(tool, timeout_ms, how)).member_text()
+    /// mununu#1197 — the fact of a limit stop names no setting: no flag, no request field, no
+    /// variable. Which one moves the limit is the caller's to say.
+    fn names_no_setting(text: &str) -> bool {
+        crate::adapter::run_budget::SetBy::ALL
+            .iter()
+            .filter_map(|by| by.setting())
+            .all(|setting| !text.contains(setting))
+            && !text.contains("--timeout-ms")
     }
     use crate::adapter::btor2::parser;
 
     /// mununu#1186 — one sentence for a query that stopped at its limit, whichever mechanism
-    /// fired: the limit, that it is a budget stop and not a gap, and the knob. The match over
-    /// `LimitStop` is exhaustive, so a new mechanism does not compile until it says what it adds.
+    /// fired: the limit, and that it is a budget stop and not a gap. The match over `LimitStop`
+    /// is exhaustive, so a new mechanism does not compile until it says what it adds.
     #[test]
     fn x1186_a_query_limit_stop_reads_the_same_whichever_mechanism_fired() {
         for tool in ["cvc5", "mathsat"] {
@@ -1348,12 +1358,10 @@ mod tests {
                 LimitStop::SolverExit(None),
                 LimitStop::Backstop { grace_ms: 2_000 },
             ] {
-                // mununu#1188 — the fact carries no remedy: the remedy is the caller's, and
-                // only the interpolation member's limit follows the run budget.
-                let fact = query_limit_fact(tool, 5000, how);
-                assert!(!fact.contains(RUN_BUDGET_REMEDY), "{how:?}: {fact}");
-                let text = member_limit_text(tool, 5000, how);
-                assert_eq!(text, format!("{fact}; {RUN_BUDGET_REMEDY}"));
+                // mununu#1188 / #1197 — the fact carries no remedy: the remedy is the caller's,
+                // which knows who set the limit.
+                let text = query_limit_fact(tool, 5000, how);
+                assert!(names_no_setting(&text), "{how:?}: {text}");
                 assert!(
                     text.starts_with(&format!("{tool} stopped at its 5000 ms query limit")),
                     "{how:?}: {text}"
@@ -1361,11 +1369,6 @@ mod tests {
                 assert!(
                     text.contains("a budget stop, not an interpolation gap"),
                     "{how:?}: {text}"
-                );
-                assert!(
-                    text.contains("`--timeout-ms` on the `btor2` verbs")
-                        && text.contains("the run budget on `sv verify-auto`"),
-                    "{how:?} names the knob of each surface: {text}"
                 );
                 assert!(!text.contains("exceeded"), "{how:?}: {text}");
                 match how {
@@ -1383,7 +1386,7 @@ mod tests {
     }
 
     /// REPRODUCER (mununu#1186) — a cvc5 that does not stop at `--tlimit` is killed by the wall
-    /// backstop, and the report reads as the budget stop it is, with the knob: the same
+    /// backstop, and the report reads as the budget stop it is: the same
     /// sentence as cvc5's own exit at the limit. Fails on the parent, where the backstop said
     /// "cvc5 exceeded 1ms". The stand-in makes the backstop fire on every host; with the real
     /// cvc5 it fires only when the host is loaded, which is how the flake was found.
@@ -1396,14 +1399,10 @@ mod tests {
         let stop = run_cvc5_raw_cancellable("(exit)\n", 1, None)
             .expect_err("a solver that never answers is a stop, not a reply");
         assert_eq!(stop.stop, QueryStop::Limit, "{stop:?}");
-        let err = stop.member_text();
+        let err = stop.what;
         assert!(
             err.contains("1 ms query limit") && err.contains("budget stop"),
             "the stop names the limit and what it is: {err}"
-        );
-        assert!(
-            err.contains("`--timeout-ms` on the `btor2` verbs"),
-            "and the knob of the verb that raises it: {err}"
         );
         assert!(
             err.contains("killed 2000 ms past it"),
@@ -1549,28 +1548,28 @@ mod tests {
         }
     }
 
-    /// mununu#1186 — the search's own deadline is the member's other budget stop, and it
-    /// names the same remedy as a query stopped at its limit: both follow the run budget.
-    /// Before, the reason was the bare "overall timeout (<n>ms)".
+    /// mununu#1186 / #1197 — the search's own deadline is the member's other budget stop. It is
+    /// TYPED as one (`OutOfTime`, with which limit), and its reason is the fact alone: the
+    /// search does not know who set the deadline, so it names no setting, and its caller adds
+    /// the remedy. Before #1197 the reason ended in one fixed clause that named a flag the
+    /// verb might not have.
     #[test]
-    fn x1186_the_search_deadline_names_the_run_budget_remedy() {
+    fn x1197_the_search_deadline_is_a_typed_limit_stop_that_names_no_setting() {
         const HOLD: &str = "1 sort bitvec 2\n2 zero 1\n3 state 1 x\n4 init 1 3 2\n5 next 1 3 3\n\
                             6 constd 1 3\n7 sort bitvec 1\n8 eq 7 3 6\n9 bad 8\n";
         let file = parser::parse(HOLD).expect("parse btor2");
         let clear = std::sync::atomic::AtomicBool::new(false);
         match verify_safety_interp_cancellable(&file, 8, 32, 5_000, 0, &clear) {
-            InterpSafetyVerdict::Undecided { reason } => {
+            InterpSafetyVerdict::OutOfTime { limit, reason } => {
+                assert_eq!(limit, InterpLimit::Overall);
                 assert!(
-                    reason.starts_with("overall timeout (0ms) at suffix depth 1; "),
-                    "{reason}"
+                    reason.contains("(0ms)"),
+                    "the fact gives the deadline: {reason}"
                 );
-                assert!(reason.ends_with(RUN_BUDGET_REMEDY), "{reason}");
+                assert!(names_no_setting(&reason), "{reason}");
             }
             other => panic!("a deadline already past stops the search at depth 1: {other:?}"),
         }
-        assert!(RUN_BUDGET_REMEDY.contains("`--timeout-ms`"));
-        let stop = member_limit_text("cvc5", 10, LimitStop::SolverExit(Some(134)));
-        assert!(stop.ends_with(RUN_BUDGET_REMEDY), "{stop}");
     }
 
     /// S1 (engine-performance roadmap) — the cvc5 runner honours the portfolio's cancel flag:
@@ -1668,7 +1667,7 @@ mod tests {
             // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
             // a verdict about the loop, so the test says so instead of asserting `Safe` under
             // a budget it did not get.
-            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+            InterpSafetyVerdict::OutOfTime { reason, .. } => {
                 eprintln!("SKIP (budget stop, not a gap): {reason}")
             }
             other => panic!("expected Safe, got {other:?}"),
@@ -1695,7 +1694,7 @@ mod tests {
             // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
             // a verdict about the loop, so the test says so instead of asserting `Safe` under
             // a budget it did not get.
-            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+            InterpSafetyVerdict::OutOfTime { reason, .. } => {
                 eprintln!("SKIP (budget stop, not a gap): {reason}")
             }
             // NEVER Unsafe (bad is genuinely unreachable) — that would be unsound.
@@ -1718,7 +1717,7 @@ mod tests {
             // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
             // a verdict about the loop, so the test says so instead of asserting `Safe` under
             // a budget it did not get.
-            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+            InterpSafetyVerdict::OutOfTime { reason, .. } => {
                 eprintln!("SKIP (budget stop, not a gap): {reason}")
             }
             other => panic!("expected Unsafe, got {other:?}"),
@@ -1740,7 +1739,7 @@ mod tests {
             // mununu#1129 — a budget stop under a loaded host is named as one now; it is not
             // a verdict about the loop, so the test says so instead of asserting `Safe` under
             // a budget it did not get.
-            InterpSafetyVerdict::Undecided { reason } if reason.contains("query limit") => {
+            InterpSafetyVerdict::OutOfTime { reason, .. } => {
                 eprintln!("SKIP (budget stop, not a gap): {reason}")
             }
             other => panic!("expected Unsafe depth 0, got {other:?}"),
@@ -1798,7 +1797,9 @@ mod tests {
             let v = match &verdict {
                 InterpSafetyVerdict::Safe { .. } => "safe",
                 InterpSafetyVerdict::Unsafe { .. } => "unsafe",
-                InterpSafetyVerdict::Undecided { .. } => "undecided",
+                InterpSafetyVerdict::Undecided { .. } | InterpSafetyVerdict::OutOfTime { .. } => {
+                    "undecided"
+                }
             };
             if v != "undecided" {
                 decided += 1;

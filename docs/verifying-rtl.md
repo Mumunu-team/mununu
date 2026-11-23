@@ -29,7 +29,7 @@ signal/value of interest (`"state_q == 3"`).
 
 ### `btor2 verify` — safety / reachability
 
-> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1185) — surface: (CLI+API+UI)
+> Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L1406) — surface: (CLI+API+UI)
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
 engine, the in-house native BMC + k-induction engine (in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
@@ -258,10 +258,10 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
 remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with **half** of what
 the slice leaves (the reach portfolio's members take their bounds from it), then **k-liveness**
-(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L358)) with half of
+(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L363)) with half of
 what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
 60 s defaults and each abstention note says so, naming every member's refusal or budget abstention.
-`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L558)) races the three
+`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L577)) races the three
 rungs on threads, returns the first definite verdict and cancels the rest. In the race the l2s portfolio
 runs without its exact member, which has no cancellation point (#816), and k-liveness runs rIC3 as one
 `-e ic3` process instead of its portfolio (#986). **It is not a speed-up on a small host:** on the 129
@@ -294,6 +294,16 @@ it, as they already did under `--owned-only` (mununu#892). Before that fix the r
 the subprocess members and btormc's depth cap only, and native kept its 5 s per-query default
 whatever the flag said.
 
+**A stop at a time limit says what sets the limit** (mununu#1197). A member the portfolio's wall or
+the run budget stopped, and the interpolation member stopped at one of its own two limits, close
+their reason with the setting that set that limit on this run
+([`SetBy`](../crates/mununu-core/src/adapter/run_budget.rs#L56)): `--timeout-ms` on the CLI, the
+request's `timeout_ms` on the API, the budget variable that set the deadline under
+`sv verify-auto`. A limit that is a constant of mununu's says so, and that no setting changes it.
+With a timeout at or under the 60 s default the interpolation member's limits are its defaults, and
+its stop says that they follow the timeout once it is above 60000 ms. The stops that still state
+the fact alone are listed in mununu#1243.
+
 **Native's per-query bound is not a clock** (mununu#893). The 5 s default — and the raised value
 under `--timeout-ms` — is a *nominal* allowance converted into a deterministic z3 resource limit
 (3 000 units per nominal millisecond, calibrated on the development laptop: 2.3–3.9 M units per
@@ -311,7 +321,7 @@ in effect — that is the user's own clock, reported as `budget-expired`.
 
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 
-> Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L7983) — surface: (CLI+API+UI)
+> Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L7987) — surface: (CLI+API+UI)
 
 A `// @mununu_assume GF <REG op VALUE>` inline annotation is **auto-applied to any response-shape guarantee** (`AG(a → AF b)`) in the same source. The SV verify-auto orchestration parses the `GF <atom>` into a typed fairness atom during annotation scanning; when a response-shape guarantee is left ⊥ by the first-pass members — or is refuted by one of them, which decides without the assumption (mununu#1073, §`violation-without-fairness`) — the ⊥-escalation router dispatches through [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs) (the fair-cycle l2s primitive described above) instead of the plain `response_liveness_rescue`. A definite `holds` under fairness means the guarantee holds against every environment schedule satisfying the assumption infinitely often; a definite `violated` is a reachable lasso satisfying the assumption that still leaves the request forever ungranted.
 
@@ -482,7 +492,7 @@ hand-written sidecar and no supplied formula**. End to end:
 The HTTP request is just the source plus options — there is no `sidecar` or `formula`
 field:
 
-> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2352) — surface: API
+> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2358) — surface: API
 
 ```bash
 mununu sv verify-auto my_module.sv
@@ -935,7 +945,7 @@ in the ranked order) and `trace.localization` (`{status, reason}`); the API requ
 
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
-> Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L344) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L9239) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥
+> Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L344) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L9248) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥
 
 `AG EF p` (recoverability) is false iff some reachable state can never reach `p` again. When the
 main pass leaves such a row ⊥, the re-plan first looks for a **trap**: a value `v` of `p`'s own
@@ -1298,7 +1308,7 @@ the verdict host-dependent, so it is opt-in). Bit count cannot see the reachable
 wall-clock budget — the message distinguishes the four so the remedy is not blind
 trial-and-error.
 
-> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1240) — surface: (CLI+API+UI)
+> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1241) — surface: (CLI+API+UI)
 
 ### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
 
@@ -1612,7 +1622,7 @@ Consumers keying on `verification_notes[i].kind` can distinguish "the engine gav
 
 ### Is this ⊥ reproducible? `determinism` and `budget` (mununu#553)
 
-> Source of truth: [`BottomReason::determinism`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L8813) + [`classify_engine_budget`](../crates/mununu-core/src/adapter/mod.rs) — surface: (CLI+API)
+> Source of truth: [`BottomReason::determinism`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L8818) + [`classify_engine_budget`](../crates/mununu-core/src/adapter/mod.rs) — surface: (CLI+API)
 
 A `⊥` that names its cause still leaves the question a gate has to answer: **would running the
 same command again give a different answer?** A deterministic abstention is a property of the

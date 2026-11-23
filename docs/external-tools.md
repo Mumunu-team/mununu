@@ -249,7 +249,7 @@ CVC5 is **not** installed by `docker/Dockerfile.dev`. Contributors install it lo
 
 ## MathSAT
 
-> Source of truth: [`locate_mathsat`](../crates/mununu-core/src/adapter/btor2/native_interp.rs#L1046) — surface: CLI+API
+> Source of truth: [`locate_mathsat`](../crates/mununu-core/src/adapter/btor2/native_interp.rs#L1055) — surface: CLI+API
 
 [MathSAT 5](https://mathsat.fbk.eu/) is an SMT solver with interpolation over bit-vectors. Mununu runs it as a subprocess for one thing: the `craig` predicate source of the predicate-cube CEGAR loop (CLI: `mununu btor2 cegar --predicate-source craig`; API: `predicate_source: "craig"`; sidecar: `cegar.predicate_source = "craig"`), which asks it for the interpolant of a may-but-not-must transition.
 

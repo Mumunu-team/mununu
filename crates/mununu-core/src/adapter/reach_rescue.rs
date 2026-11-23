@@ -793,7 +793,14 @@ pub fn safety_witness_by(
     // on it), then native BMC to `k` — inside this thread's run budget (the `verify-auto`
     // per-property budget, when there is one). The rescue decided on a different monitor, so
     // there is no carried trace to reuse here.
-    let shipped = crate::adapter::btor2::witness::search_witness(&file, k, None, &[], false);
+    let shipped = crate::adapter::btor2::witness::search_witness(
+        &file,
+        k,
+        None,
+        crate::adapter::run_budget::SetBy::Mununu,
+        &[],
+        false,
+    );
     // mununu#1076 — a member of the path search proved the monitor's `bad` unreachable. With a
     // path found beside the proof, the monitor model's own members contradict each other: a
     // contradiction whatever the formula. Without one, it contradicts the row's `violated` only

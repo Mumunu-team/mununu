@@ -148,7 +148,14 @@ pub fn verify_fault_reach(
                 _ => ("unknown", Vec::new()),
             };
             let (attack, depth, trace_by, trace_unavailable_reason) = if verdict == "violated" {
-                let w = witness_for_violation(&injected_file, witness_max_k, None, &outcome, false);
+                let w = witness_for_violation(
+                    &injected_file,
+                    witness_max_k,
+                    None,
+                    crate::adapter::run_budget::SetBy::Mununu,
+                    &outcome,
+                    false,
+                );
                 if !w.contradicted_by.is_empty() {
                     // mununu#1076 — a carrier of the fallback proved `bad` unreachable: the
                     // verdict is the contradiction (`unknown`, both sides named); a path found
