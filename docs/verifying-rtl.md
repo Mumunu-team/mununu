@@ -1195,13 +1195,15 @@ undriven clock was named as its driver (mununu#1180).
 
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 
-> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L181) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
+> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L202) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
 
 A design that the lift refuses for its clock domains still has two questions to answer: whether
 every crossing is built as a synchroniser (structural), and whether the behaviour across the
 clocks is right (functional). `sv cdc-lint` answers the first one inside mununu. It lifts with the
-domains merged, reads the flattened netlist in which every flop keeps its own clock, and
-classifies each flop that samples a flop of another clock net:
+domains merged, reads the flattened netlist in which every storage cell keeps its own clock, and
+classifies each storage cell that samples one of another clock net. A memory is storage too
+(mununu#1230): a clocked write port samples its enable, its address and its data on the write
+clock, and the word it stores is a source on that clock.
 
 | `kind` | `outcome` | meaning |
 |---|---|---|
@@ -1211,15 +1213,22 @@ classifies each flop that samples a flop of another clock net:
 | `multi-bit-bus` | decided | several bits of one source register through parallel synchronisers; a reach query decides whether the source changes at most one bit per source cycle (gray step): `holds` if so, `violated` with the reason otherwise |
 | `qualified-data` | `unknown` | data captured directly, under an enable or mux select synchronised from the source domain; safe if the data holds while the qualifier is asserted |
 | `reconvergence` | `unknown` | one destination flop combines two separately synchronised signals from the same source domain |
-| `dual-clock-memory` | `unknown` | a memory written on one clock and read on another (an asynchronous FIFO); its pointers appear as ordinary rows |
+| `dual-clock-memory` | `unknown` | a register that reads, on its own clock, a word a memory stores on another (the read side of an asynchronous FIFO), or a memory written on more than one clock; safe only if no word is read while it is written, which is a functional property. The pointers, and every value a write port captures, appear as ordinary rows |
 
 The gray-step query runs on the merged model, which is exact for the source register when its
-whole sequential cone lies in its own domain; when the cone reaches another domain the row stays
-`unknown` and says so. The reset is pinned inactive after the post-reset state, as in
-`check-fsm`. The report's `notes` state what the lint does not see: primary inputs carry no clock,
-so a crossing that starts at an input port is not checked, and asynchronous set / reset pins,
-latches and black-boxed modules are not analysed. The worst row drives `--fail-on` (exit 2 on a
-`violated` row by default); the JSON is `SvCdcLintResponse`, the same type the API returns.
+whole sequential cone lies in its own domain; when the cone reaches another domain, also through
+a memory written on another clock, the row stays `unknown` and names what it reads. The reset is
+pinned inactive after the post-reset state, as in `check-fsm`. The report's `notes` state what the
+lint does not see: primary inputs carry no clock, so a crossing that starts at an input port is
+not checked, and asynchronous set / reset pins, latches (a memory port written without a clock
+among them) and black-boxed modules are not analysed. The worst row drives `--fail-on` (exit 2 on
+a `violated` row by default); the JSON is `SvCdcLintResponse`, the same type the API returns.
+
+Until 2026-11-23 the lint did not read memories (mununu#1230). A value that a write port captured
+from another domain, a word read on another clock than the one that stored it, and a read address
+from another domain got no row, and a design whose second clock only wrote a memory was reported
+as one clock net with `holds`. A `holds` from an earlier build on a design with a memory between
+two clocks says nothing about that memory: run the lint again.
 
 ```bash
 mununu sv cdc-lint rps_top.sv --top rps_top | jq '.crossings[] | {kind, outcome, source, destination}'
