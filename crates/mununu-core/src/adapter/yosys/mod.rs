@@ -323,7 +323,8 @@ struct SvFlattenArtifacts {
     /// The clock domains of the flattened design ([`clock_domains_with_hierarchy`]); more than one only when
     /// [`YosysOptions::merge_clock_domains`] let the lift through.
     clock_domains: Vec<ClockDomain>,
-    /// The flattened, `opt_clean`ed netlist the clock-domain scan read (yosys `write_json`).
+    /// The flattened netlist the clock-domain scan read (yosys `write_json` of a copy cleaned
+    /// by `opt_clean` with the named nets kept: every storage cell of the model is in it).
     flat_netlist_json: String,
     /// What the lift cache did for this lift (N0.2): `Off`, `Hit`, `Miss` or `Bypassed(why)`.
     cache: LiftCacheOutcome,
@@ -1000,14 +1001,9 @@ fn oracle_read_cmds(sources: &[PathBuf], extra_include_dirs: &[PathBuf]) -> Vec<
         .collect()
 }
 
-fn run_sv_flatten_btor2_concrete(
-    content: &str,
-    yopts: &YosysOptions,
-    opt_in: MergeOptIn,
-) -> Result<SvFlattenArtifacts, AdapterError> {
-    let yosys = locate_yosys()?;
-    let tmp = TempDir::new("mununu-yosys")?;
-    let plan = plan_lift(content, yopts, tmp.path())?;
+/// Write a plan's staged files and include links, and run the oracle's sv2v pass when the plan
+/// has one: everything a yosys run of the plan's script reads.
+fn stage_lift(plan: &LiftPlan) -> Result<(), AdapterError> {
     for (path, text) in &plan.staged {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io_err)?;
@@ -1019,64 +1015,88 @@ fn run_sv_flatten_btor2_concrete(
     if let Some(s) = &plan.sv2v {
         run_sv2v(&s.bin, &s.sources, &s.include_dirs, &s.out)?;
     }
+    Ok(())
+}
 
-    // `-q` keeps the console to warnings and errors — and silences sv-elab's diagnostics, which
-    // go through yosys's `log()`, so a failed `read_slang` reached the report as nothing but
-    // "Design elaboration failed; see full log for details" (2026-11-04: seven corpus designs,
-    // no reason named). `-l` keeps the full log beside the BTOR2 and the failure path reads it.
-    let log_path = plan.btor_path.with_file_name("yosys.log");
-    let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
-        let mut yosys_cmd = Command::new(&yosys);
-        if debug_yosys_script() {
-            eprintln!(
-                "MUNUNU_DEBUG yosys cwd={:?}\nMUNUNU_DEBUG script={script}",
-                plan.yosys_cwd
-            );
-        }
-        if let Some(cwd) = &plan.yosys_cwd {
-            yosys_cmd.current_dir(cwd);
-        }
-        if let Some(plugin) = &plan.plugin {
-            yosys_cmd.arg("-m").arg(plugin);
-        }
-        yosys_cmd
-            .arg("-l")
-            .arg(&log_path)
-            .arg("-q")
-            .arg("-p")
-            .arg(script);
-        // N0.2 — the lift cache's manifest renders this invocation as the script text, the
-        // plugin identity and the cwd rule. An argument or environment variable added here
-        // that the script text does not carry needs `lift_cache::LIFT_CACHE_FORMAT` bumped,
-        // or entries stored before the change would be served after it (`-l` only adds a
-        // log the cache never stores, and changes no output).
-        // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes
-        // every property, so a hung yosys emits ZERO output and the whole run reads as absent —
-        // one of the two ways a consumer loses a full gate run. `run_yosys` 700 lines below has
-        // used this same helper for the per-module path all along.
-        let outcome = match crate::adapter::lift_timeout() {
-            Some(t) => crate::adapter::run_with_timeout(&mut yosys_cmd, None, t),
-            None => yosys_cmd.output().map(|o| {
-                Some((
-                    o.status,
-                    String::from_utf8_lossy(&o.stdout).into_owned(),
-                    String::from_utf8_lossy(&o.stderr).into_owned(),
-                ))
-            }),
-        }
-        .map_err(|e| AdapterError {
-            kind: AdapterErrorKind::ParseError,
-            message: format!("adapter/yosys: failed to spawn yosys: {e}"),
-            location: None,
-        })?;
-        let (status, stdout_s, stderr_s) = lift_timeout_outcome(outcome, "yosys")?;
-        Ok(std::process::Output {
-            status,
-            stdout: stdout_s.into_bytes(),
-            stderr: stderr_s.into_bytes(),
-        })
-    };
-    let mut output = run_script(&plan.script)?;
+/// The full yosys log of a lift, beside its BTOR2 (the failure path reads its `error:` lines).
+fn lift_log_path(plan: &LiftPlan) -> PathBuf {
+    plan.btor_path.with_file_name("yosys.log")
+}
+
+/// One yosys run of `script` for a staged plan: the plan's own script, or its retry
+/// ([`backend_loop_retry_script`]).
+///
+/// `-q` keeps the console to warnings and errors — and silences sv-elab's diagnostics, which
+/// go through yosys's `log()`, so a failed `read_slang` reached the report as nothing but
+/// "Design elaboration failed; see full log for details" (2026-11-04: seven corpus designs,
+/// no reason named). `-l` keeps the full log beside the BTOR2 and the failure path reads it.
+fn run_lift_script(
+    yosys: &Path,
+    plan: &LiftPlan,
+    script: &str,
+) -> Result<std::process::Output, AdapterError> {
+    let mut yosys_cmd = Command::new(yosys);
+    if debug_yosys_script() {
+        eprintln!(
+            "MUNUNU_DEBUG yosys cwd={:?}\nMUNUNU_DEBUG script={script}",
+            plan.yosys_cwd
+        );
+    }
+    if let Some(cwd) = &plan.yosys_cwd {
+        yosys_cmd.current_dir(cwd);
+    }
+    if let Some(plugin) = &plan.plugin {
+        yosys_cmd.arg("-m").arg(plugin);
+    }
+    yosys_cmd
+        .arg("-l")
+        .arg(lift_log_path(plan))
+        .arg("-q")
+        .arg("-p")
+        .arg(script);
+    // N0.2 — the lift cache's manifest renders this invocation as the script text, the
+    // plugin identity and the cwd rule. An argument or environment variable added here
+    // that the script text does not carry needs `lift_cache::LIFT_CACHE_FORMAT` bumped,
+    // or entries stored before the change would be served after it (`-l` only adds a
+    // log the cache never stores, and changes no output).
+    // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes
+    // every property, so a hung yosys emits ZERO output and the whole run reads as absent —
+    // one of the two ways a consumer loses a full gate run. `run_yosys` below has used this
+    // same helper for the per-module path all along.
+    let outcome = match crate::adapter::lift_timeout() {
+        Some(t) => crate::adapter::run_with_timeout(&mut yosys_cmd, None, t),
+        None => yosys_cmd.output().map(|o| {
+            Some((
+                o.status,
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            ))
+        }),
+    }
+    .map_err(|e| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!("adapter/yosys: failed to spawn yosys: {e}"),
+        location: None,
+    })?;
+    let (status, stdout_s, stderr_s) = lift_timeout_outcome(outcome, "yosys")?;
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_s.into_bytes(),
+        stderr: stderr_s.into_bytes(),
+    })
+}
+
+fn run_sv_flatten_btor2_concrete(
+    content: &str,
+    yopts: &YosysOptions,
+    opt_in: MergeOptIn,
+) -> Result<SvFlattenArtifacts, AdapterError> {
+    let yosys = locate_yosys()?;
+    let tmp = TempDir::new("mununu-yosys")?;
+    let plan = plan_lift(content, yopts, tmp.path())?;
+    stage_lift(&plan)?;
+
+    let mut output = run_lift_script(&yosys, &plan, &plan.script)?;
     let mut backend_retry = None;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1084,11 +1104,12 @@ fn run_sv_flatten_btor2_concrete(
         // `check` sees none: yosys-slang's `$buf` cells chain wide vectors bit-wise through
         // other cells (OpenTitan csrng, 2026-10-22: 4,035 `$buf` cells, the loop through the
         // command arbiter's grant vector). `opt_clean` folds the buffers into connections and
-        // the backend's walk terminates; it removes nothing the design reads, so the model is
-        // the same design. Retried once, and only on that error, so every lift that succeeds
-        // today is byte-identical.
+        // the backend's walk terminates; the named nets are marked `keep` first
+        // ([`KEEP_NAMED_NETS`], mununu#1229), so it removes nothing the backend would have
+        // written and the model is the same design. Retried once, and only on that error, so
+        // every lift that succeeds on its first run is byte-identical.
         if let Some(retry) = backend_loop_retry_script(&plan.script, &stderr) {
-            let second = run_script(&retry)?;
+            let second = run_lift_script(&yosys, &plan, &retry)?;
             if second.status.success() {
                 backend_retry = Some(format!(
                     "the BTOR backend reported a topological loop ({}); the lift succeeded with \
@@ -1103,7 +1124,7 @@ fn run_sv_flatten_btor2_concrete(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let log_errors = yosys_log_errors(&log_path);
+        let log_errors = yosys_log_errors(&lift_log_path(&plan));
         let hint = read_slang_hint(&format!("{stderr}\n{log_errors}"));
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -1451,17 +1472,39 @@ fn first_line(stderr: &str) -> &str {
         .trim()
 }
 
-/// The lift script with `opt_clean` spliced in before `write_btor`, when `stderr` is the BTOR
-/// backend's `Found topological loop` error — `None` for any other failure (those are not
-/// retried). `opt_clean` only folds `$buf` cells into connections and drops unused cells, so the
-/// retried model is the same design; the splice is textual on the one `write_btor` command the
+/// The yosys pass that marks every net with a source-level name `keep`. It goes before every
+/// `opt_clean` the lift runs, so that the cleaned design holds what the BTOR2 backend writes
+/// and nothing less (mununu#1229).
+///
+/// `write_btor` writes the cone of the output ports AND of every wire whose name does not start
+/// with `$`: a named wire becomes a named node and pulls its drivers in. A bare `opt_clean`
+/// keeps the output ports' cone alone. So a register that only an assertion reads, or that
+/// nothing reads, is in the model and was not in the cleaned copy (measured 2026-11-23 in
+/// `mununu-sva`: a named flop read by nothing is written with its `next`; a flop whose output
+/// net was cut away, a memory nothing reads and a register whose only name starts with `$` are
+/// not). The selection is "every wire, minus the `$`-named ones", which is that rule; a keep on
+/// the storage cells themselves would count a flop the model has dropped.
+const KEEP_NAMED_NETS: &str = "setattr -set keep 1 w:* w:$* %d";
+
+/// The lift script with [`KEEP_NAMED_NETS`] and `opt_clean` spliced in before `write_btor`,
+/// when `stderr` is the BTOR backend's `Found topological loop` error — `None` for any other
+/// failure (those are not retried). `opt_clean` folds `$buf` cells into connections and drops
+/// unused cells; with the named nets kept first, "unused" is what the backend would not have
+/// written either, so the retried model is the same design. Without the keep pass the retry
+/// dropped every register no output port reads (mununu#1229: 16 of the 222 of OpenTitan
+/// `csrng` and 234 named nodes of its BTOR2, by hand in `mununu-sva` on 2026-11-23; the loop
+/// is broken with or without it). The splice is textual on the one `write_btor` command the
 /// script ends with.
 fn backend_loop_retry_script(script: &str, stderr: &str) -> Option<String> {
     if !stderr.contains("Found topological loop") {
         return None;
     }
     let idx = script.rfind("; write_btor ")?;
-    Some(format!("{}; opt_clean{}", &script[..idx], &script[idx..]))
+    Some(format!(
+        "{}; {KEEP_NAMED_NETS}; opt_clean{}",
+        &script[..idx],
+        &script[idx..]
+    ))
 }
 
 /// A named state cell discovered in a flattened SV design — the
@@ -1706,8 +1749,9 @@ pub struct SvLiftResult {
     /// The flattened design's clock domains; more than one only under
     /// [`YosysOptions::merge_clock_domains`].
     pub clock_domains: Vec<ClockDomain>,
-    /// The flattened netlist (yosys `write_json`, after `flatten` + `opt_clean`, before
-    /// `async2sync`): every storage cell still carries its own clock, which `sv cdc-lint` reads.
+    /// The flattened netlist (yosys `write_json`, after `flatten` + `opt_clean` with the named
+    /// nets kept, before `async2sync`): every storage cell of the model is in it and still
+    /// carries its own clock, which `sv cdc-lint` reads.
     pub flat_netlist_json: String,
     /// What the lift cache (`MUNUNU_LIFT_CACHE_DIR`, N0.2) did for this lift: `Off` when unset,
     /// `Hit` (no tool ran), `Miss` (the tools ran, the result is stored) or `Bypassed(why)`.
@@ -2086,7 +2130,11 @@ pub fn name_staged_primary(sources: &mut [crate::trace::CellSource], primary: &s
 /// so the lifted model is untouched). The cleaning matters: right after `flatten` a sub-instance's
 /// clock port is still its own wire connected to the parent's (`u_dec.clk_i` beside `clk_i`), and
 /// yosys-slang routes nets through `$buf` cells; uncleaned, one clock reads as two domains
-/// (OpenTitan `prim_esc_sender`, measured 2026-10-23). A domain is a distinct (clock net, edge)
+/// (OpenTitan `prim_esc_sender`, measured 2026-10-23). What the cleaning keeps matters as much:
+/// the copy's named nets are marked `keep` first ([`KEEP_NAMED_NETS`]), so it holds every
+/// storage cell the BTOR2 holds — also one no output port reads. Until mununu#1229 the copy
+/// held the output ports' cone alone, and a domain whose storage only an assertion read was
+/// not counted. A domain is a distinct (clock net, edge)
 /// a storage cell fires on — the `CLK` pin of a flop (`$dff`, `$adff`, `$dffe`, `$sdff`, `$aldff`, `$dffsr`, … with `CLK_POLARITY`)
 /// and every clocked port of a memory (`$mem_v2` `RD_CLK` / `WR_CLK` where the port's
 /// `*_CLK_ENABLE` bit is set). A clock pin tied to a constant is a domain of its own, named
@@ -4330,7 +4378,13 @@ fn build_script(
         // named in the hierarchy JSON and is now removed, so its cell is undefined when the BTOR2 is
         // written — the old reader's missing-module shape (anonymous inputs). The `=` includes
         // black-box modules in the selection; with no such module the pass is a no-op.
-        "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        //
+        // SOUNDNESS (mununu#1229): the clock scan reads a cleaned COPY of the design (`design
+        // -save` / `-load` around it). The copy must hold every storage cell the BTOR2 holds, or
+        // a clock domain of the model goes uncounted and the multi-clock refusal is skipped with
+        // nothing said: [`KEEP_NAMED_NETS`] before the copy's `opt_clean` makes it so. The marks
+        // are on the copy only; the design `write_btor` reads is the saved one.
+        "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; {KEEP_NAMED_NETS}; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         read_cmds.join("; "),
         yosys_path_arg(hier_json_out),
         yosys_path_arg(&clock_json_path(btor_out)),
@@ -4775,7 +4829,9 @@ mod tests {
             "ERROR: Found topological loop while processing cell $6638. Active cells:\n    $6602\n";
         let retried = backend_loop_retry_script(script, loop_err).expect("the loop error retries");
         assert!(
-            retried.ends_with("; setundef -zero; opt_clean; write_btor d.btor"),
+            retried.ends_with(&format!(
+                "; setundef -zero; {KEEP_NAMED_NETS}; opt_clean; write_btor d.btor"
+            )),
             "{retried}"
         );
         assert_eq!(retried.matches("opt_clean").count(), 1);
@@ -4959,6 +5015,428 @@ endmodule
         )
         .expect("one clock lifts");
         assert_eq!(one.clock_domains.len(), 1);
+    }
+
+    /// mununu#1229 — two clocks, and the flop of the second (`mon`) is read by assertions alone:
+    /// no output port is in its cone.
+    const X1229_ASSERTION_ONLY_DOMAIN: &str = "\
+module top(input logic clk_a, input logic clk_b, input logic rst, input logic req,
+           output logic gnt);
+  logic seen, mon;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  always_ff @(posedge clk_b)
+    if (rst) mon <= 1'b0;
+    else mon <= seen;
+  assign gnt = seen;
+  a_mon: assert property (@(posedge clk_b) !(mon && rst));
+endmodule
+";
+
+    /// mununu#1229 — the second clock writes a memory, read through the named net `x`, which an
+    /// assertion alone reads.
+    const X1229_MEMORY_BEHIND_A_NAMED_NET: &str = "\
+module top(input logic clk_a, input logic clk_b, input logic rst, input logic req,
+           input logic [1:0] wa, input logic wd, output logic gnt);
+  logic seen;
+  logic m [4];
+  logic x;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  always_ff @(posedge clk_b)
+    if (seen) m[wa] <= wd;
+  assign x = m[wa] & ~rst;
+  assign gnt = seen;
+  a_x: assert property (@(posedge clk_a) !(x && rst));
+endmodule
+";
+
+    /// mununu#1229 — the netlist the clock scan reads of [`X1229_ASSERTION_ONLY_DOMAIN`] under
+    /// the keep pass (the lift's script up to the scan's `write_json`), captured in `mununu-sva`
+    /// on 2026-11-23 with the `src` attributes dropped: `mon` is in it with its clock.
+    const X1229_ASSERTION_ONLY_DOMAIN_NETLIST: &str = r#"{"modules":{"top":{"attributes":{"top":"00000000000000000000000000000001"},"ports":{"clk_a":{"direction":"input","bits":[2]},"clk_b":{"direction":"input","bits":[3]},"rst":{"direction":"input","bits":[4]},"req":{"direction":"input","bits":[5]},"gnt":{"direction":"output","bits":[6]}},"cells":{"$driver$mon":{"hide_name":1,"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[3],"D":[7],"Q":[8]}},"$driver$seen":{"hide_name":1,"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[9],"Q":[6]}},"$procmux$2":{"hide_name":1,"type":"$mux","parameters":{"WIDTH":"00000000000000000000000000000001"},"attributes":{"full_case":"00000000000000000000000000000001"},"port_directions":{"A":"input","B":"input","S":"input","Y":"output"},"connections":{"A":[6],"B":["0"],"S":[4],"Y":[7]}},"$procmux$5":{"hide_name":1,"type":"$mux","parameters":{"WIDTH":"00000000000000000000000000000001"},"attributes":{"full_case":"00000000000000000000000000000001"},"port_directions":{"A":"input","B":"input","S":"input","Y":"output"},"connections":{"A":[5],"B":["0"],"S":[4],"Y":[9]}}},"netnames":{"$mon$3":{"hide_name":1,"bits":[7],"attributes":{}},"$procmux$5_Y":{"hide_name":1,"bits":[9],"attributes":{}},"clk_a":{"hide_name":0,"bits":[2],"attributes":{"hdlname":"clk_a","keep":"00000000000000000000000000000001"}},"clk_b":{"hide_name":0,"bits":[3],"attributes":{"hdlname":"clk_b","keep":"00000000000000000000000000000001"}},"gnt":{"hide_name":0,"bits":[6],"attributes":{"hdlname":"gnt","keep":"00000000000000000000000000000001"}},"mon":{"hide_name":0,"bits":[8],"attributes":{"hdlname":"mon","keep":"00000000000000000000000000000001"}},"req":{"hide_name":0,"bits":[5],"attributes":{"hdlname":"req","keep":"00000000000000000000000000000001"}},"rst":{"hide_name":0,"bits":[4],"attributes":{"hdlname":"rst","keep":"00000000000000000000000000000001"}},"seen":{"hide_name":0,"bits":[6],"attributes":{"hdlname":"seen","keep":"00000000000000000000000000000001"}}}}}}"#;
+
+    /// The same capture of [`X1229_MEMORY_BEHIND_A_NAMED_NET`]: the `$mem_v2` is in it with its
+    /// write clock.
+    const X1229_MEMORY_BEHIND_A_NAMED_NET_NETLIST: &str = r#"{"modules":{"top":{"attributes":{"top":"00000000000000000000000000000001"},"ports":{"clk_a":{"direction":"input","bits":[2]},"clk_b":{"direction":"input","bits":[3]},"rst":{"direction":"input","bits":[4]},"req":{"direction":"input","bits":[5]},"wa":{"direction":"input","bits":[6,7]},"wd":{"direction":"input","bits":[8]},"gnt":{"direction":"output","bits":[9]}},"cells":{"$5":{"hide_name":1,"type":"$mux","parameters":{"WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"A":"input","B":"input","S":"input","Y":"output"},"connections":{"A":["0"],"B":["1"],"S":[10],"Y":[11]}},"$8":{"hide_name":1,"type":"$not","parameters":{"A_SIGNED":"00000000000000000000000000000000","A_WIDTH":"00000000000000000000000000000001","Y_WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"A":"input","Y":"output"},"connections":{"A":[4],"Y":[12]}},"$9":{"hide_name":1,"type":"$and","parameters":{"A_SIGNED":"00000000000000000000000000000000","A_WIDTH":"00000000000000000000000000000001","B_SIGNED":"00000000000000000000000000000000","B_WIDTH":"00000000000000000000000000000001","Y_WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"A":"input","B":"input","Y":"output"},"connections":{"A":[13],"B":[12],"Y":[14]}},"$driver$seen":{"hide_name":1,"type":"$dff","parameters":{"CLK_POLARITY":"00000000000000000000000000000001","WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"CLK":"input","D":"input","Q":"output"},"connections":{"CLK":[2],"D":[15],"Q":[9]}},"$procmux$1":{"hide_name":1,"type":"$mux","parameters":{"WIDTH":"00000000000000000000000000000001"},"attributes":{},"port_directions":{"A":"input","B":"input","S":"input","Y":"output"},"connections":{"A":["0"],"B":["1"],"S":[9],"Y":[10]}},"$procmux$4":{"hide_name":1,"type":"$mux","parameters":{"WIDTH":"00000000000000000000000000000001"},"attributes":{"full_case":"00000000000000000000000000000001"},"port_directions":{"A":"input","B":"input","S":"input","Y":"output"},"connections":{"A":[5],"B":["0"],"S":[4],"Y":[15]}},"m":{"hide_name":0,"type":"$mem_v2","parameters":{"ABITS":"00000000000000000000000000000010","INIT":"xxxx","MEMID":"\\m","OFFSET":"00000000000000000000000000000000","RD_ARST_VALUE":"x","RD_CE_OVER_SRST":"0","RD_CLK_ENABLE":"0","RD_CLK_POLARITY":"0","RD_COLLISION_X_MASK":"0","RD_INIT_VALUE":"x","RD_PORTS":"00000000000000000000000000000001","RD_SRST_VALUE":"x","RD_TRANSPARENCY_MASK":"0","RD_WIDE_CONTINUATION":"0","SIZE":"00000000000000000000000000000100","WIDTH":"00000000000000000000000000000001","WR_CLK_ENABLE":"1","WR_CLK_POLARITY":"1","WR_PORTS":"00000000000000000000000000000001","WR_PRIORITY_MASK":"0","WR_WIDE_CONTINUATION":"0"},"attributes":{"hdlname":"m"},"port_directions":{"RD_ADDR":"input","RD_ARST":"input","RD_CLK":"input","RD_DATA":"output","RD_EN":"input","RD_SRST":"input","WR_ADDR":"input","WR_CLK":"input","WR_DATA":"input","WR_EN":"input"},"connections":{"RD_ADDR":[6,7],"RD_ARST":["0"],"RD_CLK":["x"],"RD_DATA":[13],"RD_EN":["1"],"RD_SRST":["0"],"WR_ADDR":[6,7],"WR_CLK":[3],"WR_DATA":[8],"WR_EN":[11]}}},"netnames":{"$4":{"hide_name":1,"bits":[10],"attributes":{}},"$5y":{"hide_name":1,"bits":[11],"attributes":{}},"$7":{"hide_name":1,"bits":[13],"attributes":{}},"$8y":{"hide_name":1,"bits":[12],"attributes":{}},"$procmux$4_Y":{"hide_name":1,"bits":[15],"attributes":{}},"clk_a":{"hide_name":0,"bits":[2],"attributes":{"hdlname":"clk_a","keep":"00000000000000000000000000000001"}},"clk_b":{"hide_name":0,"bits":[3],"attributes":{"hdlname":"clk_b","keep":"00000000000000000000000000000001"}},"gnt":{"hide_name":0,"bits":[9],"attributes":{"hdlname":"gnt","keep":"00000000000000000000000000000001"}},"req":{"hide_name":0,"bits":[5],"attributes":{"hdlname":"req","keep":"00000000000000000000000000000001"}},"rst":{"hide_name":0,"bits":[4],"attributes":{"hdlname":"rst","keep":"00000000000000000000000000000001"}},"seen":{"hide_name":0,"bits":[9],"attributes":{"hdlname":"seen","keep":"00000000000000000000000000000001"}},"wa":{"hide_name":0,"bits":[6,7],"attributes":{"hdlname":"wa","keep":"00000000000000000000000000000001"}},"wd":{"hide_name":0,"bits":[8],"attributes":{"hdlname":"wd","keep":"00000000000000000000000000000001"}},"x":{"hide_name":0,"bits":[14],"attributes":{"hdlname":"x ","keep":"00000000000000000000000000000001"}}}}}}"#;
+
+    /// mununu#1229, at the seam between the script and the scan: on the snapshot the keep pass
+    /// leaves, the scan counts the domain no output port reads, as a flop's clock and as a
+    /// memory's write clock.
+    #[test]
+    fn x1229_the_scan_counts_a_domain_whose_storage_no_output_port_reads() {
+        for (case, netlist) in [
+            ("flop", X1229_ASSERTION_ONLY_DOMAIN_NETLIST),
+            ("memory", X1229_MEMORY_BEHIND_A_NAMED_NET_NETLIST),
+        ] {
+            let nets: Vec<(String, usize)> = clock_domains(netlist)
+                .into_iter()
+                .map(|d| (d.net, d.cells))
+                .collect();
+            assert_eq!(
+                nets,
+                [("clk_a".to_string(), 1), ("clk_b".to_string(), 1)],
+                "{case}"
+            );
+        }
+    }
+
+    /// mununu#1229, the rule every script of the lift follows: an `opt_clean` runs only right
+    /// after the keep pass on the named nets, so no cleaned design holds less than `write_btor`
+    /// writes. The lift's script cleans the scan's copy (between `design -save` and the scan's
+    /// `write_json`, and the saved design is loaded back before anything else); the
+    /// backend-loop retry cleans the design the backend reads. A bare `opt_clean` in either is
+    /// the defect: the scan missed a clock domain, the retried model lost registers.
+    #[test]
+    fn x1229_every_opt_clean_of_the_lift_runs_right_after_the_keep_pass() {
+        let sources = [PathBuf::from("/tmp/a.sv")];
+        let cuts = ["u_core.gnt".to_string()];
+        let loop_err = "ERROR: Found topological loop while processing cell $1. Active cells:\n";
+        let mut scripts = Vec::new();
+        for cut in [&cuts[..0], &cuts[..]] {
+            let built = slang_script(&sources, Some("top"), cut, &[], &[]);
+            let retried = backend_loop_retry_script(&built, loop_err).expect("a loop retries");
+            scripts.push((1, built));
+            scripts.push((2, retried));
+        }
+        let plan = plan_lift(
+            X1229_ASSERTION_ONLY_DOMAIN,
+            &YosysOptions {
+                top: Some("top".into()),
+                ..Default::default()
+            },
+            Path::new("/tmp/mununu-yosys-x1229"),
+        )
+        .expect("a plan needs no tool");
+        scripts.push((1, plan.script));
+        for (cleans, script) in &scripts {
+            let passes: Vec<&str> = script.split(';').map(str::trim).collect();
+            let at: Vec<usize> = (0..passes.len())
+                .filter(|i| passes[*i].starts_with("opt_clean"))
+                .collect();
+            assert_eq!(at.len(), *cleans, "{script}");
+            for i in &at {
+                assert_eq!(passes[*i], "opt_clean", "{script}");
+                assert_eq!(passes[i - 1], KEEP_NAMED_NETS, "{script}");
+            }
+            // The scan's copy: saved, marked, cleaned, written, and the saved design loaded
+            // back, so the marks never reach the design the rest of the script works on.
+            let scan = at[0];
+            assert_eq!(
+                passes[scan - 2],
+                "design -save mununu_pre_clocks",
+                "{script}"
+            );
+            assert!(passes[scan + 1].starts_with("write_json "), "{script}");
+            assert_eq!(
+                passes[scan + 2],
+                "design -load mununu_pre_clocks",
+                "{script}"
+            );
+            // The retry's: the last pass before the backend.
+            if let Some(retry) = at.get(1) {
+                assert!(passes[retry + 1].starts_with("write_btor "), "{script}");
+            }
+        }
+    }
+
+    /// The names on a BTOR2's `state` lines.
+    fn x1229_state_names(btor2: &str) -> std::collections::BTreeSet<String> {
+        btor2
+            .lines()
+            .filter_map(|l| {
+                let mut t = l.split_whitespace();
+                let (_, op, _, name) = (t.next()?, t.next()?, t.next()?, t.next()?);
+                (op == "state").then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    /// mununu#1229 — REPRODUCER. A second clock domain whose only flop is read by assertions
+    /// alone is a second clock domain: the lift refuses the design, naming both clocks, and
+    /// under the opt-in it reports two. On the parent the scan read a copy `opt_clean` had
+    /// reduced to the output port's cone, counted one domain, and the lift went through with
+    /// nothing said — while the BTOR2 held `mon`, stepping on the one implicit clock. Needs
+    /// yosys ⇒ mununu-sva image.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_x1229_a_clock_domain_only_assertions_read_is_refused_at_lift() {
+        let yopts = |merge: bool| YosysOptions {
+            top: Some("top".into()),
+            merge_clock_domains: merge,
+            ..Default::default()
+        };
+        let Err(err) = sv_to_btor2_with_blackboxes(X1229_ASSERTION_ONLY_DOMAIN, &yopts(false))
+        else {
+            panic!("a two-clock design must not lift as one clock");
+        };
+        assert!(
+            err.message.contains("clk_a") && err.message.contains("clk_b"),
+            "{}",
+            err.message
+        );
+        let merged = sv_to_btor2_with_blackboxes(X1229_ASSERTION_ONLY_DOMAIN, &yopts(true))
+            .expect("the explicit opt-in lifts it");
+        let nets: Vec<&str> = merged
+            .clock_domains
+            .iter()
+            .map(|d| d.net.as_str())
+            .collect();
+        assert_eq!(nets, ["clk_a", "clk_b"]);
+        assert!(
+            x1229_state_names(&merged.btor2).contains("mon"),
+            "the model holds the flop the scan now counts:\n{}",
+            merged.btor2
+        );
+    }
+
+    /// mununu#1229 — the class, enumerated over what reads the storage of the second clock.
+    /// The scan counts that domain exactly when the BTOR2 holds the storage, whatever reads it:
+    /// the BTOR2 backend writes the cone of the output ports and of every net with a
+    /// source-level name, and the scan's copy keeps the same. A case the model drops (the
+    /// crossing flop cut away at its own net, a memory nothing reads, a register whose only
+    /// name starts with `$`) is one clock and still lifts; a latch has no clock pin and is no
+    /// cell of the scan (`e2e_a_latch_enabled_by_the_clock_level_withholds_its_violation` is
+    /// its test). Each row was first run by hand with the yosys of `mununu-sva` on 2026-11-23.
+    /// Needs yosys ⇒ mununu-sva image.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_x1229_the_scan_counts_a_domain_exactly_when_the_model_holds_its_storage() {
+        // Clock `clk_a` drives `seen`; the second clock's storage is the case.
+        let design = |ports: &str, decls: &str, second: &str, tail: &str| {
+            format!(
+                "module top(input logic clk_a, input logic clk_b, input logic rst, \
+                 input logic req{ports});
+  logic seen;
+  {decls}
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  {second}
+  {tail}
+endmodule
+"
+            )
+        };
+        let flop = |name: &str| {
+            format!(
+                "always_ff @(posedge clk_b)\n    if (rst) {name} <= 1'b0;\n    else {name} <= seen;"
+            )
+        };
+        let fsm = "always_ff @(posedge clk_b)
+    if (rst) st <= 2'd0;
+    else case (st)
+      2'd0: st <= seen ? 2'd1 : 2'd0;
+      2'd1: st <= 2'd2;
+      default: st <= 2'd0;
+    endcase";
+        let mem_ports = ", input logic [1:0] wa, input logic wd, output logic gnt";
+        let mem_write = "always_ff @(posedge clk_b)\n    if (seen) m[wa] <= wd;";
+        let driven_output = design(
+            ", output logic gnt",
+            "logic [1:0] st;",
+            fsm,
+            "assign gnt = (st == 2'd2);",
+        );
+        struct Case {
+            reader: &'static str,
+            src: String,
+            cut: Option<&'static str>,
+            /// The storage in question, and whether the BTOR2 holds a state of that name
+            /// (`None`: not asked).
+            storage: &'static str,
+            in_model: Option<bool>,
+            /// How many clock domains the scan counts.
+            domains: usize,
+        }
+        let cases = [
+            Case {
+                reader: "an output port",
+                src: driven_output.clone(),
+                cut: None,
+                storage: "st",
+                in_model: Some(true),
+                domains: 2,
+            },
+            Case {
+                reader: "only an assertion",
+                src: X1229_ASSERTION_ONLY_DOMAIN.to_string(),
+                cut: None,
+                storage: "mon",
+                in_model: Some(true),
+                domains: 2,
+            },
+            Case {
+                reader: "only an assertion, in a design with no output port",
+                src: design(
+                    "",
+                    "logic [1:0] st;",
+                    fsm,
+                    "a_st: assert property (@(posedge clk_b) st != 2'd3);",
+                ),
+                cut: None,
+                storage: "st",
+                in_model: Some(true),
+                domains: 2,
+            },
+            Case {
+                reader: "nothing: the flop has a name and no reader",
+                src: design(
+                    ", output logic gnt",
+                    "logic dead;",
+                    &flop("dead"),
+                    "assign gnt = seen;",
+                ),
+                cut: None,
+                storage: "dead",
+                in_model: Some(true),
+                domains: 2,
+            },
+            Case {
+                reader: "an output port that a cut point replaced",
+                src: driven_output.clone(),
+                cut: Some("gnt"),
+                storage: "st",
+                in_model: Some(true),
+                domains: 2,
+            },
+            Case {
+                reader: "the second domain, across a cut point on the first domain's flop",
+                src: driven_output,
+                cut: Some("seen"),
+                storage: "seen",
+                in_model: Some(false),
+                domains: 1,
+            },
+            Case {
+                reader: "a named net behind a memory, read by an assertion",
+                src: X1229_MEMORY_BEHIND_A_NAMED_NET.to_string(),
+                cut: None,
+                storage: "m",
+                in_model: Some(true),
+                domains: 2,
+            },
+            Case {
+                reader: "nothing: a memory has no name of its own to keep it",
+                src: design(mem_ports, "logic m [4];", mem_write, "assign gnt = seen;"),
+                cut: None,
+                storage: "m",
+                in_model: Some(false),
+                domains: 1,
+            },
+            Case {
+                reader: "nothing, and the register's only name starts with `$`",
+                src: design(
+                    ", output logic gnt",
+                    "logic \\$mon ;",
+                    &flop("\\$mon "),
+                    "assign gnt = seen;",
+                ),
+                cut: None,
+                storage: "$mon",
+                in_model: Some(false),
+                domains: 1,
+            },
+            Case {
+                reader: "a latch: no clock pin, so no cell of the scan",
+                src: "\
+module top(input logic clk_a, input logic en_b, input logic rst, input logic req,
+           output logic gnt);
+  logic seen, held;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  always_latch
+    if (en_b) held = seen;
+  assign gnt = seen;
+endmodule
+"
+                .to_string(),
+                cut: None,
+                // The model holds it as a state with no name of its own (`held` names the
+                // value it reads as), so the row pins the count alone.
+                storage: "held",
+                in_model: None,
+                domains: 1,
+            },
+        ];
+        for c in &cases {
+            let yopts = |merge: bool| YosysOptions {
+                top: Some("top".into()),
+                merge_clock_domains: merge,
+                cutpoint_signals: c.cut.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            };
+            let merged = sv_to_btor2_with_blackboxes(&c.src, &yopts(true))
+                .unwrap_or_else(|e| panic!("{}: the opt-in lifts: {}", c.reader, e.message));
+            let states = x1229_state_names(&merged.btor2);
+            if let Some(in_model) = c.in_model {
+                assert_eq!(
+                    states.contains(c.storage),
+                    in_model,
+                    "{}: `{}` among the model's states {states:?}",
+                    c.reader,
+                    c.storage
+                );
+            }
+            assert_eq!(
+                merged.clock_domains.len(),
+                c.domains,
+                "{}: {:?}",
+                c.reader,
+                merged.clock_domains
+            );
+            // Without the opt-in: refused exactly when there is a second domain.
+            let plain = sv_to_btor2_with_blackboxes(&c.src, &yopts(false));
+            assert_eq!(
+                plain.is_err(),
+                c.domains > 1,
+                "{}: {:?}",
+                c.reader,
+                plain.map(|l| l.clock_domains).map_err(|e| e.message)
+            );
+        }
+    }
+
+    /// mununu#1229, the retry: the backend-loop retry's script, run by the real yosys on a
+    /// design with a register and a memory no output port reads, writes the states the lift's
+    /// own script writes. On the parent its bare `opt_clean` dropped them from the model (16 of
+    /// the 222 registers of OpenTitan `csrng`, where the retry is taken:
+    /// `e2e_opentitan_ip_csrng_full` pins the count). Needs yosys ⇒ mununu-sva image.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_x1229_the_backend_loop_retry_writes_every_register_of_the_first_script() {
+        let yosys = locate_yosys().expect("yosys");
+        let loop_err = "ERROR: Found topological loop while processing cell $1. Active cells:\n";
+        for (case, src, storage) in [
+            ("flop", X1229_ASSERTION_ONLY_DOMAIN, "mon"),
+            ("memory", X1229_MEMORY_BEHIND_A_NAMED_NET, "m"),
+        ] {
+            let tmp = TempDir::new("mununu-yosys").expect("a staging directory");
+            let yopts = YosysOptions {
+                top: Some("top".into()),
+                merge_clock_domains: true,
+                ..Default::default()
+            };
+            let plan = plan_lift(src, &yopts, tmp.path()).expect("a plan");
+            stage_lift(&plan).expect("staged");
+            let mut states = Vec::new();
+            let retry = backend_loop_retry_script(&plan.script, loop_err).expect("a loop retries");
+            for script in [&plan.script, &retry] {
+                let out = run_lift_script(&yosys, &plan, script).expect("yosys runs");
+                assert!(
+                    out.status.success(),
+                    "{case}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                let btor2 = std::fs::read_to_string(&plan.btor_path).expect("the BTOR2");
+                states.push(x1229_state_names(&btor2));
+            }
+            assert!(states[0].contains(storage), "{case}: {:?}", states[0]);
+            assert_eq!(states[0], states[1], "{case}: first script vs retry");
+        }
     }
 
     /// Roadmap B2 at the seam: a clock traced through an inverter or a buffer to a top input is

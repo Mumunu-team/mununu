@@ -767,7 +767,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1939) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L517) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1237) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1983) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L517) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1237) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -855,7 +855,7 @@ controlled it, nothing else:
 
 `[t]` is the step whose transition the lines decided. The slice is the path-slicing idea of
 software model checking (Jhala & Majumdar, 2005) applied to the netlist: the flattened netlist the
-legend already reads (yosys's `write_json` after `flatten; opt_clean`, every cell stamped with its
+legend already reads (yosys's `write_json` after `flatten` and an `opt_clean` that keeps every named net, every cell stamped with its
 statement span) is evaluated on each step's registers and inputs, and walked backwards from the
 property's atoms with the **controlling-value rule** — a `$mux` / `$pmux` contributes its selector
 and the selected input only (the `case` arm not taken is gone), an `and` whose output is 0 the
@@ -1097,7 +1097,11 @@ with its assertion code compiled out, which is what the shim is for.
 
 The BTOR2 model has one implicit clock: every register steps on it. After `flatten` the lift writes
 a netlist snapshot and counts the clock domains — every distinct (clock net, edge) that a flop or
-a clocked memory port fires on. More than one domain is refused, naming them:
+a clocked memory port fires on. The snapshot holds every storage cell the model holds, also one
+that no output port reads (a register that only an assertion reads, or a memory read through a
+net that only an assertion reads): before 2026-11-23 it held the output ports' cone alone, and a
+domain outside that cone was not counted (mununu#1229). More than one domain is refused, naming
+them:
 
 ```text
 adapter/yosys: the design has 2 clock domains (clk_dst (posedge, 2 cells), clk_src (posedge, 1 cell)); …
@@ -1191,7 +1195,7 @@ undriven clock was named as its driver (mununu#1180).
 
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 
-> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L180) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
+> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L181) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
 
 A design that the lift refuses for its clock domains still has two questions to answer: whether
 every crossing is built as a synchroniser (structural), and whether the behaviour across the
@@ -1294,7 +1298,7 @@ the verdict host-dependent, so it is opt-in). Bit count cannot see the reachable
 wall-clock budget — the message distinguishes the four so the remedy is not blind
 trial-and-error.
 
-> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1237) — surface: (CLI+API+UI)
+> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1240) — surface: (CLI+API+UI)
 
 ### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
 
@@ -2171,7 +2175,7 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3582) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3694) — surface: (CLI+API+UI)
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3630) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3742) — surface: (CLI+API+UI)
 
 `sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
 yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
@@ -2194,7 +2198,7 @@ staging the source, so the design parses: a port net type only governs that port
 an output is driven internally — dropping it is **sound** (exact for inputs). **Internal**
 net-type declarations are left untouched (their pull / resolution semantics matter).
 
-> Source of truth: [`strip_port_net_types`](../crates/mununu-core/src/adapter/yosys/mod.rs#L363) — surface: (CLI+API+UI)
+> Source of truth: [`strip_port_net_types`](../crates/mununu-core/src/adapter/yosys/mod.rs#L364) — surface: (CLI+API+UI)
 
 **The front end is yosys-slang's `read_slang` — the only one (N1, 2026-11-04).** A complete
 SystemVerilog front end: module-header `import pkg::*;`, packages, interfaces, a bounded `while`
@@ -2250,12 +2254,15 @@ report `Found topological loop while processing cell $N` on a design `check` fin
 emits thousands of `$buf` cells, and a wide buffer chained bit-wise through another wide cell reads as a
 cycle at cell granularity (OpenTitan `csrng`, 2026-10-22: 4,035 `$buf` cells, the loop through the command
 arbiter's grant vector). On exactly that error the lift reruns its script
-once with `opt_clean` before `write_btor` — the pass folds the buffers into connections and drops unused
-cells, so the verdicts are over the same design — and reports it as the `lift-retry` note and
-`diagnostics.lift_retry`. Any other yosys error is not retried, and a lift that succeeds on the first run
+once, with every named net marked `keep` and then `opt_clean` before `write_btor`. The pass folds the
+buffers into connections and drops only cells that reach no named net and no output port, which the
+backend does not write either, so the model has the same registers and the verdicts are over the same
+design. The lift reports the retry as the `lift-retry` note and `diagnostics.lift_retry`. Before
+2026-11-23 the retry ran a bare `opt_clean`, which also dropped every register that no output port reads
+(mununu#1229). Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L829) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3635) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3683) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L92) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions
