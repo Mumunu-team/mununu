@@ -7042,6 +7042,39 @@ endmodule
         }
     }
 
+    /// The reader each row of [`every_route`] hands its lift: the seam from the verb to the rule
+    /// its cut notes state (mununu#1189). A row added to the table without a reader here fails
+    /// the tests that walk it.
+    fn reader_of(route: &str) -> crate::adapter::lift_decisions::LiftReader {
+        use crate::adapter::lift_decisions::LiftReader;
+        match route {
+            "sv/verify-liveness (request / grant)" | "sv/verify-liveness (responses)" => {
+                LiftReader::ResponseLiveness
+            }
+            "sv/verify-recoverability" | "sv/verify-recoverability (refine)" => {
+                LiftReader::Recoverability
+            }
+            "sv/check-fsm" => LiftReader::FsmEncoding,
+            "sv/check-fsm (liveness)" => LiftReader::FsmLiveness,
+            "sv/lint" => LiftReader::Lint,
+            "sv/mutate (list)" => LiftReader::MutationTargets,
+            "sv/mutate (run)" => LiftReader::Mutation,
+            "sv/cegar" => LiftReader::Cegar,
+            "sv/plan" => LiftReader::Plan,
+            other => panic!("no reader is recorded for the route `{other}`"),
+        }
+    }
+
+    /// The `detail` of the one note of `kind` in a response's `lift_notes`.
+    fn lift_note_detail(route: &str, response: &Value, kind: &str) -> String {
+        response["lift_notes"]
+            .as_array()
+            .and_then(|notes| notes.iter().find(|n| n["kind"] == kind))
+            .and_then(|note| note["detail"].as_str())
+            .unwrap_or_else(|| panic!("{route}: no `{kind}` note in {response:#}"))
+            .to_string()
+    }
+
     /// One clock, and three decisions for the lift to make: `vendor_cell` has no body, the
     /// request cuts `busy`, and it sets `LIMIT`.
     const CUT_DESIGN: &str = "\
@@ -7079,7 +7112,8 @@ endmodule
     #[ignore = "requires yosys-slang + z3 (mununu-sva docker image); run with --ignored"]
     fn e2e_x1189_every_sv_route_reports_the_cuts_and_the_parameters_of_its_lift() {
         use crate::adapter::lift_decisions::{
-            BLACKBOX_CUT, CONTROL_SLICE, LiftDecisions, PARAMETER_OVERRIDE, cdc_lint_lift_lines,
+            BLACKBOX_CUT, CONTROL_SLICE, EVERY_RUN_AND_MORE, LiftDecisions, LiftReader,
+            PARAMETER_OVERRIDE, cdc_lint_lift_lines,
         };
         let lift = json!({
             "source": CUT_DESIGN,
@@ -7108,7 +7142,8 @@ endmodule
                 .collect()
         };
 
-        let mut silent: Vec<(&str, Vec<&str>)> = every_response(&lift)
+        let responses = every_response(&lift);
+        let mut silent: Vec<(&str, Vec<&str>)> = responses
             .iter()
             .map(|(route, response)| (*route, missing(&response["lift_notes"])))
             .collect();
@@ -7122,6 +7157,27 @@ endmodule
              does not carry one note of each of these kinds with the level and the item it \
              applies to: {silent:?}"
         );
+
+        // The seam from the verb to its reader: on this one-clock design each route's two cut
+        // notes make the over-approximation claim and state the rule of the reader that route
+        // is, and the routes between them reach every reader.
+        let mut reached: Vec<LiftReader> = Vec::new();
+        for (route, response) in &responses {
+            let reader = reader_of(route);
+            for cut in [CONTROL_SLICE, BLACKBOX_CUT] {
+                let detail = lift_note_detail(route, response, cut);
+                assert!(
+                    detail.contains(EVERY_RUN_AND_MORE) && detail.contains(reader.on_a_free_net()),
+                    "{route} × {cut}: not the rule of {reader:?}: {detail}"
+                );
+            }
+            if !reached.contains(&reader) {
+                reached.push(reader);
+            }
+        }
+        for reader in LiftReader::ALL {
+            assert!(reached.contains(&reader), "no route reads as {reader:?}");
+        }
 
         // `sv/cdc-lint` has no blocking body of its own: these are its three steps. Its notes
         // are lines, so the row is the lines the lint's builder gives for the same decisions.
@@ -7148,6 +7204,58 @@ endmodule
                 "sv/cdc-lint does not report: {line}\n{cdc:#}"
             );
         }
+    }
+
+    /// The review's case on the real lift (mununu#1189): two clock domains merged and a cut point
+    /// in one request. The merge takes runs away from the model and the cut adds some, so no
+    /// route's `control-slice` note makes the over-approximation claim: each names the
+    /// `clock-domains-merged` note, which leads the same list, and states its reader's rule for
+    /// such a model. `sv/verify-auto`, whose note is its own, is the last row.
+    #[test]
+    #[ignore = "requires yosys-slang + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_x1189_under_merged_clock_domains_no_route_claims_a_cut_transfers() {
+        use crate::adapter::lift_decisions::{
+            CLOCK_DOMAINS_MERGED, CONTROL_SLICE, EVERY_RUN_AND_MORE,
+        };
+        use crate::adapter::slang::verify_auto_text::CUT_HOLDS_TRANSFERS;
+        let mut lift = lift_of(TWO_CLOCKS, true);
+        lift["cutpoints"] = json!(["gnt"]);
+        for (route, response) in every_response(&lift) {
+            assert_eq!(
+                response["lift_notes"][0]["kind"], CLOCK_DOMAINS_MERGED,
+                "{route}: the clock note leads: {response:#}"
+            );
+            let reader = reader_of(route);
+            let detail = lift_note_detail(route, &response, CONTROL_SLICE);
+            assert!(
+                !detail.contains(EVERY_RUN_AND_MORE),
+                "{route}: the claim is made under a merge: {detail}"
+            );
+            assert!(
+                detail.contains(&format!("note `{CLOCK_DOMAINS_MERGED}`"))
+                    && detail.contains(reader.on_a_free_net_under_a_clock_note()),
+                "{route}: not the rule of {reader:?} under a clock note: {detail}"
+            );
+        }
+
+        // `sv/verify-auto` builds its own `control-slice` note, in `notes`: the same request.
+        let auto = body(sv_verify_auto_handler_impl(request(&lift, json!({}))))
+            .unwrap_or_else(|refusal| panic!("sv/verify-auto: {refusal}"));
+        let note_of = |kind: &str| -> String {
+            auto["notes"]
+                .as_array()
+                .and_then(|notes| notes.iter().find(|n| n["kind"] == kind))
+                .and_then(|note| note["detail"].as_str())
+                .unwrap_or_else(|| panic!("sv/verify-auto: no `{kind}` note in {auto:#}"))
+                .to_string()
+        };
+        note_of(CLOCK_DOMAINS_MERGED);
+        let detail = note_of(CONTROL_SLICE);
+        assert!(
+            !detail.contains(CUT_HOLDS_TRANSFERS)
+                && detail.contains(&format!("note `{CLOCK_DOMAINS_MERGED}`")),
+            "sv/verify-auto: the claim is made under a merge: {detail}"
+        );
     }
 
     /// The refusal the opt-in answers is unchanged on every route of the table: without the

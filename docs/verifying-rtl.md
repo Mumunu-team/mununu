@@ -1173,9 +1173,10 @@ in `lift_notes` on the other verbs:
 | `clock-constant` | a constant | the constant as the netlist writes it (`1'b0`, `1'b1`); one register it clocks; the number of cells |
 | `clock-multi-driven` | several drivers | the net; the driver cell types joined by `, `; the number of cells |
 
-When the report has such a note and a `control-slice` note (a `--cutpoint` on a clock net gives
-both), the `control-slice` detail says that its "a HOLDS transfers" claim does not extend to the
-storage cells on that clock, and names the clock's note.
+When the report has a clock note and a `control-slice` note (a `--cutpoint` on a clock net gives
+both), the `control-slice` note does not claim that a HOLDS transfers: it names the clock notes
+and says that no verdict under the cut points transfers on its own (mununu#1189; the rule is in
+the next section).
 
 Before 2026-11-21 the cut shape was refused as "derived from logic (driven by `$anyseq`)" and a
 deleted stub's output lifted as a silent root clock. Before 2026-11-22 a flop on a constant clock
@@ -1203,11 +1204,11 @@ verb that lifts has them in `lift_notes`, after the clock notes of the section a
 The field is absent when the lift made none of these decisions and has no clock note.
 
 A cut module and a cut point both leave nets **free**: such a net takes any value on every step
-of the model, and the logic that drove it is left out. The model then has every run of the design
-and more, an over-approximation. What that allows depends on what the verb computes, so the
-`detail` of the two cut notes is written per verb:
+of the model, and the logic that drove it is left out. When the lift has no clock note, the model
+then has every run of the design and more, an over-approximation. What that allows depends on
+what the verb computes, so the `detail` of the two cut notes is written per verb:
 
-| verb | what transfers to the design when the model has free nets |
+| verb | what transfers to the design when the model has free nets and the lift has no clock note |
 |---|---|
 | `sv verify-liveness`, `sv verify-liveness-all` | a HOLDS (a response property speaks of every run). A VIOLATED may follow a run only a free value allows: read its trace against the nets listed. |
 | `sv verify-recoverability` | neither verdict on its own. `AG EF target` needs every reachable state *and* some run back from each: a HOLDS may get back through a value the left-out logic never produces, a VIOLATED may start from a state only such a value reaches. |
@@ -1216,13 +1217,24 @@ and more, an over-approximation. What that allows depends on what the verb compu
 | `sv lint` | a finding on a signal that reads a free net describes the model with that net free; a register that is not in the model is not checked. |
 | `POST /api/v1/sv/cegar` | a HOLDS of a formula whose modalities are all universal (`[…]`, negation only on the atoms), a VIOLATED of one whose modalities are all existential (`<…>`). With both kinds nested, neither verdict on its own. |
 | `sv mutate --list` | the targets listed are those of the lifted model: a register that is not in it is not among them. |
-| `sv mutate` | the verdicts compared are `sv verify-auto`'s on this model, and its note of the same kind says what a free net means for them. A property with no verdict in either run counts as unflipped. |
+| `sv mutate` | the verdicts compared are `sv verify-auto`'s on this model, and its note of the same kind says what a free net means for them. A property counts as flipped when its two verdicts differ; one the mutant run no longer has reads there as `skipped`. |
 | the plan (`sv verify-auto --plan-only`, `POST /api/v1/sv/plan`) | nothing is decided yet: `sv verify-auto` on the same request reports the note with what a free net means for each verdict. |
 
-When the lift also has a clock with no driver the model can follow (the free sources of the
-section above), each cut note says that none of this reaches the storage cells on that clock, and
-names the clock's note. The `parameter-override`, `lift-retry` and `flop-stub` notes are the same
-text on every verb, `sv verify-auto` included.
+**With a clock note, nothing in that table transfers.** When the same lift has a clock note of
+the section above (`clock-domains-merged`, or a clock with no driver the model can follow), the
+model ticks every clock on every step and so lacks the runs of the design in which they do not
+tick together. With free nets on top it has runs the design lacks and lacks runs the design has:
+it is neither an over- nor an under-approximation. The two cut notes then do not make the
+over-approximation claim. Each names the clock notes it rests on, and says that neither verdict
+of `sv verify-liveness`, no answer of `sv check-fsm` (either mode) and no verdict of
+`POST /api/v1/sv/cegar` transfers to the design on its own. The other rows of the table make no
+transfer claim and read the same. `sv verify-auto`'s own `control-slice` note follows the same
+rule: under a clock note it claims no transfer and names the clock notes. Lifting without the
+cut points, or with the modules' sources, takes the cut note out, and the clock notes say what
+the clocks alone allow.
+
+The `parameter-override`, `lift-retry` and `flop-stub` notes are the same text on every verb,
+`sv verify-auto` included.
 
 `sv cdc-lint` has plain lines in `notes` instead of typed notes, and gets one line per decision:
 a net the lift cut is unclocked in the netlist the lint walks, so a crossing through a cut point
@@ -1346,7 +1358,7 @@ the verdict host-dependent, so it is opt-in). Bit count cannot see the reachable
 wall-clock budget — the message distinguishes the four so the remedy is not blind
 trial-and-error.
 
-> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1188) — surface: (CLI+API+UI)
+> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1202) — surface: (CLI+API+UI)
 
 ### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
 

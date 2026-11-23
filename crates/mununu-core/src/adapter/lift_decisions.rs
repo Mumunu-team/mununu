@@ -14,6 +14,11 @@
 //! `AG EF`, and for a scan or a lint it changes what was looked at. [`LiftReader`] names the
 //! reader and [`LiftReader::on_a_free_net`] is the one place that says what each may conclude.
 //!
+//! That holds while the clocks of the model are the design's. A lift with a clock note (merged
+//! domains, a clock with no driver the model can follow) ticks every clock on every step, which
+//! takes runs away from the model: with free nets on top it is neither an over- nor an
+//! under-approximation, and [`LiftReader::on_a_free_net_under_a_clock_note`] says what is left.
+//!
 //! One builder, [`lift_decision_notes`], serves every verb that returns `lift_notes`;
 //! [`cdc_lint_lift_lines`] is its peer for `sv cdc-lint`, whose notes are plain lines. The table
 //! test `x1189_every_reader_reports_every_lift_decision` enumerates decision × reader.
@@ -34,6 +39,15 @@ pub(crate) const CONTROL_SLICE: &str = "control-slice";
 pub(crate) const FLOP_STUB: &str = "flop-stub";
 /// The note kind of a module with no body, cut to free outputs.
 pub(crate) const BLACKBOX_CUT: &str = "blackbox-cut";
+
+/// The note kind of the clock domains a lift merged onto the model's one clock (mununu#1181).
+pub(crate) const CLOCK_DOMAINS_MERGED: &str = "clock-domains-merged";
+
+/// The sentence a cut note says only when the lift has no clock note: with the design's own
+/// clocks, a free net leaves the model an over-approximation. A constant, so a test asks whether
+/// a note makes the claim without reading its prose.
+pub(crate) const EVERY_RUN_AND_MORE: &str =
+    "The model therefore has every run of the design and more.";
 
 /// The five kinds above, in the order a report lists them.
 #[cfg(test)]
@@ -87,7 +101,8 @@ impl LiftReader {
     ];
 
     /// What this reader's result says about the DESIGN when the model has free nets the design
-    /// drives (a cut module's outputs, a cut point).
+    /// drives (a cut module's outputs, a cut point) and the clocks of the model are the design's
+    /// (the lift has no clock note; with one, [`Self::on_a_free_net_under_a_clock_note`]).
     ///
     /// SOUNDNESS: a free net takes any value on every step, so the model has every run of the
     /// design and more: an over-approximation. A claim about every run of the model (a HOLDS of
@@ -95,7 +110,7 @@ impl LiftReader {
     /// design. A claim that some run exists may rest on a value the logic left out never
     /// produces. `AG EF` needs both, so neither of its verdicts transfers on its own. Exhaustive
     /// over the readers: a new one is a compile error here.
-    fn on_a_free_net(self) -> &'static str {
+    pub(crate) fn on_a_free_net(self) -> &'static str {
         match self {
             LiftReader::ResponseLiveness => {
                 "A response property speaks of every run, so a HOLDS here holds on the design. A \
@@ -141,12 +156,58 @@ impl LiftReader {
             LiftReader::Mutation => {
                 "The two verdicts compared for each property are `sv verify-auto`'s on this \
                  model, and that verb's note of the same kind says what a free net means for \
-                 them. A property it gives no verdict in either run counts here as unflipped."
+                 them. A property counts as flipped when its two verdicts differ, and one the \
+                 mutant run no longer has reads there as `skipped`."
             }
             LiftReader::Plan => {
                 "The plan routes the properties on this model. `sv verify-auto` on the same \
                  request reports this note with what a free net means for each verdict."
             }
+        }
+    }
+
+    /// What this reader's result says about the DESIGN when the model has free nets AND the lift
+    /// has a clock note: merged clock domains, or a clock with no driver the model can follow.
+    ///
+    /// SOUNDNESS: such a lift puts every clock on the model's one clock, which ticks on every
+    /// step. Of the design's runs the model keeps those in which the clocks tick together, an
+    /// UNDER-approximation of the interleavings (and for a divided clock or one with no driver
+    /// not even that: the clock's own note says so). The free nets add runs the design lacks.
+    /// The model is then neither an over- nor an under-approximation: a claim about every run of
+    /// the model says nothing of the runs it lacks, and a claim that some run exists may rest on
+    /// a free value. So the four readers whose rule in [`Self::on_a_free_net`] lets a result
+    /// transfer lose it here. The other five make no transfer claim there and keep their text.
+    /// Exhaustive over the readers: a new one is a compile error here.
+    pub(crate) fn on_a_free_net_under_a_clock_note(self) -> &'static str {
+        match self {
+            LiftReader::ResponseLiveness => {
+                "Neither verdict transfers to the design on its own: a HOLDS says nothing of the \
+                 runs the model lacks, and a VIOLATED may follow a run that only a free value \
+                 allows."
+            }
+            LiftReader::FsmEncoding => {
+                "No answer of the scan transfers to the design on its own: a register reported \
+                 as staying within its encodings may leave them on a run the model lacks, and a \
+                 reachable illegal encoding may be reached only through a free value. A register \
+                 whose own logic was left out may be scanned against fewer encodings or not at \
+                 all."
+            }
+            LiftReader::FsmLiveness => {
+                "No entry transfers to the design on its own: an encoding listed as never \
+                 reached may be reached on a run the model lacks, and every other entry may rest \
+                 on a free value. A register whose own logic was left out may be scanned against \
+                 fewer encodings or not at all."
+            }
+            LiftReader::Cegar => {
+                "No verdict of any formula transfers to the design on its own: one that speaks \
+                 of every run says nothing of the runs the model lacks, and one that needs some \
+                 run to exist may rest on a free value."
+            }
+            LiftReader::Recoverability
+            | LiftReader::Lint
+            | LiftReader::MutationTargets
+            | LiftReader::Mutation
+            | LiftReader::Plan => self.on_a_free_net(),
         }
     }
 }
@@ -259,27 +320,60 @@ pub(crate) fn flop_stub_note(stubs: &[String]) -> VerificationNote {
     }
 }
 
-/// What the free-net claim does not cover, when the lift has a clock with no driver the model
-/// can follow (mununu#1180). SOUNDNESS: such a clock is not a free value, the model ticks it on
-/// every step, which is neither an over- nor an under-approximation; the clock's own note says
-/// why, and the cut notes point at it.
-fn clock_caveat(clock_notes: &[VerificationNote]) -> String {
-    let driverless: Vec<String> = clock_notes
-        .iter()
-        .filter(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
-        .map(|n| {
-            let net = n.items.first().map(String::as_str).unwrap_or_default();
-            format!("`{net}` (note `{}`)", n.kind)
-        })
-        .collect();
-    if driverless.is_empty() {
-        return String::new();
+/// Whether `kind` is one of the clock notes of a lift: the merged-domains caveat, or a clock with
+/// no driver the model can follow.
+pub(crate) fn is_clock_note(kind: &str) -> bool {
+    kind == CLOCK_DOMAINS_MERGED || CLOCK_ROOT_NOTE_KINDS.contains(&kind)
+}
+
+/// The clock notes among `notes`, as a cut note names them: a clock with no driver by its net
+/// and its kind, the merged-domains caveat by its kind. Each once, in the order given. Empty when
+/// the lift has no clock note. The one place the two cut-note builders (this module's and
+/// `sv verify-auto`'s) get the names from.
+pub(crate) fn clock_note_names(notes: &[VerificationNote]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for note in notes.iter().filter(|n| is_clock_note(&n.kind)) {
+        let net = note
+            .items
+            .first()
+            .filter(|net| note.kind != CLOCK_DOMAINS_MERGED && !net.is_empty());
+        let name = match net {
+            Some(net) => format!("`{net}` (note `{}`)", note.kind),
+            // The merged caveat lists every domain, and a root note with no net has no name to
+            // give: the kind is what the reader looks up.
+            None => format!("note `{}`", note.kind),
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// What a cut note says after "the net is free": what the model is with respect to the design,
+/// what `reader` may conclude, and what undoing the cut (`undo`) gives.
+///
+/// SOUNDNESS: free nets alone leave an over-approximation ([`LiftReader::on_a_free_net`]). With a
+/// clock note the model also lacks runs of the design, so the over-approximation claim is not
+/// made and the reader's rule is the one of
+/// [`LiftReader::on_a_free_net_under_a_clock_note`]. Any clock note withdraws the claim, a kind
+/// added later included: the test is "the lift has a clock note", not a list of kinds that limit.
+fn cut_conclusion(reader: LiftReader, clock_notes: &[VerificationNote], undo: &str) -> String {
+    let clocks = clock_note_names(clock_notes);
+    if clocks.is_empty() {
+        return format!(
+            "{EVERY_RUN_AND_MORE} {} {undo} for a result on the design itself.",
+            reader.on_a_free_net()
+        );
     }
     format!(
-        " None of this reaches the storage cells clocked on {}: a clock with no driver the model \
-         can follow is not a free value, the model ticks it on every step, and no result on those \
-         cells transfers on its own.",
-        driverless.join(", ")
+        "On its own that would leave the model with every run of the design and more. But the \
+         clocks of this model are not the design's ({}): it ticks every clock on every step, so \
+         it lacks the runs of the design in which they do not tick together. The model has runs \
+         the design lacks and lacks runs the design has. {} {undo} to take this note out of the \
+         report; the clock notes say what the clocks alone allow.",
+        clocks.join(", "),
+        reader.on_a_free_net_under_a_clock_note()
     )
 }
 
@@ -289,7 +383,17 @@ pub(crate) fn lift_decision_notes(
     reader: LiftReader,
     decisions: LiftDecisions<'_>,
 ) -> Vec<VerificationNote> {
-    let caveat = clock_caveat(&decisions.clock_notes);
+    let cut_points = cut_conclusion(
+        reader,
+        &decisions.clock_notes,
+        "Lift without the cut points",
+    );
+    let cut_modules = cut_conclusion(
+        reader,
+        &decisions.clock_notes,
+        "Give the lift the modules' sources",
+    );
+    let clocked = decisions.clock_notes.iter().any(|n| is_clock_note(&n.kind));
     let mut notes = decisions.clock_notes;
     notes.extend(decisions.retry.map(lift_retry_note));
     if !decisions.params.is_empty() {
@@ -299,17 +403,23 @@ pub(crate) fn lift_decision_notes(
         notes.push(VerificationNote {
             kind: CONTROL_SLICE.into(),
             level: NoteLevel::ScopeCaveat,
-            summary: format!(
-                "{} cut point(s) requested — a net cut there is a free value in the model, an \
-                 over-approximation of the design.",
-                decisions.cut_points.len()
-            ),
+            summary: if clocked {
+                format!(
+                    "{} cut point(s) requested — a net cut there is a free value in the model, \
+                     and the clocks of the model are not the design's (the clock notes): not an \
+                     over-approximation of the design.",
+                    decisions.cut_points.len()
+                )
+            } else {
+                format!(
+                    "{} cut point(s) requested — a net cut there is a free value in the model, \
+                     an over-approximation of the design.",
+                    decisions.cut_points.len()
+                )
+            },
             detail: format!(
                 "The lift was asked to cut the listed nets. A net it cut takes any value on \
-                 every step of the model, and the logic that drove it is left out. The model \
-                 therefore has every run of the design and more. {}{caveat} Lift without the \
-                 cut points for a result on the design itself.",
-                reader.on_a_free_net()
+                 every step of the model, and the logic that drove it is left out. {cut_points}"
             ),
             items: decisions.cut_points.to_vec(),
             property: None,
@@ -330,10 +440,7 @@ pub(crate) fn lift_decision_notes(
             detail: format!(
                 "The sources hold no body for the listed modules, so the lift left every output \
                  of their instances free: it takes any value on every step of the model, and a \
-                 register inside such a module is not in the model. The model therefore has \
-                 every run of the design and more. {}{caveat} Give the lift the modules' sources \
-                 for a result on the design itself.",
-                reader.on_a_free_net()
+                 register inside such a module is not in the model. {cut_modules}"
             ),
             items: decisions.cut_modules.to_vec(),
             property: None,
@@ -587,11 +694,23 @@ mod tests {
         }
     }
 
-    /// The clock notes of the lift lead the list unchanged, and a cut note names every clock the
-    /// model cannot follow: the over-approximation claim does not reach the cells on it
-    /// (mununu#1180). A merged-domains caveat alone names no such clock.
+    /// The readers whose rule lets a result transfer from a model with free nets. Under a clock
+    /// note each of them has another rule, and the other five keep theirs.
+    const TRANSFERRING: [LiftReader; 4] = [
+        LiftReader::ResponseLiveness,
+        LiftReader::FsmEncoding,
+        LiftReader::FsmLiveness,
+        LiftReader::Cegar,
+    ];
+
+    /// The clock notes of the lift lead the list unchanged, and under any of them a cut note
+    /// withdraws the over-approximation claim (mununu#1189 review): merged domains take runs
+    /// away from the model, and so does a clock the model cannot follow (mununu#1180). The rows
+    /// are the clock notes a lift can return: the merge alone, the merge with each kind of
+    /// driverless clock (what a real lift returns for one), and each kind alone. The cut note
+    /// names every clock note it rests on, and the reader's rule is the one for that model.
     #[test]
-    fn x1189_the_cut_notes_point_at_a_clock_the_model_cannot_follow() {
+    fn x1189_a_clock_note_withdraws_the_cut_notes_claim() {
         let clock = |kind: &str, net: &str| VerificationNote {
             kind: kind.into(),
             level: NoteLevel::SoundnessCaveat,
@@ -600,33 +719,100 @@ mod tests {
             items: vec![net.to_string()],
             property: None,
         };
+        let merged = || clock(CLOCK_DOMAINS_MERGED, "clk_a (posedge, 2 cells)");
+        let mut rows: Vec<Vec<VerificationNote>> = vec![vec![merged()]];
         for root_kind in CLOCK_ROOT_NOTE_KINDS {
-            let clock_notes = vec![
-                clock("clock-domains-merged", "clk_a"),
-                clock(root_kind, "gated_clk"),
-            ];
+            rows.push(vec![merged(), clock(root_kind, "gated_clk")]);
+            rows.push(vec![clock(root_kind, "gated_clk")]);
+        }
+        for clock_notes in rows {
+            let kinds: Vec<&str> = clock_notes.iter().map(|n| n.kind.as_str()).collect();
             for reader in LiftReader::ALL {
                 let fixture = Fixture::all();
                 let notes = lift_decision_notes(reader, fixture.decisions(clock_notes.clone()));
                 assert_eq!(
-                    &notes[..2],
+                    &notes[..clock_notes.len()],
                     &clock_notes[..],
-                    "{reader:?}: clock notes first"
+                    "{reader:?} × {kinds:?}: clock notes first"
                 );
                 for cut in [CONTROL_SLICE, BLACKBOX_CUT] {
                     let note = notes.iter().find(|n| n.kind == cut).expect("the cut note");
+                    let at = format!("{reader:?} × {cut} × {kinds:?}: {}", note.detail);
+                    assert!(!note.detail.contains(EVERY_RUN_AND_MORE), "{at}");
                     assert!(
-                        note.detail.contains("`gated_clk`") && note.detail.contains(root_kind),
-                        "{reader:?} × {cut} × {root_kind}: {}",
                         note.detail
+                            .contains(reader.on_a_free_net_under_a_clock_note()),
+                        "{at}"
                     );
-                    assert!(
-                        !note.detail.contains("`clk_a`"),
-                        "{reader:?} × {cut}: a merged domain on an input clock is followed"
+                    if TRANSFERRING.contains(&reader) {
+                        assert!(!note.detail.contains(reader.on_a_free_net()), "{at}");
+                    }
+                    for kind in &kinds {
+                        assert!(note.detail.contains(&format!("note `{kind}`")), "{at}");
+                    }
+                    assert_eq!(
+                        note.detail.contains("`gated_clk`"),
+                        kinds.iter().any(|k| CLOCK_ROOT_NOTE_KINDS.contains(k)),
+                        "a clock with no driver is named by its net: {at}"
                     );
                 }
             }
         }
+        // The control: with no clock note the claim is made, under the reader's first rule.
+        for reader in LiftReader::ALL {
+            let fixture = Fixture::all();
+            for note in lift_decision_notes(reader, fixture.decisions(Vec::new())) {
+                if [CONTROL_SLICE, BLACKBOX_CUT].contains(&note.kind.as_str()) {
+                    assert!(note.detail.contains(EVERY_RUN_AND_MORE), "{reader:?}");
+                    assert!(note.detail.contains(reader.on_a_free_net()), "{reader:?}");
+                }
+            }
+        }
+    }
+
+    /// Which readers a clock note changes the rule of: exactly those whose first rule lets a
+    /// result transfer. A reader moved from one side to the other is a soundness decision, and
+    /// this is where it shows.
+    #[test]
+    fn x1189_a_clock_note_changes_the_rule_of_the_readers_that_transfer() {
+        let changed: Vec<LiftReader> = LiftReader::ALL
+            .into_iter()
+            .filter(|r| r.on_a_free_net() != r.on_a_free_net_under_a_clock_note())
+            .collect();
+        assert_eq!(changed, TRANSFERRING);
+    }
+
+    /// A clock note is named once, by its net when it has one: the merged caveat lists every
+    /// domain and is named by its kind, and a root note with no net gives its kind, not an empty
+    /// name. A note that is not a clock note is not named.
+    #[test]
+    fn x1189_a_cut_note_names_each_clock_note_once() {
+        let note = |kind: &str, items: &[&str]| VerificationNote {
+            kind: kind.into(),
+            level: NoteLevel::SoundnessCaveat,
+            summary: String::new(),
+            detail: String::new(),
+            items: names(items),
+            property: None,
+        };
+        let root = CLOCK_ROOT_NOTE_KINDS[0];
+        let notes = [
+            note(CLOCK_DOMAINS_MERGED, &["clk_a (posedge, 2 cells)"]),
+            note(root, &["gclk", "u_pll", "3"]),
+            note(root, &["gclk", "u_pll", "3"]),
+            note(root, &[]),
+            note(root, &[""]),
+            note(PARAMETER_OVERRIDE, &["top.DEPTH=4"]),
+        ];
+        assert_eq!(
+            clock_note_names(&notes),
+            vec![
+                format!("note `{CLOCK_DOMAINS_MERGED}`"),
+                format!("`gclk` (note `{root}`)"),
+                format!("note `{root}`"),
+            ]
+        );
+        assert!(clock_note_names(&notes[5..]).is_empty());
     }
 
     /// Where the decisions are read from: the diagnostics of a `sv verify-auto` report (the

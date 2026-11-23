@@ -315,7 +315,7 @@ pub(crate) fn clock_root_notes(
 pub(crate) fn merged_clock_domains_note(merged: &[String]) -> Option<VerificationNote> {
     let first = merged.first()?;
     Some(VerificationNote {
-        kind: "clock-domains-merged".into(),
+        kind: crate::adapter::lift_decisions::CLOCK_DOMAINS_MERGED.into(),
         level: NoteLevel::SoundnessCaveat,
         summary: if merged.len() > 1 {
             format!(
@@ -365,6 +365,12 @@ pub(crate) fn lift_clock_notes(
         .chain(clock_root_notes(domains))
         .collect()
 }
+
+/// What `sv verify-auto`'s `control-slice` note claims for a cut when the lift has no clock
+/// note. `build_notes` leaves it out under one, and a test asks which by this constant.
+pub(crate) const CUT_HOLDS_TRANSFERS: &str = "Because freeing a net only ADDS transitions, for a \
+    SAFETY / universal property a definite HOLDS transfers to the concrete RTL (safety + \
+    over-approx = sound).";
 
 pub(super) fn build_notes(
     report: &AutoVerifyReport,
@@ -440,31 +446,16 @@ pub(super) fn build_notes(
                 .map(|f| f.alternation_depth() >= 2)
                 .unwrap_or(false)
         });
-        // mununu#1180 — a clock the lifted design holds no driver for (a `--cutpoint` on a
-        // clock net is one way to get there) is not a free input of the model: the model ticks
-        // it on every step. SOUNDNESS: that is neither an over- nor an under-approximation, so
-        // the "HOLDS transfers" claim below does not reach the storage cells on such a clock;
-        // the clock's own note (kept from the lift) says why, and this note points at it.
-        let driverless_clocks: Vec<String> = report
-            .notes
-            .iter()
-            .filter(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
-            .map(|n| {
-                let net = n.items.first().map(String::as_str).unwrap_or_default();
-                format!("`{net}` (note `{}`)", n.kind)
-            })
-            .collect();
-        let clock_caveat = if driverless_clocks.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " ⚠ This does NOT extend to the storage cells clocked on {}: a clock with no \
-                 driver the model can follow — a cut clock net is one — is not freed, the model \
-                 ticks it on every step, which is neither an over- nor an under-approximation; \
-                 no verdict on those cells transfers on its own.",
-                driverless_clocks.join(", ")
-            )
-        };
+        // mununu#1180, mununu#1189 — the claims below hold while the clocks of the model are
+        // the design's. SOUNDNESS: a lift with a clock note (merged domains, or a clock the
+        // lifted design holds no driver for, which a `--cutpoint` on a clock net is one way to
+        // get) ticks every clock on every step, so the model lacks the runs of the design in
+        // which they do not tick together. With freed nets on top it is neither an over- nor an
+        // under-approximation, and the note then makes no transfer claim and names the clock
+        // notes. Any clock note withdraws the claim: the rule and the names are
+        // `lift_decisions`', shared with the other verbs' `control-slice` note.
+        let clocks =
+            crate::adapter::lift_decisions::clock_note_names(&clock_notes_of_report(report));
         let numu_caveat = if has_alternating {
             " ⚠ But for an ALTERNATING recoverability property (`AG EF good`, νμ) a HOLDS under this \
               cut is sound for the abstract (cutpointed) model ONLY — it does NOT automatically transfer \
@@ -474,23 +465,46 @@ pub(super) fn build_notes(
         } else {
             ""
         };
+        let conclusion = if clocks.is_empty() {
+            format!(
+                "{CUT_HOLDS_TRANSFERS}{numu_caveat} A definite VIOLATED is sound only when the \
+                 counterexample is guard-independent — the canonical case being an ORPHANED FSM \
+                 state (in-degree 0), which no freed guard can make reachable, so `AG EF \
+                 <orphaned-state>` stays soundly VIOLATED. Treat any other VIOLATED under cut \
+                 points as possibly spurious and re-check without the cut."
+            )
+        } else {
+            format!(
+                "On its own, freeing a net only ADDS transitions. But the clocks of this model \
+                 are not the design's ({}): it ticks every clock on every step, so it lacks the \
+                 runs of the design in which they do not tick together. The model has runs the \
+                 design lacks and lacks runs the design has, and no verdict under these cut \
+                 points transfers to the concrete RTL on its own. Re-check without the cut \
+                 points to take this note out of the report; the clock notes say what the \
+                 clocks alone allow.",
+                clocks.join(", ")
+            )
+        };
         notes.push(VerificationNote {
             kind: crate::adapter::lift_decisions::CONTROL_SLICE.into(),
             level: NoteLevel::ScopeCaveat,
-            summary: format!(
-                "{} net(s) cut to free inputs (control-slice) — an over-approximation of the design.",
-                cutpoint_signals.len()
-            ),
+            summary: if clocks.is_empty() {
+                format!(
+                    "{} net(s) cut to free inputs (control-slice) — an over-approximation of \
+                     the design.",
+                    cutpoint_signals.len()
+                )
+            } else {
+                format!(
+                    "{} net(s) cut to free inputs (control-slice) — with the clock notes of \
+                     this lift, not an over-approximation of the design.",
+                    cutpoint_signals.len()
+                )
+            },
             detail: format!(
-                "Each listed net was replaced by a free `$anyseq` input (Yosys `cutpoint`), so its \
-                 datapath fanin drops out of the cone (this is what lets `exact-symbolic` fit a wide \
-                 control FSM). Because freeing a net only ADDS transitions, for a SAFETY / universal \
-                 property a definite HOLDS transfers to the concrete RTL (safety + over-approx = \
-                 sound).{clock_caveat}{numu_caveat} A definite VIOLATED is sound only when the counterexample is \
-                 guard-independent — the canonical case being an ORPHANED FSM state (in-degree 0), \
-                 which no freed guard can make reachable, so `AG EF <orphaned-state>` stays soundly \
-                 VIOLATED. Treat any other VIOLATED under cut points as possibly spurious and re-check \
-                 without the cut."
+                "Each listed net was replaced by a free `$anyseq` input (Yosys `cutpoint`), so \
+                 its datapath fanin drops out of the cone (this is what lets `exact-symbolic` \
+                 fit a wide control FSM). {conclusion}"
             ),
             items: cutpoint_signals.to_vec(),
             property: None,

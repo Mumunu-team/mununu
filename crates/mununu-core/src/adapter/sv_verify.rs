@@ -265,9 +265,9 @@ pub fn sv_verify_liveness(
     lift.lift_with_notes(LiftReader::ResponseLiveness)?
         .try_map(|btor2| {
             response_liveness_rescue_atoms(&btor2, &ante, &cons, false).ok_or_else(|| {
-            "could not build the liveness monitor — an atom likely binds no signal in the design"
-                .to_string()
-        })
+                "could not build the liveness monitor — an atom likely binds no signal in the design"
+                    .to_string()
+            })
         })
 }
 
@@ -286,12 +286,12 @@ pub fn sv_verify_liveness_under_fairness(
     lift.lift_with_notes(LiftReader::ResponseLiveness)?
         .try_map(|btor2| {
             crate::adapter::liveness_rescue::response_liveness_rescue_under_fairness(
-            &btor2, &ante, &cons, &fair, false,
-        )
-        .ok_or_else(|| {
-            "could not build the fair-cycle monitor — an atom likely binds no signal in the design"
-                .to_string()
-        })
+                &btor2, &ante, &cons, &fair, false,
+            )
+            .ok_or_else(|| {
+                "could not build the fair-cycle monitor — an atom likely binds no signal in the design"
+                    .to_string()
+            })
         })
 }
 
@@ -311,10 +311,10 @@ pub fn sv_verify_liveness_all(
     lift.lift_with_notes(LiftReader::ResponseLiveness)?
         .try_map(|btor2| {
             response_liveness_rescue_conjunction(&btor2, &pairs, false).ok_or_else(|| {
-            "could not build a liveness monitor — an atom likely binds no signal in the design, \
-             or no responses were given"
-                .to_string()
-        })
+                "could not build a liveness monitor — an atom likely binds no signal in the design, \
+                 or no responses were given"
+                    .to_string()
+            })
         })
 }
 
