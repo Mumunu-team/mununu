@@ -1,6 +1,6 @@
 # Consumer briefing — the recorded CDC verdicts and the lockstep they rest on (2026-11)
 
-> Source of truth: [`--merge-clock-domains`](../../crates/mununu-cli/src/main.rs#L2585) (CLI), [`merge_clock_domains`](../../crates/mununu-core/src/api/models.rs#L1844) (API), the `clock-domains-merged` note at [`verify_auto_text.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L318) — surface: CLI+API.
+> Source of truth: [`--merge-clock-domains`](../../crates/mununu-cli/src/main.rs#L2586) (CLI), [`merge_clock_domains`](../../crates/mununu-core/src/api/models.rs#L1844) (API), the `clock-domains-merged` note at [`verify_auto_text.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L327) — surface: CLI+API.
 
 > **Audience:** monono (owns the three blocks and their recipes), rosf (drives corpora by their `[corpus] top`, where one of the findings bites), and anyone verifying a design with more than one clock.
 >
