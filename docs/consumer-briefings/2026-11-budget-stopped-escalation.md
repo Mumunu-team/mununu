@@ -1,6 +1,6 @@
 # Consumer briefing: a budget that stops the ⊥ escalation is named on the row (2026-11)
 
-> Source of truth: [`escalation_stopped_note`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L10759) — surface: CLI+API — `sv verify-auto --json` / `POST /api/v1/sv/verify-auto` (`notes[]`); no UI affordance.
+> Source of truth: [`escalation_stopped_note`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1491) — surface: CLI+API — `sv verify-auto --json` / `POST /api/v1/sv/verify-auto` (`notes[]`); no UI affordance.
 
 **Audience:** rosf, monono, mununu-ui, and anyone whose gate reads `sv verify-auto` notes.
 

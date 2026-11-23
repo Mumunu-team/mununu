@@ -2,7 +2,7 @@
 
 > **Audience:** maintainers of the repositories that read a `violated` verdict from `mununu btor2 verify --witness`, `POST /api/v1/btor2/verify`, `mununu sv verify-auto` (rows, `bottom_reason`, notes) or the fault adversary (`--fault`) — rosf, monono, mununu-ui. Not a release note.
 >
-> Source of truth: [`ShippedWitness::contradicted_by`](../../crates/mununu-core/src/adapter/btor2/witness.rs#L508) · [`apply_fallback_contradiction`](../../crates/mununu-core/src/adapter/btor2/witness.rs#L517) · [`WitnessMiss::contradicted_by`](../../crates/mununu-core/src/adapter/reach_rescue.rs#L673) · [`contradicted_row`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2019) — surface: CLI+API
+> Source of truth: [`ShippedWitness::contradicted_by`](../../crates/mununu-core/src/adapter/btor2/witness.rs#L508) · [`apply_fallback_contradiction`](../../crates/mununu-core/src/adapter/btor2/witness.rs#L517) · [`WitnessMiss::contradicted_by`](../../crates/mununu-core/src/adapter/reach_rescue.rs#L673) · [`contradicted_row`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1847) — surface: CLI+API
 
 ## TL;DR
 

@@ -1,6 +1,6 @@
 # Consumer briefing — a refuted liveness row the exact engine cannot attach a lasso to says why (2026-10)
 
-> Source of truth: [`LadderOutcome::witness_miss`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) + [`witness_miss_note`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`
+> Source of truth: [`LadderOutcome::witness_miss`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) + [`witness_miss_note`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`
 
 **Audience:** rosf, monono, mununu-ui and anyone who reads `notes[]` beside a VIOLATED liveness or recoverability row. The mununu#808 follow-up (the lasso-miss half of mununu#803's silence rule).
 
