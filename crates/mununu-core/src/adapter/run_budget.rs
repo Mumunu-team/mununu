@@ -46,11 +46,80 @@ pub const RUN_BUDGET_ENV: &str = "MUNUNU_VERIFY_BUDGET_MS";
 /// `0` ⇒ the per-property budget alone applies.
 pub const RESCUE_SLICE_ENV: &str = "MUNUNU_RESCUE_SLICE_MS";
 
+/// Who set a time limit: what a stop at that limit can tell the user to change (mununu#1197).
+///
+/// A message that reports a stop at a limit names the setting that moves the limit, in the names
+/// of the surface that set it, or says that no setting does. The setter is recorded where the
+/// limit is made: the code that prints the stop sees a number of milliseconds, and a number does
+/// not say whether a flag, a request field, a variable or a constant produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetBy {
+    /// `--timeout-ms` of the CLI verb that ran. Named only by the CLI.
+    TimeoutFlag,
+    /// `timeout_ms` of the HTTP request. Named only by the API handlers.
+    TimeoutField,
+    /// [`RUN_BUDGET_ENV`].
+    RunBudgetEnv,
+    /// [`PROPERTY_BUDGET_ENV`].
+    PropertyBudgetEnv,
+    /// [`RESCUE_SLICE_ENV`].
+    RescueSliceEnv,
+    /// A constant of mununu's own: no setting moves it.
+    Mununu,
+}
+
+impl SetBy {
+    /// Every setter, for the tests that must cover each one.
+    pub const ALL: [SetBy; 6] = [
+        SetBy::TimeoutFlag,
+        SetBy::TimeoutField,
+        SetBy::RunBudgetEnv,
+        SetBy::PropertyBudgetEnv,
+        SetBy::RescueSliceEnv,
+        SetBy::Mununu,
+    ];
+
+    /// The setting as the user writes it, or `None` when the limit is mununu's own.
+    pub fn setting(self) -> Option<&'static str> {
+        match self {
+            SetBy::TimeoutFlag => Some("`--timeout-ms`"),
+            SetBy::TimeoutField => Some("the request's `timeout_ms`"),
+            SetBy::RunBudgetEnv => Some("`MUNUNU_VERIFY_BUDGET_MS`"),
+            SetBy::PropertyBudgetEnv => Some("`MUNUNU_PROPERTY_BUDGET_MS`"),
+            SetBy::RescueSliceEnv => Some("`MUNUNU_RESCUE_SLICE_MS`"),
+            SetBy::Mununu => None,
+        }
+    }
+
+    /// The closing clause of a message that reports a stop at a limit this setter set: the
+    /// setting to raise, or that there is none and whose limit it is. No trailing period.
+    pub fn remedy(self) -> String {
+        match self.setting() {
+            Some(setting) => {
+                format!("this limit follows {setting}: raise it to give the search longer")
+            }
+            None => NO_SETTING.to_string(),
+        }
+    }
+
+    /// Of two setters of the same limit, the one a message can act on: this one unless it is
+    /// mununu's own.
+    pub fn or(self, other: SetBy) -> SetBy {
+        if self == SetBy::Mununu { other } else { self }
+    }
+}
+
+/// What a stop at one of mununu's own limits says: nothing the user sets moves it.
+pub const NO_SETTING: &str = "this limit is mununu's own and no setting changes it (a mununu \
+                              limitation: nothing to change in the design)";
+
 /// A deadline plus a cancellation flag. Cloning shares the flag.
 #[derive(Clone, Debug)]
 pub struct Budget {
     deadline: Option<Instant>,
     cancel: Arc<AtomicBool>,
+    /// Who set `deadline`. With no deadline: whose setting would set one.
+    set_by: SetBy,
 }
 
 impl Default for Budget {
@@ -66,22 +135,17 @@ impl Budget {
         Self {
             deadline: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            set_by: SetBy::Mununu,
         }
     }
 
-    /// A budget expiring `ms` from now.
+    /// A budget expiring `ms` from now, at a limit of mununu's own. A limit a flag, a request
+    /// field or a variable sets is a [`Budget::child`] of the current budget, which records it.
     pub fn with_ms(ms: u64) -> Self {
         Self {
             deadline: Some(Instant::now() + Duration::from_millis(ms)),
             cancel: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// `None` ⇒ unbounded, `Some(ms)` ⇒ bounded. Convenience for an env-derived option.
-    pub fn with_ms_opt(ms: Option<u64>) -> Self {
-        match ms {
-            Some(ms) => Self::with_ms(ms),
-            None => Self::unbounded(),
+            set_by: SetBy::Mununu,
         }
     }
 
@@ -89,17 +153,29 @@ impl Budget {
     /// the parent's and `now + ms`. A per-property budget therefore cannot overrun the run budget,
     /// however many properties there are. The cancel flag is SHARED, so cancelling the parent
     /// cancels every child.
-    pub fn child(outer: &Budget, ms: Option<u64>) -> Self {
+    ///
+    /// `set_by` says who chose `ms` (`None` included: a flag that was not given is still the
+    /// setting that would bound this run). The child reports the setter of the deadline that
+    /// BINDS: its own when `now + ms` is the earlier one, the parent's otherwise. With no deadline
+    /// on either side it reports its own setter, or the parent's when its own is mununu.
+    pub fn child(outer: &Budget, ms: Option<u64>, set_by: SetBy) -> Self {
         let own = ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-        let deadline = match (outer.deadline, own) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, b) => b,
+        let (deadline, set_by) = match (outer.deadline, own) {
+            (Some(a), Some(b)) if b < a => (Some(b), set_by),
+            (Some(a), _) => (Some(a), outer.set_by),
+            (None, Some(b)) => (Some(b), set_by),
+            (None, None) => (None, set_by.or(outer.set_by)),
         };
         Self {
             deadline,
             cancel: Arc::clone(&outer.cancel),
+            set_by,
         }
+    }
+
+    /// Who set the deadline in effect. With no deadline: whose setting would set one.
+    pub fn set_by(&self) -> SetBy {
+        self.set_by
     }
 
     /// Has the budget run out, or been cancelled?
@@ -442,17 +518,17 @@ mod tests {
     /// A per-property budget must never outlive the run budget, however generous it is.
     fn child_clamps_to_the_earlier_deadline() {
         let outer = Budget::with_ms(0); // already expired
-        let child = Budget::child(&outer, Some(60_000));
+        let child = Budget::child(&outer, Some(60_000), SetBy::Mununu);
         assert!(
             child.expired(),
             "a long child budget cannot extend an exhausted run budget"
         );
 
         let generous = Budget::with_ms(60_000);
-        let short = Budget::child(&generous, Some(0));
+        let short = Budget::child(&generous, Some(0), SetBy::Mununu);
         assert!(short.expired(), "the child's own deadline still applies");
 
-        let inherit = Budget::child(&generous, None);
+        let inherit = Budget::child(&generous, None, SetBy::Mununu);
         assert!(!inherit.expired());
         assert!(
             inherit.remaining_ms().is_some(),
@@ -463,9 +539,97 @@ mod tests {
     #[test]
     fn cancelling_the_parent_cancels_the_child() {
         let outer = Budget::unbounded();
-        let child = Budget::child(&outer, Some(60_000));
+        let child = Budget::child(&outer, Some(60_000), SetBy::Mununu);
         outer.cancel();
         assert!(child.expired(), "the cancel flag is shared");
+    }
+
+    /// mununu#1197 — a budget reports who set the deadline that BINDS, for every pair of setters:
+    /// the child's own when it is the earlier one, the parent's when the parent's is.
+    #[test]
+    fn x1197_a_child_reports_the_setter_of_the_deadline_that_binds() {
+        for outer_by in SetBy::ALL {
+            for own_by in SetBy::ALL {
+                let far = Budget::child(&Budget::unbounded(), Some(3_600_000), outer_by);
+                assert_eq!(far.set_by(), outer_by, "a first deadline is its setter's");
+                let shorter = Budget::child(&far, Some(1_000), own_by);
+                assert_eq!(
+                    shorter.set_by(),
+                    own_by,
+                    "{outer_by:?} then a shorter {own_by:?}"
+                );
+                let longer = Budget::child(&shorter, Some(3_600_000), outer_by);
+                assert_eq!(
+                    longer.set_by(),
+                    own_by,
+                    "a longer child keeps the binding setter"
+                );
+                let none = Budget::child(&far, None, own_by);
+                assert_eq!(
+                    none.set_by(),
+                    outer_by,
+                    "no own deadline: the parent's binds"
+                );
+                assert_eq!(none.remaining_ms().is_some(), far.remaining_ms().is_some());
+            }
+        }
+    }
+
+    /// With no deadline anywhere a budget still says whose setting WOULD bound the run: the
+    /// innermost one a user can change. That is what a stop at a member's default limit names.
+    #[test]
+    fn x1197_an_unbounded_budget_keeps_the_setting_that_would_bound_it() {
+        assert_eq!(Budget::unbounded().set_by(), SetBy::Mununu);
+        assert_eq!(Budget::with_ms(5).set_by(), SetBy::Mununu);
+        for outer_by in SetBy::ALL {
+            for own_by in SetBy::ALL {
+                let outer = Budget::child(&Budget::unbounded(), None, outer_by);
+                assert!(outer.remaining_ms().is_none());
+                assert_eq!(outer.set_by(), outer_by);
+                let inner = Budget::child(&outer, None, own_by);
+                assert!(inner.remaining_ms().is_none());
+                assert_eq!(inner.set_by(), own_by.or(outer_by));
+            }
+        }
+        assert_eq!(SetBy::Mununu.or(SetBy::RunBudgetEnv), SetBy::RunBudgetEnv);
+        assert_eq!(
+            SetBy::TimeoutFlag.or(SetBy::RunBudgetEnv),
+            SetBy::TimeoutFlag
+        );
+    }
+
+    /// Every setter either names one setting, distinct from every other setter's, or is mununu's
+    /// own and names none. The match in `setting` is exhaustive, so a new setter cannot be added
+    /// without deciding which; this pins that the decision is visible in the remedy.
+    #[test]
+    fn x1197_every_setter_names_its_own_setting_or_says_there_is_none() {
+        let settings: Vec<&str> = SetBy::ALL.iter().filter_map(|s| s.setting()).collect();
+        for by in SetBy::ALL {
+            let remedy = by.remedy();
+            assert!(!remedy.ends_with('.'), "{remedy}");
+            match by.setting() {
+                Some(own) => {
+                    assert!(remedy.contains(own), "{by:?}: {remedy}");
+                    assert_eq!(settings.iter().filter(|s| **s == own).count(), 1, "{own}");
+                    assert_ne!(remedy, NO_SETTING);
+                }
+                None => {
+                    assert_eq!(by, SetBy::Mununu);
+                    assert_eq!(remedy, NO_SETTING);
+                }
+            }
+            for other in settings.iter().filter(|s| Some(**s) != by.setting()) {
+                assert!(!remedy.contains(other), "{by:?} names {other}: {remedy}");
+            }
+        }
+        // The three variables are the ones this module reads.
+        for (by, env) in [
+            (SetBy::RunBudgetEnv, RUN_BUDGET_ENV),
+            (SetBy::PropertyBudgetEnv, PROPERTY_BUDGET_ENV),
+            (SetBy::RescueSliceEnv, RESCUE_SLICE_ENV),
+        ] {
+            assert_eq!(by.setting(), Some(format!("`{env}`").as_str()));
+        }
     }
 
     #[test]

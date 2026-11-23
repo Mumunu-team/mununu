@@ -1,6 +1,6 @@
 # Consumer briefing — the exact engine's build, relation and fixpoint steps, and the owned driver, honour the run budget (mununu#816, 2026-10)
 
-> Source of truth: [`charge_iteration`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L5231) + [`check_node_budget`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L4157) + [`decide_reach_owned_only`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L2150) + [`run_budget::expired`](../../crates/mununu-core/src/adapter/run_budget.rs#L152) — surface: (CLI+API) — every budgeted `sv verify-auto` / `btor2 verify --owned-only` run and the HWMCC adjudication harness.
+> Source of truth: [`charge_iteration`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L5231) + [`check_node_budget`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L4157) + [`decide_reach_owned_only`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L2404) + [`run_budget::expired`](../../crates/mununu-core/src/adapter/run_budget.rs#L228) — surface: (CLI+API) — every budgeted `sv verify-auto` / `btor2 verify --owned-only` run and the HWMCC adjudication harness.
 
 **Audience:** rosf, monono and anyone who runs mununu under a wall-clock budget (`MUNUNU_VERIFY_BUDGET_MS`, `MUNUNU_PROPERTY_BUDGET_MS`, `MUNUNU_RESCUE_SLICE_MS`, the HWMCC harness's `MUNUNU_HWMCC_TIMEOUT_MS`) and reads `bottom_reason` / the abstention kind.
 

@@ -61,11 +61,12 @@
 use crate::adapter::btor2::ast::Btor2File;
 use crate::adapter::btor2::emit::emit_btor2;
 use crate::adapter::btor2::native_bmc::{self, BmcTrace, SafetyVerdict};
-use crate::adapter::btor2::native_interp::{self, InterpSafetyVerdict};
+use crate::adapter::btor2::native_interp::{self, InterpLimit, InterpSafetyVerdict};
 use crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable;
 use crate::adapter::btormc::{self, McVerdict};
 use crate::adapter::pono;
 use crate::adapter::ric3;
+use crate::adapter::run_budget::{NO_SETTING, SetBy};
 
 /// The merged reachability verdict.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -397,8 +398,16 @@ fn settle_subprocess(
 }
 
 /// mununu#1043 — the cause a member stopped by the portfolio's wall or run budget carries.
-fn clock_stopped(progress: &str) -> String {
-    format!("{progress}; stopped by the portfolio's wall or run budget before a verdict")
+/// mununu#1197 — it says which of the two stopped the member and what that clock follows.
+fn clock_stopped(progress: &str, stop: &StopSignal) -> String {
+    match stop.cause().and_then(|c| c.clock(&stop.limits)) {
+        Some((clock, origin)) => format!(
+            "{progress}; stopped by {clock} before a verdict; {}",
+            origin.remedy()
+        ),
+        // Not a clock's stop (the callers ask only after `clock_stopped()`): the progress alone.
+        None => progress.to_string(),
+    }
 }
 
 /// mununu#1143 — the line a member whose thread ended without a result gets in `refused`: a
@@ -455,6 +464,169 @@ pub(crate) enum MemberStop {
     Cancelled(String),
 }
 
+/// mununu#1197 — where a limit that stopped a member comes from, which is what the member's
+/// report can tell the user to change. A stop that said "raise the run budget" named no setting,
+/// and on a verb with no such setting there was none to find (`budget-remedy-knob` in
+/// `docs/defect-classes.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LimitOrigin {
+    /// The limit is, or is derived from, the deadline this setting set: raising the setting
+    /// raises the limit.
+    Follows(SetBy),
+    /// The member's default constant, kept because the portfolio's wall is at or under the
+    /// subprocess default ([`btormc::DEFAULT_TIMEOUT`]); a wall above it replaces the constant
+    /// (mununu#892).
+    DefaultUntilAbove(SetBy),
+    /// The member's default constant, kept because no run budget is in effect; with one, the
+    /// limit follows the time left (mununu#726).
+    DefaultUntilSet(SetBy),
+    /// A constant no setting reaches.
+    Fixed,
+}
+
+impl LimitOrigin {
+    /// A limit derived from the deadline `by` set; [`LimitOrigin::Fixed`] when that deadline is
+    /// mununu's own.
+    pub(crate) fn following(by: SetBy) -> Self {
+        match by.setting() {
+            Some(_) => LimitOrigin::Follows(by),
+            None => LimitOrigin::Fixed,
+        }
+    }
+
+    /// A default constant a wall of `by` above the subprocess default would replace.
+    pub(crate) fn default_until_above(by: SetBy) -> Self {
+        match by.setting() {
+            Some(_) => LimitOrigin::DefaultUntilAbove(by),
+            None => LimitOrigin::Fixed,
+        }
+    }
+
+    /// A default constant a run budget of `by` would replace.
+    pub(crate) fn default_until_set(by: SetBy) -> Self {
+        match by.setting() {
+            Some(_) => LimitOrigin::DefaultUntilSet(by),
+            None => LimitOrigin::Fixed,
+        }
+    }
+
+    /// The closing clause of a stop on this limit (no trailing period): the setting to change,
+    /// in the user's own name for it, or that there is none.
+    pub(crate) fn remedy(self) -> String {
+        match self {
+            LimitOrigin::Follows(by) => by.remedy(),
+            LimitOrigin::DefaultUntilAbove(by) => match by.setting() {
+                Some(setting) => format!(
+                    "this limit is the member's default: it follows {setting} once that is \
+                     above {} ms",
+                    btormc::DEFAULT_TIMEOUT.as_millis()
+                ),
+                None => NO_SETTING.to_string(),
+            },
+            LimitOrigin::DefaultUntilSet(by) => match by.setting() {
+                Some(setting) => format!(
+                    "this limit is the member's default: a limit given with {setting} replaces it"
+                ),
+                None => NO_SETTING.to_string(),
+            },
+            LimitOrigin::Fixed => NO_SETTING.to_string(),
+        }
+    }
+}
+
+/// mununu#1197 — who set each limit a member of one portfolio run can stop on. The driver
+/// computes it once, where it reads the budget and the wall, and the run's [`StopSignal`]
+/// carries it to every place a stop is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LimitOrigins {
+    /// The portfolio's wall ([`StopCause::Wall`]; the owned-only collector's deadline).
+    pub(crate) wall: LimitOrigin,
+    /// The run budget ([`StopCause::RunBudget`]).
+    pub(crate) budget: LimitOrigin,
+    /// The interpolation member's per-query limit.
+    pub(crate) interp_query: LimitOrigin,
+    /// The interpolation member's overall deadline.
+    pub(crate) interp_overall: LimitOrigin,
+}
+
+impl LimitOrigins {
+    /// Every limit a constant of mununu's own: a test's stop signal.
+    #[cfg(test)]
+    const FIXED: Self = Self {
+        wall: LimitOrigin::Fixed,
+        budget: LimitOrigin::Fixed,
+        interp_query: LimitOrigin::Fixed,
+        interp_overall: LimitOrigin::Fixed,
+    };
+
+    /// The full portfolio's ([`decide_reach_portfolio_with_members`]), from what
+    /// [`portfolio_member_timeouts`] reads: the time the run budget leaves (`remaining_ms`) with
+    /// the budget's setter, and the wall the caller passed with its setter.
+    pub(crate) fn of_portfolio(
+        remaining_ms: Option<u64>,
+        budget_set_by: SetBy,
+        wall: std::time::Duration,
+        wall_set_by: SetBy,
+    ) -> Self {
+        let budget = LimitOrigin::following(budget_set_by);
+        if remaining_ms.is_some() {
+            // Under a run budget the time left is every member's bound and the wall itself.
+            return Self {
+                wall: budget,
+                budget,
+                interp_query: budget,
+                interp_overall: budget,
+            };
+        }
+        // No run budget: the wall is the caller's, and the owned members keep their default
+        // constants unless the wall was raised above the subprocess default. (A budget with no
+        // deadline stops a run only by being cancelled, which production does when the request
+        // that asked is gone: nobody reads that report, so `budget` keeps the bounded reading.)
+        let unset = LimitOrigin::default_until_set(budget_set_by);
+        let wall_from = match wall_set_by.setting() {
+            Some(_) => LimitOrigin::Follows(wall_set_by),
+            None => unset,
+        };
+        let member = if wall > btormc::DEFAULT_TIMEOUT {
+            // The members are raised to the wall (mununu#892): whatever sets it sets them.
+            wall_from
+        } else if wall_set_by.setting().is_some() {
+            LimitOrigin::default_until_above(wall_set_by)
+        } else {
+            unset
+        };
+        Self {
+            wall: wall_from,
+            budget,
+            interp_query: member,
+            interp_overall: member,
+        }
+    }
+
+    /// The owned-only driver's ([`decide_reach_owned_only`]): its wall is the smaller of the
+    /// caller's `timeout_ms` and the time the run budget leaves (`left_ms`), so the setter of
+    /// whichever binds is the one to name; the interpolation member's overall deadline is that
+    /// wall, and its per-query limit is a constant there.
+    pub(crate) fn of_owned_only(
+        left_ms: Option<u32>,
+        budget_set_by: SetBy,
+        timeout_ms: u32,
+        timeout_set_by: SetBy,
+    ) -> Self {
+        let binding = match left_ms {
+            Some(left) if left < timeout_ms => budget_set_by,
+            _ => timeout_set_by,
+        };
+        let wall = LimitOrigin::following(binding);
+        Self {
+            wall,
+            budget: LimitOrigin::following(budget_set_by),
+            interp_query: LimitOrigin::Fixed,
+            interp_overall: wall,
+        }
+    }
+}
+
 /// Why a portfolio's shared stop flag went up: the one type that carries the reason
 /// (`member-stop-reason` in `docs/defect-classes.md`). One flag used to mean all four, and
 /// mununu#1028, #1044 and #1067 each peeled one meaning off into a flag of its own. The matches
@@ -485,10 +657,20 @@ impl StopCause {
 
     /// mununu#1039 / #1043 — the cause the post-join sweep gives a member this stop left with
     /// no verdict and no stop of its own on record; `None` when such a member stays in no list.
-    fn sweep_cause(self, wall_ms: u128) -> Option<String> {
+    fn sweep_cause(self, wall_ms: u128, limits: &LimitOrigins) -> Option<String> {
         match self {
-            StopCause::Wall => Some(clock_sweep_cause(true, wall_ms)),
-            StopCause::RunBudget => Some(clock_sweep_cause(false, wall_ms)),
+            StopCause::Wall => Some(clock_sweep_cause(true, wall_ms, limits.wall)),
+            StopCause::RunBudget => Some(clock_sweep_cause(false, wall_ms, limits.budget)),
+            StopCause::PeerDecided | StopCause::CallerCancelled => None,
+        }
+    }
+
+    /// mununu#1197 — the clock this stop is, in the report's words, with who set it; `None`
+    /// when the stop is not a clock's.
+    fn clock(self, limits: &LimitOrigins) -> Option<(&'static str, LimitOrigin)> {
+        match self {
+            StopCause::Wall => Some(("the portfolio's wall", limits.wall)),
+            StopCause::RunBudget => Some(("the run budget", limits.budget)),
             StopCause::PeerDecided | StopCause::CallerCancelled => None,
         }
     }
@@ -522,13 +704,34 @@ impl StopCause {
 /// It then records nothing itself, exactly as when the stop is a peer's, and the post-join sweep
 /// names it with the clock's cause, so the stop is never silent; only the member's own progress
 /// is lost in that window.
-#[derive(Debug, Default)]
+///
+/// mununu#1197 — it also carries who set each limit of the run ([`LimitOrigins`]), fixed when the
+/// driver builds it, so every report of a stop names the setting behind the limit. There is no
+/// `Default` outside tests: a driver states its origins.
+#[derive(Debug)]
 pub(crate) struct StopSignal {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cause: std::sync::atomic::AtomicU8,
+    limits: LimitOrigins,
+}
+
+#[cfg(test)]
+impl Default for StopSignal {
+    fn default() -> Self {
+        Self::new(LimitOrigins::FIXED)
+    }
 }
 
 impl StopSignal {
+    /// A lowered flag for a run whose limits come from `limits`.
+    fn new(limits: LimitOrigins) -> Self {
+        Self {
+            flag: std::sync::Arc::default(),
+            cause: std::sync::atomic::AtomicU8::new(0),
+            limits,
+        }
+    }
+
     /// Raise the flag for `cause`. A clock's cause replaces a peer's or the caller's (the
     /// watchdog checks the flag, then the clock: a verdict that lands between the two does not
     /// stop the clock from being recorded); a peer's or the caller's never replaces a cause
@@ -601,7 +804,7 @@ fn settle_native<T>(
             // mununu#1043 — the flag the member stopped on was the wall's or the budget's, not a
             // peer's verdict: a budget abstention, with the member's own progress as its cause.
             if stop.clock_stopped() {
-                note_refusal(abstained, member, clock_stopped(&progress));
+                note_refusal(abstained, member, clock_stopped(&progress, stop));
             }
             None
         }
@@ -943,7 +1146,25 @@ fn interp_member(
             if !stop.is_raised() {
                 note_refusal(undecided, "interp", reason);
             } else if stop.clock_stopped() {
-                note_refusal(abstained, "interp", clock_stopped(&reason));
+                note_refusal(abstained, "interp", clock_stopped(&reason, stop));
+            }
+            None
+        }
+        // mununu#1197 — the search ran into one of its own limits: the report says which
+        // setting that limit follows on this run, or that none does.
+        InterpSafetyVerdict::OutOfTime { limit, reason } => {
+            if !stop.is_raised() {
+                let origin = match limit {
+                    InterpLimit::Query => stop.limits.interp_query,
+                    InterpLimit::Overall => stop.limits.interp_overall,
+                };
+                note_refusal(
+                    undecided,
+                    "interp",
+                    format!("{reason}; {}", origin.remedy()),
+                );
+            } else if stop.clock_stopped() {
+                note_refusal(abstained, "interp", clock_stopped(&reason, stop));
             }
             None
         }
@@ -1301,6 +1522,12 @@ pub struct ReachMembers {
     /// Off in every constant set (the replay is work the default verdict does not need); the
     /// `--witness` / `witness` callers turn it on.
     pub witness: bool,
+    /// mununu#1197 — who set the wall this run is called with (the `subprocess_timeout` of
+    /// [`decide_reach_portfolio_with_members`]): what a member that wall stops tells the user
+    /// to raise. [`SetBy::Mununu`] in every constant set, since a caller that passes a constant
+    /// of its own has no setting to name; the caller whose wall is a flag or a request field
+    /// says so ([`Self::with_wall_set_by`]).
+    pub wall_set_by: SetBy,
 }
 
 impl ReachMembers {
@@ -1318,6 +1545,7 @@ impl ReachMembers {
         ric3_bmc: true,
         ric3_engine: ric3::DEFAULT_ENGINE,
         witness: false,
+        wall_set_by: SetBy::Mununu,
     };
     /// N5.4 — the members that can carry a replayed counterexample: the witness fallback's set
     /// ([`crate::adapter::btor2::witness::witness_for_violation`]), with `witness` on. No exact,
@@ -1334,6 +1562,7 @@ impl ReachMembers {
         ric3_bmc: true,
         ric3_engine: ric3::DEFAULT_ENGINE,
         witness: true,
+        wall_set_by: SetBy::Mununu,
     };
     /// The proof-directed set for a `bad` that is a BOUND on a monitor (Track V's k-liveness
     /// rung): IC3 (rIC3 in its portfolio mode, Pono) and k-induction. No exact (bit-blasting the
@@ -1354,6 +1583,7 @@ impl ReachMembers {
         ric3_bmc: false,
         ric3_engine: ric3::PORTFOLIO_ENGINE,
         witness: false,
+        wall_set_by: SetBy::Mununu,
     };
 
     /// [`Self::PROOF_DIRECTED`] with rIC3 as ONE `-e ic3` process instead of its own
@@ -1386,6 +1616,14 @@ impl ReachMembers {
     pub const fn with_witness(self, on: bool) -> Self {
         Self {
             witness: on,
+            ..self
+        }
+    }
+
+    /// The same members, for a run whose wall `by` set ([`Self::wall_set_by`]).
+    pub const fn with_wall_set_by(self, by: SetBy) -> Self {
+        Self {
+            wall_set_by: by,
             ..self
         }
     }
@@ -1636,7 +1874,15 @@ fn decide_with_members_using(
     if budget.expired() {
         return ReachOutcome::default();
     }
-    let t = portfolio_member_timeouts(budget.remaining_ms(), subprocess_timeout);
+    let remaining_ms = budget.remaining_ms();
+    // mununu#1197 — who set each limit, from the same two inputs the limits themselves come from.
+    let limits = LimitOrigins::of_portfolio(
+        remaining_ms,
+        budget.set_by(),
+        subprocess_timeout,
+        members.wall_set_by,
+    );
+    let t = portfolio_member_timeouts(remaining_ms, subprocess_timeout);
     let subprocess_timeout = t.subprocess;
     let content = emit_btor2(file);
     // Raising the wall budget signals "reach deeper" — so lift btormc's depth cap too.
@@ -1656,7 +1902,7 @@ fn decide_with_members_using(
     // the slowest member's timeout. A member still running when the flag is set is not
     // cross-checked, exactly as in the owned-only driver; every member is individually
     // sound, so the decision itself is.
-    let stop_signal = std::sync::Arc::new(StopSignal::default());
+    let stop_signal = std::sync::Arc::new(StopSignal::new(limits));
     let stop: &StopSignal = &stop_signal;
     let decided_flag = stop.flag_arc();
     let decided: &AtomicBool = stop.flag();
@@ -1901,9 +2147,11 @@ fn decide_with_members_using(
                 note_refusal(
                     abstained,
                     "exact",
-                    "abandoned at the run budget's deadline: one BDD operation was still running \
-                     (a single OxiDD apply does not poll the budget, mununu#996)"
-                        .to_string(),
+                    format!(
+                        "abandoned at the run budget's deadline: one BDD operation was still \
+                         running (a single OxiDD apply does not poll the budget, mununu#996); {}",
+                        limits.budget.remedy()
+                    ),
                 );
                 None
             }
@@ -1954,7 +2202,7 @@ fn decide_with_members_using(
     // clock rose in the same instant (the watchdog's check races the peer's store).
     if let Some(cause) = stop
         .cause()
-        .and_then(|c| c.sweep_cause(subprocess_timeout.as_millis()))
+        .and_then(|c| c.sweep_cause(subprocess_timeout.as_millis(), &limits))
         && !any_definite(&members)
     {
         for name in stopped_by_wall_unrecorded(&started, &members) {
@@ -1965,14 +2213,20 @@ fn decide_with_members_using(
 }
 
 /// mununu#1039 / #1043 — the cause the post-join sweep records: the wall's, or the run budget's.
-fn clock_sweep_cause(wall_fired: bool, wall_ms: u128) -> String {
+/// mununu#1197 — it closes with the setting that clock follows on this run (`origin`), where it
+/// used to list the settings of every verb.
+fn clock_sweep_cause(wall_fired: bool, wall_ms: u128, origin: LimitOrigin) -> String {
     if wall_fired {
         format!(
-            "stopped at the portfolio's wall deadline ({wall_ms} ms: `--timeout-ms` on the `btor2` \
-             verbs, the run budget on `sv verify-auto`) before it reached a verdict"
+            "stopped at the portfolio's wall deadline ({wall_ms} ms) before it reached a \
+             verdict; {}",
+            origin.remedy()
         )
     } else {
-        "stopped when the run budget expired, before it reached a verdict".to_string()
+        format!(
+            "stopped when the run budget expired, before it reached a verdict; {}",
+            origin.remedy()
+        )
     }
 }
 
@@ -2148,18 +2402,28 @@ fn run_owned_cex(
 ///   `"cex"` engine so a native-safe vs cex-violated split still raises the
 ///   [`ReachVerdict::Contradiction`] alarm rather than being silently merged.
 pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcome {
-    decide_reach_owned_only_with_witness(file, timeout_ms, false)
+    // A caller of this form passes a constant of its own: no setting to name (mununu#1197).
+    decide_reach_owned_only_with_witness(file, timeout_ms, SetBy::Mununu, false)
 }
 
 /// [`decide_reach_owned_only`] with the owned trace carriers (`sat-bmc`, and `ic3` when opted
 /// in) carrying their replayed counterexample out when `witness` ([`ReachOutcome::trace`],
 /// N5.4). The `cex` / `boolector` deep search and the exact member carry none.
+/// `timeout_set_by` is who set `timeout_ms` (mununu#1197): the setting a member stopped at this
+/// wall is told to raise.
 pub fn decide_reach_owned_only_with_witness(
     file: &Btor2File,
     timeout_ms: u32,
+    timeout_set_by: SetBy,
     witness: bool,
 ) -> ReachOutcome {
-    decide_owned_only_using(file, timeout_ms, witness, &Runners::OWNED_ONLY)
+    decide_owned_only_using(
+        file,
+        timeout_ms,
+        timeout_set_by,
+        witness,
+        &Runners::OWNED_ONLY,
+    )
 }
 
 /// [`decide_reach_owned_only_with_witness`] with the members' runners as a parameter (as
@@ -2168,6 +2432,7 @@ pub fn decide_reach_owned_only_with_witness(
 fn decide_owned_only_using(
     file: &Btor2File,
     timeout_ms: u32,
+    timeout_set_by: SetBy,
     witness: bool,
     runners: &Runners,
 ) -> ReachOutcome {
@@ -2199,9 +2464,12 @@ fn decide_owned_only_using(
     if budget.expired() {
         return ReachOutcome::default();
     }
-    let timeout_ms = budget.remaining_ms().map_or(timeout_ms, |left| {
-        timeout_ms.min(u32::try_from(left).unwrap_or(u32::MAX))
-    });
+    let left_ms = budget
+        .remaining_ms()
+        .map(|left| u32::try_from(left).unwrap_or(u32::MAX));
+    // mununu#1197 — who set the wall that binds, read before the clamp folds the two together.
+    let limits = LimitOrigins::of_owned_only(left_ms, budget.set_by(), timeout_ms, timeout_set_by);
+    let timeout_ms = left_ms.map_or(timeout_ms, |left| timeout_ms.min(left));
 
     // Detached threads + a result channel (NOT `thread::scope`) so the collector can
     // RETURN the moment a definite verdict arrives, without joining the slow members.
@@ -2222,7 +2490,7 @@ fn decide_owned_only_using(
     let content = Arc::new(emit_btor2(&file));
     // This driver has no watchdog: its flag is raised only by a member's verdict, so a member
     // that stops on it is in no list (mununu#1043).
-    let stop = Arc::new(StopSignal::default());
+    let stop = Arc::new(StopSignal::new(limits));
     let decided = stop.flag_arc();
     let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
     let (tx, rx) = mpsc::channel::<(&'static str, OwnedReport)>();
@@ -2456,7 +2724,7 @@ fn decide_owned_only_using(
         }
     } else if reachable_by.is_empty() && unreachable_by.is_empty() && heard < members.len() {
         let accounted: Vec<&'static str> = reported.iter().chain(dead.iter()).copied().collect();
-        for (m, cause) in unreported_at_deadline(&members, &accounted, timeout_ms) {
+        for (m, cause) in unreported_at_deadline(&members, &accounted, timeout_ms, limits.wall) {
             note_refusal(&abstained, m, cause);
         }
     }
@@ -2652,6 +2920,7 @@ fn unreported_at_deadline(
     members: &[&'static str],
     reported: &[&'static str],
     timeout_ms: u32,
+    origin: LimitOrigin,
 ) -> Vec<(&'static str, String)> {
     members
         .iter()
@@ -2662,7 +2931,8 @@ fn unreported_at_deadline(
                 m,
                 format!(
                     "still running at the owned-only wall deadline ({timeout_ms} ms); no result \
-                     was collected"
+                     was collected; {}",
+                    origin.remedy()
                 ),
             )
         })
@@ -2732,7 +3002,11 @@ mod tests {
         for (cause, clock) in all(StopCause::PeerDecided) {
             assert_eq!(StopCause::from_code(cause.code()), Some(cause));
             assert_eq!(cause.is_clock(), clock, "{cause:?}");
-            assert_eq!(cause.sweep_cause(60_000).is_some(), clock, "{cause:?}");
+            assert_eq!(
+                cause.sweep_cause(60_000, &LimitOrigins::FIXED).is_some(),
+                clock,
+                "{cause:?}"
+            );
             let stop = raised(cause);
             assert!(stop.is_raised());
             assert_eq!(stop.cause(), Some(cause));
@@ -2749,7 +3023,7 @@ mod tests {
             );
             assert_eq!(v, None);
             let want = if clock {
-                vec![("ic3", clock_stopped("at frame 2"))]
+                vec![("ic3", clock_stopped("at frame 2", &stop))]
             } else {
                 Vec::new()
             };
@@ -2763,7 +3037,7 @@ mod tests {
                 }
             });
             let want = if clock {
-                vec![("interp", clock_stopped("no fixpoint"))]
+                vec![("interp", clock_stopped("no fixpoint", &stop))]
             } else {
                 Vec::new()
             };
@@ -2788,12 +3062,12 @@ mod tests {
         assert_eq!(StopCause::from_code(0), None);
         assert_eq!(StopSignal::default().cause(), None);
         assert_eq!(
-            StopCause::Wall.sweep_cause(60_000),
-            Some(clock_sweep_cause(true, 60_000))
+            StopCause::Wall.sweep_cause(60_000, &LimitOrigins::FIXED),
+            Some(clock_sweep_cause(true, 60_000, LimitOrigin::Fixed))
         );
         assert_eq!(
-            StopCause::RunBudget.sweep_cause(60_000),
-            Some(clock_sweep_cause(false, 60_000))
+            StopCause::RunBudget.sweep_cause(60_000, &LimitOrigins::FIXED),
+            Some(clock_sweep_cause(false, 60_000, LimitOrigin::Fixed))
         );
     }
 
@@ -3090,7 +3364,7 @@ mod tests {
     #[test]
     fn the_owned_only_driver_carries_a_trace_when_asked() {
         let file = parser::parse(COUNTER_TO_SEVEN).unwrap();
-        let out = decide_reach_owned_only_with_witness(&file, 60_000, true);
+        let out = decide_reach_owned_only_with_witness(&file, 60_000, SetBy::Mununu, true);
         assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
         let carriers = ["sat-bmc", "ic3"];
         // The trace is a carrier's own unless a non-carrying member decided first and the
@@ -3188,6 +3462,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let alone = decide_reach_portfolio_with_members(
             &file,
@@ -3283,6 +3558,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let out = decide_with_members_using(
             &file,
@@ -3321,6 +3597,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let out = decide_with_members_using(
             &file,
@@ -3396,17 +3673,265 @@ mod tests {
     }
 
     /// mununu#1043 — the sweep names which clock stopped the member.
+    /// mununu#1197 — and, for every setter, the setting that clock follows and no other.
     #[test]
     fn the_clock_sweep_names_the_wall_or_the_budget() {
-        assert_eq!(
-            clock_sweep_cause(true, 60_000),
-            "stopped at the portfolio's wall deadline (60000 ms: `--timeout-ms` on the `btor2` \
-             verbs, the run budget on `sv verify-auto`) before it reached a verdict"
-        );
-        assert_eq!(
-            clock_sweep_cause(false, 60_000),
-            "stopped when the run budget expired, before it reached a verdict"
-        );
+        for by in SetBy::ALL {
+            let origin = LimitOrigin::following(by);
+            let wall = clock_sweep_cause(true, 60_000, origin);
+            let budget = clock_sweep_cause(false, 60_000, origin);
+            assert_ne!(wall, budget, "{by:?}");
+            assert!(wall.contains("60000 ms"), "{wall}");
+            for text in [&wall, &budget] {
+                assert_names_only(text, by);
+            }
+        }
+    }
+
+    /// `text` names the setting of `by` when it has one, and the setting of no other setter.
+    fn assert_names_only(text: &str, by: SetBy) {
+        for other in SetBy::ALL {
+            let Some(setting) = other.setting() else {
+                continue;
+            };
+            assert_eq!(
+                text.contains(setting),
+                other == by,
+                "{by:?} / {other:?}: {text}"
+            );
+        }
+        if by.setting().is_none() {
+            assert!(text.ends_with(NO_SETTING), "{text}");
+        }
+    }
+
+    /// mununu#1197 — a limit's origin over every setter. A setter with a setting is named by each
+    /// of the three forms, and no other setting is; the three texts differ, because they tell the
+    /// user three different things to do. A setter with none collapses every form to `Fixed`,
+    /// which says that no setting changes the limit.
+    #[test]
+    fn x1197_a_limit_origin_names_its_setter_or_says_there_is_none() {
+        for by in SetBy::ALL {
+            let forms = [
+                LimitOrigin::following(by),
+                LimitOrigin::default_until_above(by),
+                LimitOrigin::default_until_set(by),
+            ];
+            if by.setting().is_none() {
+                assert_eq!(forms, [LimitOrigin::Fixed; 3], "{by:?}");
+            } else {
+                assert_eq!(
+                    forms,
+                    [
+                        LimitOrigin::Follows(by),
+                        LimitOrigin::DefaultUntilAbove(by),
+                        LimitOrigin::DefaultUntilSet(by),
+                    ]
+                );
+                let texts: std::collections::BTreeSet<String> =
+                    forms.iter().map(|f| f.remedy()).collect();
+                assert_eq!(texts.len(), 3, "{by:?}: {texts:?}");
+            }
+            for form in forms {
+                assert_names_only(&form.remedy(), by);
+            }
+        }
+        assert_names_only(&LimitOrigin::Fixed.remedy(), SetBy::Mununu);
+    }
+
+    /// mununu#1197 — the full portfolio's limits, one row per way its two inputs combine: the
+    /// time a run budget leaves (with who set the budget) and the wall (with who set it). The
+    /// rows follow `portfolio_member_timeouts`: under a bounded budget the time left is every
+    /// limit; with none, the wall is the caller's and the members keep their defaults until the
+    /// wall is above the subprocess default.
+    #[test]
+    fn x1197_the_full_portfolio_reads_each_limit_from_the_budget_and_the_wall() {
+        use LimitOrigin::{DefaultUntilAbove, DefaultUntilSet, Fixed, Follows};
+        let at = btormc::DEFAULT_TIMEOUT;
+        let above = at + std::time::Duration::from_millis(1);
+        let (flag, env, own) = (SetBy::TimeoutFlag, SetBy::RunBudgetEnv, SetBy::Mununu);
+        // (time left, budget setter, wall, wall setter) → (wall, budget, the interp limits)
+        let rows = [
+            // A bounded budget is every limit, whatever the wall and whoever set it.
+            (
+                Some(5_000),
+                env,
+                above,
+                flag,
+                Follows(env),
+                Follows(env),
+                Follows(env),
+            ),
+            (
+                Some(5_000),
+                env,
+                at,
+                own,
+                Follows(env),
+                Follows(env),
+                Follows(env),
+            ),
+            // … and one of mununu's own leaves nothing to name, though the wall has a flag.
+            (Some(5_000), own, above, flag, Fixed, Fixed, Fixed),
+            // No budget, a wall the caller's setting raised above the default: the members
+            // follow it.
+            (None, own, above, flag, Follows(flag), Fixed, Follows(flag)),
+            // No budget, a wall of the caller's setting at the default: the members keep theirs.
+            (
+                None,
+                own,
+                at,
+                flag,
+                Follows(flag),
+                Fixed,
+                DefaultUntilAbove(flag),
+            ),
+            // A constant wall under a budget that has a setting and no deadline yet: a deadline
+            // given with that setting replaces the wall and the members' limits alike.
+            (
+                None,
+                flag,
+                at,
+                own,
+                DefaultUntilSet(flag),
+                Follows(flag),
+                DefaultUntilSet(flag),
+            ),
+            (
+                None,
+                flag,
+                above,
+                own,
+                DefaultUntilSet(flag),
+                Follows(flag),
+                DefaultUntilSet(flag),
+            ),
+            // Nothing set by anyone.
+            (None, own, at, own, Fixed, Fixed, Fixed),
+            (None, own, above, own, Fixed, Fixed, Fixed),
+        ];
+        for (left, budget_by, wall, wall_by, want_wall, want_budget, want_interp) in rows {
+            let got = LimitOrigins::of_portfolio(left, budget_by, wall, wall_by);
+            let want = LimitOrigins {
+                wall: want_wall,
+                budget: want_budget,
+                interp_query: want_interp,
+                interp_overall: want_interp,
+            };
+            assert_eq!(got, want, "{left:?} {budget_by:?} {wall:?} {wall_by:?}");
+        }
+    }
+
+    /// mununu#1197 — the owned-only driver's wall is the smaller of its caller's timeout and the
+    /// time the run budget leaves, so the setter it names is the one of whichever binds. The
+    /// interpolation member's overall deadline is that wall; its per-query limit is a constant.
+    #[test]
+    fn x1197_the_owned_only_driver_names_the_setter_of_the_wall_that_binds() {
+        use LimitOrigin::{Fixed, Follows};
+        let (flag, env, own) = (SetBy::TimeoutFlag, SetBy::PropertyBudgetEnv, SetBy::Mununu);
+        // (time left, budget setter, timeout, timeout setter) → (wall, budget)
+        let rows = [
+            // The budget leaves less than the timeout: the budget binds.
+            (Some(1_000), env, 60_000, flag, Follows(env), Follows(env)),
+            // It leaves as much, or more, or there is none: the timeout binds.
+            (Some(60_000), env, 60_000, flag, Follows(flag), Follows(env)),
+            (Some(90_000), env, 60_000, flag, Follows(flag), Follows(env)),
+            (None, own, 60_000, flag, Follows(flag), Fixed),
+            // A binding budget of mununu's own is not the flag's to raise.
+            (Some(1_000), own, 60_000, flag, Fixed, Fixed),
+            // A binding timeout of mununu's own is not the budget's variable's to raise.
+            (Some(90_000), env, 60_000, own, Fixed, Follows(env)),
+            (None, own, 60_000, own, Fixed, Fixed),
+        ];
+        for (left, budget_by, timeout_ms, timeout_by, want_wall, want_budget) in rows {
+            let got = LimitOrigins::of_owned_only(left, budget_by, timeout_ms, timeout_by);
+            let want = LimitOrigins {
+                wall: want_wall,
+                budget: want_budget,
+                interp_query: Fixed,
+                interp_overall: want_wall,
+            };
+            assert_eq!(
+                got, want,
+                "{left:?} {budget_by:?} {timeout_ms} {timeout_by:?}"
+            );
+        }
+    }
+
+    /// mununu#1197 — the interpolation member at its seam: a search that ran into one of its own
+    /// two limits is `undecided` with the search's reason and the origin of THAT limit; the same
+    /// search stopped by the wall or the run budget is an abstention that names that clock's
+    /// setter; stopped by a peer or the caller it is in no list. Each of the four limits has a
+    /// different setter here, so a report that read the wrong one names the wrong setting.
+    #[test]
+    fn x1197_an_interp_limit_stop_closes_with_the_origin_of_the_limit_it_hit() {
+        let limits = LimitOrigins {
+            wall: LimitOrigin::Follows(SetBy::TimeoutField),
+            budget: LimitOrigin::Follows(SetBy::RunBudgetEnv),
+            interp_query: LimitOrigin::DefaultUntilAbove(SetBy::TimeoutFlag),
+            interp_overall: LimitOrigin::Follows(SetBy::PropertyBudgetEnv),
+        };
+        type List = Vec<(&'static str, String)>;
+        let run = |cause: Option<StopCause>, limit: InterpLimit| -> (List, List, List) {
+            let stop = StopSignal::new(limits);
+            if let Some(cause) = cause {
+                stop.raise(cause);
+            }
+            let (refused, abstained, undecided) = (
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+            );
+            let v = interp_member(&refused, &abstained, &undecided, &stop, Ok(()), || {
+                InterpSafetyVerdict::OutOfTime {
+                    limit,
+                    reason: "ran out".to_string(),
+                }
+            });
+            assert_eq!(v, None);
+            (
+                refused.into_inner().unwrap(),
+                abstained.into_inner().unwrap(),
+                undecided.into_inner().unwrap(),
+            )
+        };
+        for (limit, origin, by) in [
+            (InterpLimit::Query, limits.interp_query, SetBy::TimeoutFlag),
+            (
+                InterpLimit::Overall,
+                limits.interp_overall,
+                SetBy::PropertyBudgetEnv,
+            ),
+        ] {
+            // Its own limit: undecided, the search's reason first, that limit's remedy last.
+            let (refused, abstained, undecided) = run(None, limit);
+            assert!(refused.is_empty() && abstained.is_empty(), "{limit:?}");
+            assert_eq!(undecided.len(), 1, "{limit:?}: {undecided:?}");
+            let (member, text) = &undecided[0];
+            assert_eq!(*member, "interp");
+            assert!(text.starts_with("ran out"), "{text}");
+            assert!(text.ends_with(&origin.remedy()), "{text}");
+            assert_names_only(text, by);
+            // The portfolio's clock: an abstention that names the clock's setter, not the limit's.
+            for (cause, clock_by) in [
+                (StopCause::Wall, SetBy::TimeoutField),
+                (StopCause::RunBudget, SetBy::RunBudgetEnv),
+            ] {
+                let (refused, abstained, undecided) = run(Some(cause), limit);
+                assert!(refused.is_empty() && undecided.is_empty(), "{cause:?}");
+                assert_eq!(abstained.len(), 1, "{cause:?}: {abstained:?}");
+                assert!(abstained[0].1.starts_with("ran out"), "{abstained:?}");
+                assert_names_only(&abstained[0].1, clock_by);
+            }
+            // A peer's verdict or the caller's cancel: in no list.
+            for cause in [StopCause::PeerDecided, StopCause::CallerCancelled] {
+                let (refused, abstained, undecided) = run(Some(cause), limit);
+                assert!(
+                    refused.is_empty() && abstained.is_empty() && undecided.is_empty(),
+                    "{cause:?}"
+                );
+            }
+        }
     }
 
     /// mununu#1022 — an 8-bit counter stepping by 2 from 0 never reaches 255, but 127 bad-free
@@ -3450,6 +3975,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let out = decide_reach_portfolio_with_members(
             &file,
@@ -3590,8 +4116,7 @@ mod tests {
             *abstained.lock().unwrap(),
             vec![(
                 "ic3",
-                "IC3 stopped at frame 2; stopped by the portfolio's wall or run budget before a verdict"
-                    .to_string()
+                clock_stopped("IC3 stopped at frame 2", &raised(StopCause::Wall))
             )]
         );
         assert!(refused.lock().unwrap().is_empty() && undecided.lock().unwrap().is_empty());
@@ -3623,16 +4148,24 @@ mod tests {
     /// The owned-only collector names every member that had not reported at its deadline.
     #[test]
     fn the_owned_driver_names_the_members_still_running_at_its_deadline() {
-        let left = unreported_at_deadline(&OWNED_MEMBERS, &["native", "interp"], 300_000);
+        let left = unreported_at_deadline(
+            &OWNED_MEMBERS,
+            &["native", "interp"],
+            300_000,
+            LimitOrigin::Fixed,
+        );
         let names: Vec<_> = left.iter().map(|(m, _)| *m).collect();
         assert_eq!(names, vec![OWNED_MEMBERS[2], "sat-bmc", "exact"]);
         assert!(left[2].1.contains("300000 ms"), "{}", left[2].1);
-        assert!(unreported_at_deadline(&OWNED_MEMBERS, &OWNED_MEMBERS, 1).is_empty());
+        assert!(
+            unreported_at_deadline(&OWNED_MEMBERS, &OWNED_MEMBERS, 1, LimitOrigin::Fixed)
+                .is_empty()
+        );
         // N5.1 — the opt-in member is waited for only when it was started.
         let with = owned_members_for(true);
         assert_eq!(with.last(), Some(&"ic3"));
         assert_eq!(owned_members_for(false), OWNED_MEMBERS.to_vec());
-        let left = unreported_at_deadline(&with, &OWNED_MEMBERS, 7);
+        let left = unreported_at_deadline(&with, &OWNED_MEMBERS, 7, LimitOrigin::Fixed);
         assert_eq!(
             left.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
             vec!["ic3"]
@@ -3988,7 +4521,7 @@ mod tests {
             cex: |_, _, _| Ok(None),
             ..capped
         };
-        let owned = decide_owned_only_using(&safe, 20_000, false, &owned_table);
+        let owned = decide_owned_only_using(&safe, 20_000, SetBy::Mununu, false, &owned_table);
         assert_eq!(owned.verdict, ReachVerdict::Unknown, "{owned:?}");
         let names: Vec<&str> = owned.abstained.iter().map(|(m, _)| *m).collect();
         assert!(
@@ -4142,6 +4675,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let alone = decide_reach_portfolio_with_members(
             &file,
@@ -4292,6 +4826,7 @@ mod tests {
             ric3_bmc: true,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         // On a design this small depth 0 takes microseconds, so the dynamic step's first jump
         // lands near depth 416 666 and unrolling it took 5–26 s in the image (rIC3 1.5.2, four
@@ -4382,6 +4917,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let run = |src: &str| {
             decide_reach_portfolio_with_members(
@@ -4494,6 +5030,7 @@ mod tests {
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
             witness: false,
+            wall_set_by: SetBy::Mununu,
         };
         let run = |src: &str| {
             decide_reach_portfolio_with_members(
@@ -5077,7 +5614,7 @@ mod tests {
                 out.refused.is_empty() && out.undecided.is_empty(),
                 "{out:?}"
             );
-            let wall = clock_sweep_cause(true, NO_WALL.as_millis());
+            let wall = clock_sweep_cause(true, NO_WALL.as_millis(), LimitOrigin::Fixed);
             assert!(out.abstained.iter().all(|(_, why)| *why != wall), "{out:?}");
         }
 
@@ -5157,7 +5694,7 @@ mod tests {
             };
 
             fn run(runners: &Runners) -> ReachOutcome {
-                decide_owned_only_using(&counter(), NO_DEADLINE, false, runners)
+                decide_owned_only_using(&counter(), NO_DEADLINE, SetBy::Mununu, false, runners)
             }
 
             /// The driver starts `ic3` unless `MUNUNU_REACH_IC3=0`; its rows follow the setting.
@@ -5262,7 +5799,7 @@ mod tests {
             /// the cause the collector gives (`unreported_at_deadline`).
             #[test]
             fn at_the_deadline_every_member_still_running_is_named() {
-                let out = decide_owned_only_using(&counter(), 50, false, &ALL_STUCK);
+                let out = decide_owned_only_using(&counter(), 50, SetBy::Mununu, false, &ALL_STUCK);
                 assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
                 assert!(
                     out.refused.is_empty() && out.undecided.is_empty(),
@@ -5270,7 +5807,12 @@ mod tests {
                 );
                 assert_eq!(
                     sorted(out.abstained),
-                    sorted(unreported_at_deadline(&owned_members(), &[], 50))
+                    sorted(unreported_at_deadline(
+                        &owned_members(),
+                        &[],
+                        50,
+                        LimitOrigin::Fixed
+                    ))
                 );
             }
 
@@ -5298,13 +5840,25 @@ mod tests {
                     if *name == "ic3" && !ic3_starts() {
                         continue;
                     }
-                    let with = decide_owned_only_using(&counter(), NO_DEADLINE, true, runners);
+                    let with = decide_owned_only_using(
+                        &counter(),
+                        NO_DEADLINE,
+                        SetBy::Mununu,
+                        true,
+                        runners,
+                    );
                     assert_eq!(with.reachable_by, vec![*name], "{with:?}");
                     let carried = with.trace.as_ref().expect("the decider carried its trace");
                     assert_eq!((carried.by, carried.depth()), (*name, 7), "{with:?}");
                     assert!(with.trace_replay_failed.is_empty(), "{with:?}");
                     assert_eq!(
-                        decide_owned_only_using(&counter(), NO_DEADLINE, false, runners),
+                        decide_owned_only_using(
+                            &counter(),
+                            NO_DEADLINE,
+                            SetBy::Mununu,
+                            false,
+                            runners
+                        ),
                         ReachOutcome::from_sets(vec![*name], vec![])
                     );
                 }

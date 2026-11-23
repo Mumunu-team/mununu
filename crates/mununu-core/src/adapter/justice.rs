@@ -197,6 +197,9 @@ pub struct JusticeOptions {
     pub rung: JusticeRung,
     /// The whole run's wall-clock budget per justice set (`None` = the engines' own budgets).
     pub budget_ms: Option<u64>,
+    /// Who sets `budget_ms` — the verb's flag, the request's field, or nothing a user writes
+    /// (mununu#1197): a portfolio member stopped at a limit derived from it names that setting.
+    pub budget_set_by: crate::adapter::run_budget::SetBy,
     /// Run the exact ladder, the l2s rung and the k-liveness rung CONCURRENTLY, first definite
     /// verdict wins and the others are cancelled; `false` = `exact ≤ EXACT_SLICE → l2s →
     /// kliveness → exact with the remainder`.
@@ -215,6 +218,7 @@ pub fn verify_justice(btor2: &str, rung: JusticeRung) -> Result<Vec<JusticeVerdi
         &JusticeOptions {
             rung,
             budget_ms: None,
+            budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
             parallel_rungs: false,
         },
     )
@@ -290,16 +294,17 @@ fn l2s_rung(
     named: &str,
     lits: &[String],
     budget: Option<std::time::Duration>,
+    budget_set_by: crate::adapter::run_budget::SetBy,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
     use crate::adapter::run_budget;
     let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
-    let scoped = budget.map(|b| {
-        let ms = u64::try_from(b.as_millis()).unwrap_or(u64::MAX);
-        run_budget::Budget::child(&run_budget::current(), Some(ms))
-    });
-    let _guard = scoped.as_ref().map(run_budget::enter);
+    // Entered with or without a deadline: an unbounded child still says whose setting would
+    // bound the rung (mununu#1197), and shares the outer cancel flag as before.
+    let ms = budget.map(|b| u64::try_from(b.as_millis()).unwrap_or(u64::MAX));
+    let scoped = run_budget::Budget::child(&run_budget::current(), ms, budget_set_by);
+    let _guard = run_budget::enter(&scoped);
     match response_liveness_rescue_under_fairness_cancellable(
         named,
         &atom("mununu_true"),
@@ -326,7 +331,7 @@ fn l2s_rung(
         }
         Some((LivenessVerdict::Inconclusive, outcome)) => {
             // On a contradiction the unconfirmed side is the first thing a reader needs.
-            let mut notes = vec![l2s_undecided_note(budget, &outcome)];
+            let mut notes = vec![l2s_undecided_note(budget, scoped.set_by(), &outcome)];
             notes.extend(l2s_unconfirmed_notes(&outcome));
             (PropertyVerdict::Unknown, Vec::new(), notes)
         }
@@ -359,6 +364,7 @@ fn kliveness_rung(
     design: &str,
     justice_index: usize,
     budget: Option<std::time::Duration>,
+    budget_set_by: crate::adapter::run_budget::SetBy,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
@@ -366,11 +372,11 @@ fn kliveness_rung(
         KlivenessLadder, emit_kliveness_monitor, kliveness_ladder,
     };
     use crate::adapter::run_budget;
-    let scoped = budget.map(|b| {
-        let ms = u64::try_from(b.as_millis()).unwrap_or(u64::MAX);
-        run_budget::Budget::child(&run_budget::current(), Some(ms))
-    });
-    let _guard = scoped.as_ref().map(run_budget::enter);
+    // Entered with or without a deadline: an unbounded child still says whose setting would
+    // bound the rung (mununu#1197), and shares the outer cancel flag as before.
+    let ms = budget.map(|b| u64::try_from(b.as_millis()).unwrap_or(u64::MAX));
+    let scoped = run_budget::Budget::child(&run_budget::current(), ms, budget_set_by);
+    let _guard = run_budget::enter(&scoped);
     let (tried, member_notes) = match kliveness_ladder(
         &|w| emit_kliveness_monitor(design, justice_index, w),
         cancel,
@@ -427,8 +433,19 @@ fn l2s_unconfirmed_notes(outcome: &crate::adapter::reach_portfolio::ReachOutcome
 /// The l2s rung's abstention note: the budget the portfolio ran under and every member's refusal
 /// or budget abstention, so a reader can tell "more time may help" from "no member carries this"
 /// (Failure Paths: the note used to say only "undecided", hiding a fixed 60 s member cap).
+///
+/// `set_by` is the setter of the budget the rung entered ([`Budget::set_by`]: with no deadline,
+/// whose setting would set one). With no budget the members ran at their defaults, and the note
+/// closes that fact with the clause of a default that a given limit replaces (mununu#1197): the
+/// setting in the name of the surface that ran the verb, or that there is none. This arm used to
+/// spell the CLI's flag, and the API's route reaches it too. Under a budget the note states the
+/// fact alone: a member that refused is not helped by more time, and a member the portfolio's
+/// clock stopped closes its own reason with the clause.
+///
+/// [`Budget::set_by`]: crate::adapter::run_budget::Budget::set_by
 fn l2s_undecided_note(
     budget: Option<std::time::Duration>,
+    set_by: crate::adapter::run_budget::SetBy,
     outcome: &crate::adapter::reach_portfolio::ReachOutcome,
 ) -> String {
     let mut note = match budget {
@@ -436,9 +453,11 @@ fn l2s_undecided_note(
             "l2s: the reachability portfolio left the fair-cycle monitor undecided within a {} ms budget",
             b.as_millis()
         ),
-        None => "l2s: the reachability portfolio left the fair-cycle monitor undecided at the \
-                 members' default budgets (60 s per subprocess member; `--timeout-ms` raises them)"
-            .to_string(),
+        None => format!(
+            "l2s: the reachability portfolio left the fair-cycle monitor undecided at the \
+             members' default budgets (60 s per subprocess member); {}",
+            crate::adapter::reach_portfolio::LimitOrigin::default_until_set(set_by).remedy()
+        ),
     };
     for (member, why) in &outcome.refused {
         note.push_str(&format!("; {member} refused: {why}"));
@@ -588,6 +607,7 @@ pub fn verify_justice_with(
                     &named,
                     &lits,
                     total,
+                    opts.budget_set_by,
                     None,
                     crate::adapter::reach_portfolio::ReachMembers::ALL,
                 );
@@ -600,6 +620,7 @@ pub fn verify_justice_with(
                     &named,
                     index,
                     total,
+                    opts.budget_set_by,
                     None,
                     crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
                 );
@@ -656,6 +677,7 @@ pub fn verify_justice_with(
                                 named,
                                 lits,
                                 total,
+                                opts.budget_set_by,
                                 Some(cancel),
                                 crate::adapter::reach_portfolio::ReachMembers::cancellable(),
                             );
@@ -685,6 +707,7 @@ pub fn verify_justice_with(
                                 named,
                                 index,
                                 total,
+                                opts.budget_set_by,
                                 Some(cancel),
                                 crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED_RACED,
                             );
@@ -741,6 +764,7 @@ pub fn verify_justice_with(
                         &named,
                         &lits,
                         l2s_budget,
+                        opts.budget_set_by,
                         None,
                         crate::adapter::reach_portfolio::ReachMembers::ALL,
                     );
@@ -759,6 +783,7 @@ pub fn verify_justice_with(
                         &named,
                         index,
                         kl_budget,
+                        opts.budget_set_by,
                         None,
                         crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
                     );
@@ -1164,6 +1189,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1184,6 +1210,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: true,
             },
         )
@@ -1213,6 +1240,7 @@ mod policy_tests {
                 &JusticeOptions {
                     rung: JusticeRung::Both,
                     budget_ms: Some(60_000),
+                    budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                     parallel_rungs: true,
                 },
             )
@@ -1266,6 +1294,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: true,
             },
         )
@@ -1308,6 +1337,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::L2s,
                 budget_ms: Some(0),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1322,31 +1352,56 @@ mod policy_tests {
         );
     }
 
+    /// mununu#1197 — with no budget the note closes with the clause of a default that a given
+    /// limit replaces, in the name of whoever would set that limit: the CLI's flag on the CLI,
+    /// the request's field on the API, and that there is no setting when the limit is mununu's
+    /// own. It used to spell the CLI's flag whoever ran the verb. Every setter is a row; the
+    /// note names its own setting and no other's.
     #[test]
     fn the_l2s_abstention_note_names_the_default_cap_and_every_member_reason() {
+        use crate::adapter::reach_portfolio::LimitOrigin;
+        use crate::adapter::run_budget::SetBy;
         let outcome = crate::adapter::reach_portfolio::ReachOutcome {
             refused: vec![("pono", "array sort unsupported".to_string())],
             abstained: vec![("native", "resource limit at depth 9".to_string())],
             undecided: vec![("interp", "no fixpoint within 24 iterations".to_string())],
             ..Default::default()
         };
-        let note = l2s_undecided_note(None, &outcome);
-        assert!(
-            note.contains("interp undecided: no fixpoint within 24 iterations"),
-            "{note}"
-        );
-        assert!(note.contains("60 s per subprocess member"), "{note}");
-        assert!(note.contains("--timeout-ms"), "{note}");
-        assert!(
-            note.contains("pono refused: array sort unsupported"),
-            "{note}"
-        );
-        assert!(
-            note.contains("native abstained: resource limit at depth 9"),
-            "{note}"
-        );
-        let bounded = l2s_undecided_note(Some(std::time::Duration::from_secs(5)), &outcome);
-        assert!(bounded.contains("within a 5000 ms budget"), "{bounded}");
+        for by in SetBy::ALL {
+            let note = l2s_undecided_note(None, by, &outcome);
+            let clause = LimitOrigin::default_until_set(by).remedy();
+            assert!(note.contains(&clause), "{by:?}: {note}");
+            for other in SetBy::ALL {
+                let Some(setting) = other.setting() else {
+                    continue;
+                };
+                assert_eq!(
+                    note.contains(setting),
+                    other == by,
+                    "under {by:?}, naming {setting}: {note}"
+                );
+            }
+            assert!(
+                note.contains("interp undecided: no fixpoint within 24 iterations"),
+                "{note}"
+            );
+            assert!(
+                note.contains("pono refused: array sort unsupported"),
+                "{note}"
+            );
+            assert!(
+                note.contains("native abstained: resource limit at depth 9"),
+                "{note}"
+            );
+            // Under a budget the note states the bound and names no setting of its own.
+            let bounded = l2s_undecided_note(Some(std::time::Duration::from_secs(5)), by, &outcome);
+            assert!(bounded.contains("5000 ms"), "{bounded}");
+            for other in SetBy::ALL {
+                if let Some(setting) = other.setting() {
+                    assert!(!bounded.contains(setting), "{by:?}: {bounded}");
+                }
+            }
+        }
     }
 
     /// Track V — the k-liveness rung proves the stuck design: `¬s` holds only at reset, so
@@ -1359,6 +1414,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Kliveness,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1390,6 +1446,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Kliveness,
                 budget_ms: Some(10_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1413,6 +1470,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Both,
                 budget_ms: Some(60_000),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )
@@ -1434,6 +1492,7 @@ mod policy_tests {
             &JusticeOptions {
                 rung: JusticeRung::Exact,
                 budget_ms: Some(0),
+                budget_set_by: crate::adapter::run_budget::SetBy::Mununu,
                 parallel_rungs: false,
             },
         )

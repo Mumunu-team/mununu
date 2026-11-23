@@ -1,6 +1,6 @@
 # Consumer briefing: a path the simulator did not confirm is named on every verb (2026-11)
 
-> Source of truth: [`ReachOutcome::unconfirmed`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L185) and [`member_notes`](../../crates/mununu-core/src/adapter/liveness_rescue.rs#L579) — surface: CLI+API — `sv verify-auto`, `btor2 verify-liveness` / `sv verify-liveness`, `btor2 verify-justice`, `btor2 verify-recoverability` / `sv verify-recoverability`, `btor2 check-fsm` / `sv check-fsm`, `sv cdc-lint`, `btor2 verify --fault … --target`, and their `POST /api/v1/…` peers
+> Source of truth: [`ReachOutcome::unconfirmed`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L186) and [`member_notes`](../../crates/mununu-core/src/adapter/liveness_rescue.rs#L579) — surface: CLI+API — `sv verify-auto`, `btor2 verify-liveness` / `sv verify-liveness`, `btor2 verify-justice`, `btor2 verify-recoverability` / `sv verify-recoverability`, `btor2 check-fsm` / `sv check-fsm`, `sv cdc-lint`, `btor2 verify --fault … --target`, and their `POST /api/v1/…` peers
 
 **Audience:** anyone who reads a `violated` (or a reached target, or a reached encoding) from a verb other than `btor2 verify`, or who matches on the text of `notes`, of a `cdc-lint` detail, or of a `trace_replay_failed` reason.
 

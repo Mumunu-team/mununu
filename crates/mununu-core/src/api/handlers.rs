@@ -32,7 +32,8 @@ use crate::mu_calculus::EvaluationOptions;
 /// under it that polls the budget — the portfolio members, the planner's per-property budgets,
 /// the subprocess helper that kills its child — stops instead of finishing for nobody. A body
 /// that installs its own budget derives it with `Budget::child(&current(), …)` so the flag is
-/// inherited.
+/// inherited, and tags it with the request field that set it (`SetBy::TimeoutField`, mununu#1197)
+/// so a stop at that budget names the field.
 async fn blocking<T, F>(f: F) -> ApiResult<T>
 where
     F: FnOnce() -> ApiResult<T> + Send + 'static,
@@ -951,6 +952,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         let budget = crate::adapter::run_budget::Budget::child(
             &crate::adapter::run_budget::current(),
             request.timeout_ms,
+            crate::adapter::run_budget::SetBy::TimeoutField,
         );
         let _budget = crate::adapter::run_budget::enter(&budget);
         let o = crate::adapter::fault_adversary::verify_fault_reach(
@@ -1031,7 +1033,9 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .map(std::time::Duration::from_millis)
             .unwrap_or(crate::adapter::btormc::DEFAULT_TIMEOUT),
         None,
-        crate::adapter::reach_portfolio::ReachMembers::shipped().with_witness(request.witness),
+        crate::adapter::reach_portfolio::ReachMembers::shipped()
+            .with_witness(request.witness)
+            .with_wall_set_by(crate::adapter::run_budget::SetBy::TimeoutField),
     );
     // `witness`: on a violation, the reset → `bad` path the deciding member carried out (N5.4,
     // `trace_by`), else re-derived (the trace carriers again, then native BMC); without one,
@@ -1042,6 +1046,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 &file,
                 request.witness_max_k.unwrap_or(200),
                 deadline,
+                crate::adapter::run_budget::SetBy::TimeoutField,
                 &outcome,
                 false,
             )
@@ -1118,6 +1123,7 @@ fn btor2_verify_justice_handler_impl(
         &JusticeOptions {
             rung,
             budget_ms: request.timeout_ms,
+            budget_set_by: crate::adapter::run_budget::SetBy::TimeoutField,
             parallel_rungs: request.parallel_rungs.unwrap_or(false),
         },
     )
