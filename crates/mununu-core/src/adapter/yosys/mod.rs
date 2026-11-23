@@ -448,27 +448,15 @@ fn run_sv_flatten_btor2(
 /// [`run_sv_flatten_btor2`] against an explicit lift cache (`None` = off) — N0.2. A hit returns
 /// the stored raw tool outputs with mununu's post-processing (clock domains, the multi-clock
 /// refusal) re-run on them; a miss runs the tools and stores the result; a cache that cannot be
-/// used for this lift is bypassed, with the reason on the artifacts — never a failure.
+/// used for this lift, or must not be ([`observed_tool_run`]), is bypassed, with the reason on
+/// the artifacts — never a failure.
 fn run_sv_flatten_btor2_with(
     content: &str,
     yopts: &YosysOptions,
     cache: Option<&LiftCache>,
     opt_in: MergeOptIn,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
-    let key: Result<Option<LiftCacheKey>, String> = match cache {
-        None => Ok(None),
-        Some(c) => match lift_cache_key(content, yopts) {
-            Ok(k) => Ok(Some(k)),
-            Err(reason) => {
-                tracing::warn!(
-                    target: "mununu::lift_cache",
-                    dir = %c.dir().display(),
-                    "lift cache bypassed: {reason}"
-                );
-                Err(reason)
-            }
-        },
-    };
+    let key = lift_cache_use(cache, content, yopts);
     if let (Some(c), Ok(Some(k))) = (cache, &key)
         && let Some(hit) = c.lookup(k)
     {
@@ -496,6 +484,61 @@ fn run_sv_flatten_btor2_with(
         }
     }
     Ok(artifacts)
+}
+
+/// What this lift does with the cache: `Ok(None)` when the cache is off, `Ok(Some(key))` to
+/// look the lift up and store it, `Err(why)` for a bypass (logged at `warn`): the lift runs its
+/// tools and neither reads nor writes the cache.
+fn lift_cache_use(
+    cache: Option<&LiftCache>,
+    content: &str,
+    yopts: &YosysOptions,
+) -> Result<Option<LiftCacheKey>, String> {
+    let Some(c) = cache else { return Ok(None) };
+    observed_tool_run()
+        .map_or_else(|| lift_cache_key(content, yopts), Err)
+        .map(Some)
+        .inspect_err(|reason| {
+            tracing::warn!(
+                target: "mununu::lift_cache",
+                dir = %c.dir().display(),
+                "lift cache bypassed: {reason}"
+            );
+        })
+}
+
+/// `MUNUNU_KEEP_YOSYS_TMP` (`1` / `true`): a lift's staging directory is kept.
+fn keep_yosys_tmp() -> bool {
+    crate::adapter::env_var::read("MUNUNU_KEEP_YOSYS_TMP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// `MUNUNU_DEBUG_YOSYS_SCRIPT` (set): the script of each yosys run is printed on stderr.
+fn debug_yosys_script() -> bool {
+    crate::adapter::env_var::read("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some()
+}
+
+/// A variable that shows a lift's tool run, and the function that says whether it is in force.
+type ToolRunObserver = (&'static str, fn() -> bool);
+
+/// The variables that show a lift's tool run, each with its reader. A cache hit runs no tool:
+/// it has no staging directory to keep and no script to print. So a lift under one of these
+/// does not use the cache (mununu#1232 — before it, the variable did nothing on a hit and
+/// nothing said so). A variable that shows what a tool run did belongs in this table.
+const TOOL_RUN_OBSERVERS: [ToolRunObserver; 2] = [
+    ("MUNUNU_KEEP_YOSYS_TMP", keep_yosys_tmp),
+    ("MUNUNU_DEBUG_YOSYS_SCRIPT", debug_yosys_script),
+];
+
+/// `Some(why)` when a variable of [`TOOL_RUN_OBSERVERS`] is in force: the reason this lift
+/// bypasses the cache, in the words of [`LiftCacheOutcome::Bypassed`].
+fn observed_tool_run() -> Option<String> {
+    let (name, _) = TOOL_RUN_OBSERVERS.iter().find(|(_, in_force)| in_force())?;
+    Some(format!(
+        "`{name}` is set and shows a tool run, so the tools ran and the lift cache was neither \
+         read nor written; unset it to use the cache"
+    ))
 }
 
 /// The cache key of this lift: the manifest of what it would tell its tools (N0.2). `Err` names
@@ -984,7 +1027,7 @@ fn run_sv_flatten_btor2_concrete(
     let log_path = plan.btor_path.with_file_name("yosys.log");
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
-        if crate::adapter::env_var::read("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
+        if debug_yosys_script() {
             eprintln!(
                 "MUNUNU_DEBUG yosys cwd={:?}\nMUNUNU_DEBUG script={script}",
                 plan.yosys_cwd
@@ -4358,10 +4401,10 @@ impl TempDir {
         let mut base = crate::adapter::staging_root().map_err(io_err)?;
         base.push(format!("{prefix}-{pid}-{tid_digits}-{seq}-{nanos}"));
         std::fs::create_dir_all(&base).map_err(io_err)?;
-        let keep = crate::adapter::env_var::read("MUNUNU_KEEP_YOSYS_TMP")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        Ok(TempDir { path: base, keep })
+        Ok(TempDir {
+            path: base,
+            keep: keep_yosys_tmp(),
+        })
     }
 
     fn path(&self) -> &Path {
@@ -8286,6 +8329,8 @@ mod lift_cache_tests {
     #[test]
     #[ignore = "requires yosys (the mununu-sva image)"]
     fn e2e_lift_cache_second_lift_is_a_hit_with_identical_artifacts() {
+        let _unobserved =
+            TOOL_RUN_OBSERVERS.map(|(name, _)| crate::adapter::env_var::unset_for_test(name));
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = LiftCache::at(dir.path().join("lift-cache"));
         let src =
@@ -8327,5 +8372,80 @@ mod lift_cache_tests {
             "a store failure is logged, the lift is a miss: {:?}",
             bypassed.cache
         );
+    }
+
+    /// mununu#1232 — every variable that shows a tool run takes the lift off the cache, with a
+    /// reason that names it; with none in force the decision is the key's, and with the cache
+    /// off none of them matters. No tool runs here: the bypass is decided before the key.
+    #[test]
+    fn x1232_every_variable_that_shows_a_tool_run_bypasses_the_lift_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = LiftCache::at(dir.path().join("lift-cache"));
+        let yopts = YosysOptions::default();
+        let _unobserved =
+            TOOL_RUN_OBSERVERS.map(|(name, _)| crate::adapter::env_var::unset_for_test(name));
+        assert_eq!(observed_tool_run(), None);
+        for (name, _) in TOOL_RUN_OBSERVERS {
+            let _set = crate::adapter::env_var::override_for_test(name, "1");
+            let reason = lift_cache_use(Some(&cache), "", &yopts)
+                .expect_err("a lift under an observer bypasses the cache");
+            assert!(reason.contains(name), "{name}: {reason}");
+            assert!(
+                matches!(lift_cache_use(None, "", &yopts), Ok(None)),
+                "{name}: with the cache off there is nothing to bypass"
+            );
+        }
+        // The keep flag is a boolean: `0` keeps nothing, so it bypasses nothing.
+        let _zero = crate::adapter::env_var::override_for_test("MUNUNU_KEEP_YOSYS_TMP", "0");
+        assert_eq!(observed_tool_run(), None);
+    }
+
+    /// mununu#1232, in the image — on a warm cache, a lift under each observer runs the tools
+    /// (the kept staging directory is there), reports the bypass, gives the model the stored
+    /// lift gave, and leaves the entry as it was: the next plain lift is a hit.
+    #[test]
+    #[ignore = "requires yosys (the mununu-sva image)"]
+    fn e2e_x1232_a_lift_that_shows_its_tool_run_runs_the_tools_on_a_warm_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = LiftCache::at(dir.path().join("lift-cache"));
+        let root = dir.path().join("staging");
+        std::fs::create_dir_all(&root).expect("the staging root");
+        let _root = crate::adapter::env_var::override_for_test("MUNUNU_LIFT_STAGING_ROOT", &root);
+        let _unobserved =
+            TOOL_RUN_OBSERVERS.map(|(name, _)| crate::adapter::env_var::unset_for_test(name));
+        let src =
+            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n";
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            ..Default::default()
+        };
+        let lift = || {
+            run_sv_flatten_btor2_with(src, &yopts, Some(&cache), MergeOptIn::Offered)
+                .expect("lifts")
+        };
+        let kept = || {
+            std::fs::read_dir(&root)
+                .expect("the root is readable")
+                .count()
+        };
+        let stored = lift();
+        assert_eq!(stored.cache, LiftCacheOutcome::Miss);
+        assert_eq!(kept(), 0, "a plain lift keeps no staging directory");
+        for (name, _) in TOOL_RUN_OBSERVERS {
+            let _set = crate::adapter::env_var::override_for_test(name, "1");
+            let observed = lift();
+            assert!(
+                matches!(observed.cache, LiftCacheOutcome::Bypassed(_)),
+                "{name}: {:?}",
+                observed.cache
+            );
+            assert_eq!(observed.btor2, stored.btor2, "{name}");
+        }
+        assert_eq!(
+            kept(),
+            1,
+            "the lift under MUNUNU_KEEP_YOSYS_TMP ran the tools and kept its directory"
+        );
+        assert_eq!(lift().cache, LiftCacheOutcome::Hit);
     }
 }
