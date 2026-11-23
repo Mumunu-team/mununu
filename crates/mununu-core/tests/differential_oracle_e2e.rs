@@ -3129,6 +3129,9 @@ fn e2e_opentitan_ip_csrng_full() {
     );
     // The lift: yosys-slang dies in the BTOR backend's cell-level topological sort (its `$buf`
     // cells) and succeeds on the retry with `opt_clean` — this IP is the retry's e2e.
+    // mununu#1229: the retry marks the named nets `keep` first, so the model holds every
+    // register the backend writes of the uncleaned design; a bare `opt_clean` dropped 16 of
+    // them (those only assertions or nothing read).
     assert_eq!(
         report.diagnostics.frontend.as_deref(),
         Some("yosys-slang (read_slang)")
@@ -3147,7 +3150,7 @@ fn e2e_opentitan_ip_csrng_full() {
         "the retry is reported as a note"
     );
     assert!(
-        report.diagnostics.state_register_count >= 200,
+        report.diagnostics.state_register_count >= 222,
         "{}",
         report.diagnostics.state_register_count
     );

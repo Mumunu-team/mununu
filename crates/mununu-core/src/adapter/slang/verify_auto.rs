@@ -571,9 +571,9 @@ pub struct ModelDiagnostics {
     /// `Some(reason)` when the lift's first yosys run died in the BTOR backend with a
     /// "topological loop" (`check` sees none: yosys-slang's `$buf` cells chain wide vectors
     /// through other cells) and the script succeeded rerun with `opt_clean` before `write_btor`.
-    /// The model is the same design — `opt_clean` folds buffers into connections and drops unused
-    /// cells — so this is Info (the `lift-retry` note), not a scope caveat. `None` when the first
-    /// run succeeded (every lift that succeeded before 2026-10-22 is byte-identical).
+    /// The model is the same design — the named nets are kept first (mununu#1229), so `opt_clean`
+    /// drops only cells the backend would not write — so this is Info (the `lift-retry` note),
+    /// not a scope caveat. `None` when the first run succeeded (such a lift is untouched).
     pub lift_retry: Option<String>,
     /// The clock domains the lift MERGED onto the model's one implicit clock, each
     /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain,
