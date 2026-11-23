@@ -68,7 +68,7 @@ Rust source: [`PropertyVerdict`](../../crates/mununu-core/src/verdict.rs#L23) �
 
 ## SvVerifyAutoResponse — top-level shape
 
-Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L2564).
+Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L2565).
 
 ```jsonc
 {
@@ -86,7 +86,7 @@ Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs
 
 ## PropertyVerdictView — per-property
 
-Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3331).
+Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L3332).
 
 ```jsonc
 {

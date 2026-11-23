@@ -93,20 +93,20 @@ The R.5 CEGAR refinement loop accepts three predicate-discovery strategies for t
 |---|---|---|
 | `manual` | User-supplied closure (programmatic use only — not selectable from CLI) | none |
 | `wp` (default) | Weakest-precondition heuristic — emits separating predicates over state registers reachable from the failure subgame's classifying transitions that are not yet in the predicate set | none |
-| `craig` | Craig interpolation via CVC5 subprocess — for each classifying may-but-not-must transition, asks CVC5 for an interpolant separating source from target cube | **CVC5 ≥ 1.0** ([install instructions](external-tools.md#cvc5)) |
+| `craig` | Craig interpolation over the exact transition, by a MathSAT 5 subprocess — for a classifying may-but-not-must transition, asks MathSAT for the interpolant that separates the source states that must take it from those that cannot. An iteration whose queries give no predicate refines with `wp` | **MathSAT 5** ([`MUNUNU_MATHSAT_PATH`](external-tools.md#mathsat)) |
 
 ```bash
 # Default WP — works out of the box, no external deps:
 mununu btor2 cegar --file design.btor2 --predicate-source wp
 
-# Craig interpolation via CVC5 (after `brew install cvc5` / `apt install cvc5`):
+# Craig interpolation (a `mathsat` binary on `$PATH`):
 mununu btor2 cegar --file design.btor2 --predicate-source craig
 
-# Explicit CVC5 binary path (override the discovery default):
-MUNUNU_CVC5_PATH=/opt/cvc5/bin/cvc5 mununu btor2 cegar --file design.btor2 --predicate-source craig
+# Explicit MathSAT binary path (checked before `$PATH`):
+MUNUNU_MATHSAT_PATH=/opt/mathsat/bin/mathsat mununu btor2 cegar --file design.btor2 --predicate-source craig
 ```
 
-When `--predicate-source craig` is selected but CVC5 isn't found at runtime, mununu emits a structured warning + falls back to the WP heuristic automatically — the verification verdict is still computed; only the predicate-discovery mechanism is degraded. See [`docs/external-tools.md`](external-tools.md#cvc5) for full install instructions on macOS, Debian/Ubuntu, and the cross-platform GitHub release tarball.
+When `--predicate-source craig` is selected and MathSAT is not found, the run says so in one warning that names `MUNUNU_MATHSAT_PATH`, and every iteration refines with `wp`. When MathSAT is found and a query is not answered (it stopped at its limit, which is fixed at 10 s, or it failed), that iteration refines with `wp` and the run warns once per kind of stop. The verdict is computed either way; only the predicate source differs. cvc5 plays no part in this source: until mununu#1188 the start-of-run check looked for cvc5, so a host with cvc5 and no MathSAT ran `wp` without a word. MathSAT is not bundled, and the `mununu-sva` image does not ship it (checked 2026-11-23); see [`docs/external-tools.md`](external-tools.md#mathsat).
 
 ## Preflight a SystemVerilog design for unfaithful partial-write registers
 

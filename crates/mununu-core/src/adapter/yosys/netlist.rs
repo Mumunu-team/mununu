@@ -1,5 +1,5 @@
 //! The flattened netlist as a circuit of values (2026-10-30): yosys's `write_json` after
-//! `flatten; opt_clean` — the same artifact the source map reads (`cell_sources`,
+//! `flatten` and an `opt_clean` that keeps every named net — the same artifact the source map reads (`cell_sources`,
 //! `trace_aliases`) — parsed into cells with their `src` spans, evaluated on one cycle's
 //! `(state, inputs)`, and walked backwards along a counterexample to the statements that decided
 //! it: the **trace-relative slice** (path slicing, Jhala & Majumdar, PLDI 2005: keep what lay on

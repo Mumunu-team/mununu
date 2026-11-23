@@ -1,6 +1,6 @@
 # Consumer briefing — rows name their portfolio members; refusals reach the report (2026-11)
 
-> Source of truth: [`PortfolioAttributionView`](../../crates/mununu-core/src/api/models.rs#L3552) + [`MemberRefusalView`](../../crates/mununu-core/src/api/models.rs#L3579) — surface: CLI+API — `sv verify-auto --json` / `POST /api/v1/sv/verify-auto` (`properties[].portfolio`), `btor2 verify` / `POST /api/v1/btor2/verify` / `POST /api/v1/sv/verify-bad` (`refused`); no UI affordance.
+> Source of truth: [`PortfolioAttributionView`](../../crates/mununu-core/src/api/models.rs#L3553) + [`MemberRefusalView`](../../crates/mununu-core/src/api/models.rs#L3580) — surface: CLI+API — `sv verify-auto --json` / `POST /api/v1/sv/verify-auto` (`properties[].portfolio`), `btor2 verify` / `POST /api/v1/btor2/verify` / `POST /api/v1/sv/verify-bad` (`refused`); no UI affordance.
 
 **Audience:** rosf, monono, mununu-ui, and anyone who reads which engine decided a row.
 

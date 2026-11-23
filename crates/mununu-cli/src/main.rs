@@ -182,7 +182,8 @@ impl ExpectArgs {
             })?;
             let v = ExpectedVerdict::parse(verdict).ok_or_else(|| {
                 format!(
-                    "--expect `{pair}`: `{verdict}` is not a verdict — use holds | violated |                      unknown | skipped"
+                    "--expect `{pair}`: `{verdict}` is not a verdict — use holds | violated | \
+                     unknown | skipped"
                 )
             })?;
             if name.trim().is_empty() {

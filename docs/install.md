@@ -119,7 +119,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target mununu-sva make
 
 ## T3 — the native SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3437) (`MUNUNU_YOSYS_PATH`, then `PATH`; the other tools follow the same `MUNUNU_<TOOL>_PATH` rule) — surface: CLI+API
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3630) (`MUNUNU_YOSYS_PATH`, then `PATH`; the other tools follow the same `MUNUNU_<TOOL>_PATH` rule) — surface: CLI+API
 
 [`external-tools.md`](external-tools.md) lists every tool, the discovery variables
 (`MUNUNU_<TOOL>_PATH`) and per-platform install lines. The short form: install the

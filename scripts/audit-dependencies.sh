@@ -46,7 +46,7 @@ if ! command -v cargo-outdated &> /dev/null; then
     echo "⚠️  cargo-outdated is not installed."
     echo ""
     echo "   Install it with:"
-    echo "   cargo install cargo-outdated --locked"
+    echo "   cargo install cargo-outdated --locked --version 0.19.0"
     echo ""
     echo "   Note: Requires Rust 1.91+ (project minimum: rust-version = \"1.91\")"
     echo ""

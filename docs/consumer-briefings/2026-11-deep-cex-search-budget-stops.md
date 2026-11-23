@@ -1,6 +1,6 @@
 # Consumer briefing: the owned-only deep counterexample search stops at its deadline and names the stop (2026-11)
 
-> Source of truth: [`bmc_cex_until`](../../crates/mununu-core/src/adapter/btor2/native_bmc.rs#L1057) — surface: CLI+API — `btor2 verify --owned-only` (and the API's owned-only reach path) without the `boolector` feature.
+> Source of truth: [`bmc_cex_until`](../../crates/mununu-core/src/adapter/btor2/native_bmc.rs#L1074) — surface: CLI+API — `btor2 verify --owned-only` (and the API's owned-only reach path) without the `boolector` feature.
 
 **Audience:** rosf, monono, mununu-ui, and anyone who runs `btor2 verify --owned-only`.
 

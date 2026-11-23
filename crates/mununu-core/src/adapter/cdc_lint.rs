@@ -7,8 +7,9 @@
 //! implicit clock. This module answers the structural half of the question that refusal leaves
 //! open: which flops sample a value launched in another domain, and is every such path a
 //! synchroniser? It reads the netlist snapshot the lift already takes ([`SvLiftResult`]'s
-//! `flat_netlist_json`: after `flatten` and `opt_clean`, before `async2sync`), where every
-//! storage cell still carries its own `CLK` pin.
+//! `flat_netlist_json`: after `flatten` and an `opt_clean` that keeps every named net, before
+//! `async2sync`), where every storage cell of the model still carries its own `CLK` pin — also
+//! one that no output port reads (mununu#1229).
 //!
 //! **What is classified.** A *crossing* is a destination flop bit whose data pins (`D`, `EN`,
 //! `SRST`) read, through combinational cells, a flop of another clock net. Per crossing:
@@ -1504,5 +1505,73 @@ endmodule
                 report.notes
             );
         }
+    }
+
+    /// mununu#1229 — the lint reads the scan's snapshot, so it missed what the scan missed: a
+    /// second clock domain whose storage no output port reads. With the flop of the second
+    /// domain read by assertions alone, the lint answered `holds` on one domain ("one clock
+    /// net"); the crossing from `seen` into `clk_b` has no synchroniser. With a memory there
+    /// instead, the lint now lists both domains; it still reports no crossing into the memory's
+    /// write port, which is mununu#1230 and is not asserted here either way. Needs yosys.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_x1229_cdc_lint_sees_a_domain_whose_storage_no_output_port_reads() {
+        use crate::adapter::sv_verify::{SvLift, sv_cdc_lint};
+        const FLOP: &str = "\
+module top(input logic clk_a, input logic clk_b, input logic rst, input logic req,
+           output logic gnt);
+  logic seen, mon;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  always_ff @(posedge clk_b)
+    if (rst) mon <= 1'b0;
+    else mon <= seen;
+  assign gnt = seen;
+  a_mon: assert property (@(posedge clk_b) !(mon && rst));
+endmodule
+";
+        const MEMORY: &str = "\
+module top(input logic clk_a, input logic clk_b, input logic rst, input logic req,
+           input logic [1:0] wa, input logic wd, output logic gnt);
+  logic seen;
+  logic m [4];
+  logic x;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  always_ff @(posedge clk_b)
+    if (seen) m[wa] <= wd;
+  assign x = m[wa] & ~rst;
+  assign gnt = seen;
+  a_x: assert property (@(posedge clk_a) !(x && rst));
+endmodule
+";
+        let lint = |name: &str, src: &str| {
+            sv_cdc_lint(&SvLift {
+                primary_name: "top.sv".to_string(),
+                source: src.to_string(),
+                additional_sources: Vec::new(),
+                top: Some("top".to_string()),
+                include_dirs: Vec::new(),
+                merge_clock_domains: false,
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{name}: the lint lifts a two-clock design: {e}"))
+        };
+        let nets = |report: &CdcReport| -> Vec<String> {
+            report.domains.iter().map(|d| d.net.clone()).collect()
+        };
+        let flop = lint("flop", FLOP);
+        assert_eq!(nets(&flop), ["clk_a", "clk_b"], "{flop:#?}");
+        assert!(
+            flop.crossings
+                .iter()
+                .any(|c| c.destination == "mon" && c.destination_clock == "clk_b"),
+            "the crossing into `mon`, in the second domain: {flop:#?}"
+        );
+        assert_eq!(flop.worst(), PropertyVerdict::Violated, "{flop:#?}");
+        let memory = lint("memory", MEMORY);
+        assert_eq!(nets(&memory), ["clk_a", "clk_b"], "{memory:#?}");
     }
 }

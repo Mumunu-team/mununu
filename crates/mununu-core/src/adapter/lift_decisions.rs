@@ -263,8 +263,9 @@ impl<'a> LiftDecisions<'a> {
 
 /// The `lift-retry` note (Info): the lift re-ran its yosys script with `opt_clean` after the
 /// BTOR backend reported a topological loop (2026-10-22, OpenTitan csrng through yosys-slang's
-/// `$buf` cells). The model is the same design, and a reader comparing two runs wants to know
-/// the script moved. One wording for every verb, `sv verify-auto` included.
+/// `$buf` cells). The model is the same design (the retry keeps every named net first,
+/// mununu#1229), and a reader comparing two runs wants to know the script moved. One wording for
+/// every verb, `sv verify-auto` included.
 pub(crate) fn lift_retry_note(reason: &str) -> VerificationNote {
     VerificationNote {
         kind: LIFT_RETRY.into(),
@@ -272,9 +273,11 @@ pub(crate) fn lift_retry_note(reason: &str) -> VerificationNote {
         summary: format!("lift: retried — {reason}."),
         detail: "The yosys BTOR backend walks the netlist cell by cell and can report a \
                  topological loop where `check` finds none (wide `$buf` cells from yosys-slang \
-                 chained bit-wise through other cells). `opt_clean` folds the buffers into \
-                 connections and drops unused cells; it removes nothing the design reads, so the \
-                 model is of the same design. The retry runs only on that error."
+                 chained bit-wise through other cells). The retry marks every net that has a \
+                 name in the design as kept and runs `opt_clean`, which folds the buffers into \
+                 connections and drops only cells that reach no named net and no output port. \
+                 The backend writes none of those, so the model has the same registers and is \
+                 of the same design. The retry runs only on that error."
             .to_string(),
         items: Vec::new(),
         property: None,

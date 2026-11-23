@@ -48,7 +48,7 @@
   |---|---|---|
   | `parameter-override`, `summary` | `… — verdicts hold for THESE parameter values.` | `… — every result here is for THESE parameter values.` |
   | `parameter-override`, `detail` | `… so the design verified here is the one sized by these parameters. …` | `… so the design lifted here is the one sized by these parameters. …` |
-  | `lift-retry`, `detail` | `… so the verdicts are over the same design. …` | `… so the model is of the same design. …` |
+  | `lift-retry`, `detail` | `… so the model has the same registers and the verdicts are over the same design. …` | `… so the model has the same registers and is of the same design. …` |
 
   Its `control-slice` note said that a definite HOLDS of a safety property transfers to the RTL, and since mununu#1180 excepted the storage cells on a clock with no driver. On a lift with a clock note that contradicted the `clock-domains-merged` note beside it, which says a HOLDS does not transfer, and a lift with a driverless clock always has that note. The note now makes the claim only when the lift has no clock note. Under one, its summary ends `… not an over-approximation of the design.`, and its detail names the clock notes and says no verdict under the cut points transfers on its own. **If you took a HOLDS from `sv verify-auto` with `--cutpoint` and `--merge-clock-domains` together as a result on the design, re-read it with both notes.** With no clock note the text is the one it was.
 

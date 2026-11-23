@@ -277,6 +277,15 @@ pub enum LiftStrategy {
 /// smart cap.
 pub const SMART_UF_MAX_ITERATIONS: usize = 4;
 
+/// What every warning about the `craig` predicate source starts with. A reader that filters
+/// the warnings, and the tests, key on this and not on the sentence after it (mununu#1188).
+pub(crate) const CRAIG_SOURCE_NOTE: &str = "adapter/btor2/cegar: the `craig` predicate source";
+
+/// The limit of one interpolation query of the `craig` source, in milliseconds. A literal: no
+/// flag, variable or sidecar key reaches it, which is why a query that stops at it is reported
+/// as a mununu limitation and not with a budget to raise.
+const CRAIG_QUERY_LIMIT_MS: u32 = 10_000;
+
 /// R.5 B.6.b (2026-06-03) — manual `Debug` impl that hides
 /// boolean fields at their defaults to reduce log clutter.
 /// See struct doc for the contract.
@@ -1028,31 +1037,31 @@ pub fn cegar_refine_loop(
     // uses `effective_max_iterations` so early termination on
     // UF-spurious cases is structurally guaranteed.
     let mut effective_max_iterations = cegar_opts.max_iterations;
-    // R.5 Item 3 sub-item 3.4 (2026-06-04) — when the predicate source is CraigInterpolation,
-    // check once at loop start that cvc5 can be located: the transition-aware refinement
-    // (`craig_refinement_over_transition`) runs it per query, and without it every iteration
-    // falls back to WP. The warning says so once, instead of each query failing silently.
+    // The `craig` source's refinement (`craig_refinement_over_transition`) asks MathSAT, once
+    // per query. Check once at loop start that MathSAT can be located, and say so once when it
+    // cannot: every iteration then refines with WP. (Until mununu#1188 this check looked for
+    // cvc5, which the step does not run, so a host with cvc5 and no MathSAT fell back to WP
+    // without a word, and a host with MathSAT and no cvc5 was told the source was off.)
+    //
+    // `craig_gaps_reported` holds the kinds of unanswered query this run has already warned
+    // about, so that a solver that stops at its limit on every iteration is one warning.
+    let mut craig_gaps_reported: std::collections::HashSet<crate::adapter::btor2::refine::GapKind> =
+        std::collections::HashSet::new();
     if matches!(
         cegar_opts.predicate_source,
         PredicateSource::CraigInterpolation
-    ) && let Err(e) = crate::adapter::cvc5::locate_cvc5()
+    ) && let Err(e) = crate::adapter::btor2::native_interp::locate_mathsat()
     {
+        craig_gaps_reported.insert(crate::adapter::btor2::refine::GapKind::SolverMissing);
         warnings.push(crate::adapter::AdapterWarning {
             kind: crate::adapter::WarningKind::ApproximateTranslation,
             location: None,
             message: format!(
-                "adapter/btor2/cegar: the `craig` predicate source needs cvc5, and the \
-                     cvc5 binary was not available: {}. This run uses the \
-                     weakest-precondition source (`wp`) instead. Install cvc5 (Homebrew: \
-                     `brew install cvc5`; Debian: `apt install cvc5`) or set \
-                     MUNUNU_CVC5_PATH to use Craig interpolation.",
-                e.message
+                "{CRAIG_SOURCE_NOTE} did not run: {e}. This run refines with the \
+                 weakest-precondition source (`wp`) instead."
             ),
         });
     }
-    // CVC5 invocation options; sub-item 3.5 will expose this via
-    // the sidecar.
-    let cvc5_opts = crate::adapter::cvc5::InterpolantQueryOptions::default();
     // F.1 — the transition-aware Craig refinement (`craig_refinement_over_transition`) needs the
     // parsed model to encode the exact transition; parse it once. On a parse error we keep going
     // (Craig simply yields nothing → WP fallback) rather than fail the whole loop.
@@ -1597,19 +1606,29 @@ pub fn cegar_refine_loop(
             PredicateSource::CraigInterpolation => {
                 // F.1 (2026-07-24) — TRANSITION-AWARE Craig refinement FIRST. Pose the
                 // interpolation query over the EXACT transition (`craig_refinement_over_transition`)
-                // rather than the legacy propositional cube-fact query, so cvc5 can return the
+                // rather than the legacy propositional cube-fact query, so MathSAT can return the
                 // relational/bound invariant a branching ⊥ needs (emergent-K). A simple
                 // `reg == value` is a new cube dimension; a compound (`!=`/relational/bound) is
                 // installed into the compound-aware lift for the next iteration.
-                let (simple, compound) = match &parsed_file_for_craig {
+                let CraigRefinement {
+                    simple,
+                    compound,
+                    gaps,
+                } = match &parsed_file_for_craig {
                     Some(file) => craig_refinement_over_transition(
                         subgame,
                         &current_predicates,
                         &lift_result.clts,
                         file,
-                        cvc5_opts.timeout.as_millis() as u32,
+                        CRAIG_QUERY_LIMIT_MS,
                     ),
-                    None => (Vec::new(), Vec::new()),
+                    None => CraigRefinement {
+                        gaps: vec![crate::adapter::btor2::refine::RefineGap::new(
+                            crate::adapter::btor2::refine::GapKind::NotPosed,
+                            "the design did not parse a second time",
+                        )],
+                        ..CraigRefinement::default()
+                    },
                 };
                 // A discovered compound needs BOTH a `compound_exprs` entry AND a matching
                 // PredicateSpec in the predicate set: the lift keys the cube dimension by NAME (the
@@ -1638,6 +1657,20 @@ pub fn cegar_refine_loop(
                     // No transition-aware progress → WP, never a silent stop. mununu#977: the
                     // legacy propositional Craig query that sat here could only restate a current
                     // predicate (A and B were both cubes over them), so it was removed.
+                    //
+                    // WP stands in for a step the solver ANSWERED without a word: there was no
+                    // interpolant to use. For a step a query cut short — MathSAT stopped at the
+                    // limit, died, was not found — the fallback is said, once per kind of gap
+                    // (mununu#1188).
+                    if let Some(message) =
+                        craig_fallback_warning(&gaps, iteration, &mut craig_gaps_reported)
+                    {
+                        warnings.push(crate::adapter::AdapterWarning {
+                            kind: crate::adapter::WarningKind::ApproximateTranslation,
+                            location: None,
+                            message,
+                        });
+                    }
                     weakest_precondition_predicates(subgame, &current_predicates, btor2_content)
                 }
             }
@@ -1809,22 +1842,22 @@ fn cube_index_to_region(
 /// shape (`!=` / relational / bound) becomes a compound EXPR the caller installs into the
 /// SmtAllPairs+Eager compound-aware lift. Addresses only NAMED state cells; a property atom over a
 /// combinational output contributes a weaker region but never an unsound predicate.
-#[allow(clippy::type_complexity)]
+///
+/// A query that gave no predicate leaves its gap in the result (mununu#1188): the caller falls
+/// back to WP either way, and says so when a gap was a query the solver did not answer.
 fn craig_refinement_over_transition(
     subgame: &FailureSubgame,
     current_predicates: &[PredicateSpec],
     clts: &crate::clts::Clts<crate::clts::DefaultStateIdx, crate::clts::DefaultLabelIdx>,
     file: &crate::adapter::btor2::ast::Btor2File,
     timeout_ms: u32,
-) -> (
-    Vec<PredicateSpec>,
-    Vec<crate::adapter::btor2::predicate_expr::PredicateExpr>,
-) {
+) -> CraigRefinement {
     use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
     use crate::adapter::btor2::refine::{RefineOutcome, must_precondition_interpolant};
     use crate::clts::StateId;
     let mut simple: Vec<PredicateSpec> = Vec::new();
     let mut compound: Vec<PredicateExpr> = Vec::new();
+    let mut gaps: Vec<crate::adapter::btor2::refine::RefineGap> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (src_idx, t_idx, _owner) in &subgame.classifying_transitions {
         let Some(src_id) = StateId::<crate::clts::DefaultStateIdx>::from_index(*src_idx) else {
@@ -1842,28 +1875,69 @@ fn craig_refinement_over_transition(
         // `{cur:T→¬target}`) rather than a safety spurious-edge query — the recoverability-correct
         // query the ⊥ needs. Solved by MathSAT proof-based lazy-BV interpolation; mathsat-absent /
         // no-interpolant ⇒ nothing here and the caller falls back to WP.
-        if let RefineOutcome::Predicate(p) =
-            must_precondition_interpolant(file, &source, &target, timeout_ms)
-        {
-            // Dedup identical interpolants across the classifying transitions.
-            if !seen.insert(format!("{p:?}")) {
+        let p = match must_precondition_interpolant(file, &source, &target, timeout_ms) {
+            RefineOutcome::Predicate(p) => p,
+            // This query never reports a realizable step: it asks for a precondition, not
+            // whether an edge is spurious.
+            RefineOutcome::Realizable => continue,
+            RefineOutcome::Unavailable(gap) => {
+                gaps.push(gap);
                 continue;
             }
-            match &p {
-                PredicateExpr::Cmp {
-                    register,
-                    op: CmpOp::Eq,
-                    value,
-                } => simple.push(PredicateSpec {
-                    name: format!("craig_{register}_eq_{value}"),
-                    register: register.clone(),
-                    value: *value,
-                }),
-                _ => compound.push(p),
-            }
+        };
+        // Dedup identical interpolants across the classifying transitions.
+        if !seen.insert(format!("{p:?}")) {
+            continue;
+        }
+        match &p {
+            PredicateExpr::Cmp {
+                register,
+                op: CmpOp::Eq,
+                value,
+            } => simple.push(PredicateSpec {
+                name: format!("craig_{register}_eq_{value}"),
+                register: register.clone(),
+                value: *value,
+            }),
+            _ => compound.push(p),
         }
     }
-    (simple, compound)
+    CraigRefinement {
+        simple,
+        compound,
+        gaps,
+    }
+}
+
+/// What one `craig` refinement step found: a simple `reg == value` is a cube dimension, any
+/// other shape a compound expression for the compound-aware lift, and `gaps` the queries
+/// that gave no predicate, each with why.
+#[derive(Debug, Default)]
+struct CraigRefinement {
+    simple: Vec<PredicateSpec>,
+    compound: Vec<crate::adapter::btor2::predicate_expr::PredicateExpr>,
+    gaps: Vec<crate::adapter::btor2::refine::RefineGap>,
+}
+
+/// The warning for a `craig` step that found nothing and falls back to WP, or `None` when
+/// nothing has to be said: every query of the step was answered (there was no interpolant
+/// to use, which is the source working), or this run already warned about this kind of gap.
+/// `reported` is the run's record of the kinds it has warned about.
+fn craig_fallback_warning(
+    gaps: &[crate::adapter::btor2::refine::RefineGap],
+    iteration: usize,
+    reported: &mut std::collections::HashSet<crate::adapter::btor2::refine::GapKind>,
+) -> Option<String> {
+    let gap = crate::adapter::btor2::refine::telling_gap(gaps)?;
+    let said = gap.cut_short("an interpolation query", None)?;
+    if !reported.insert(gap.kind) {
+        return None;
+    }
+    Some(format!(
+        "{CRAIG_SOURCE_NOTE}: {said}. Iteration {iteration} refines with the \
+         weakest-precondition source (`wp`) instead; a later iteration that stops the same \
+         way is not reported again."
+    ))
 }
 
 /// R.5 WP — emit separating predicates from the failure subgame's
@@ -5032,161 +5106,133 @@ mod tests {
         );
     }
 
+    /// The options the three `craig`-warning tests below run the loop with.
+    fn craig_warning_opts(predicate_source: PredicateSource) -> CegarOptions {
+        CegarOptions {
+            max_iterations: 4,
+            predicate_source,
+            max_cube_count: 1024,
+            capture_approximants: false,
+            enable_approximant_reuse: false,
+            smart_uf_cap: false,
+            lift_strategy: LiftStrategy::Eager,
+
+            must_edge_inference: crate::adapter::btor2::kmts_lift::MustEdgeInference::Off,
+            may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+            emit_ctxdsl: false,
+        }
+    }
+
+    /// The `craig`-source warnings of a run over `SMALL_BTOR2` with the trivial formula.
+    fn craig_source_warnings(predicate_source: PredicateSource) -> Vec<String> {
+        let formula = parser::parse("true").expect("formula parses");
+        let initial = vec![PredicateSpec {
+            name: "p".into(),
+            register: "reg_a".into(),
+            value: 0,
+        }];
+        let trace = cegar_refine_loop(
+            &formula,
+            SMALL_BTOR2,
+            initial,
+            &Environment::new(2),
+            &AdapterOptions::default(),
+            &craig_warning_opts(predicate_source),
+        )
+        .expect("the loop runs: a `craig` source without its solver refines with WP");
+        trace
+            .warnings
+            .into_iter()
+            .map(|w| w.message)
+            .filter(|m| m.starts_with(CRAIG_SOURCE_NOTE))
+            .collect()
+    }
+
+    /// mununu#1188 — the `craig` source asks MathSAT, so MathSAT is the tool whose absence the
+    /// loop reports, with the variable that names the binary. The check used to look for cvc5,
+    /// which the step never runs. The path override is thread-local (mununu#880).
     #[test]
-    fn r5_subitem_34_craig_emits_adapter_warning_when_cvc5_absent() {
-        // R.5 Item 3 sub-item 3.4 (2026-06-04) — when
-        // PredicateSource::CraigInterpolation is selected but
-        // CVC5 is not available, the CEGAR loop MUST emit an
-        // AdapterWarning + fall back to the WP heuristic for
-        // the run. Test by forcing MUNUNU_CVC5_PATH to a bogus
-        // path so locate_cvc5() fails deterministically (a thread-local override, mununu#880).
+    fn x1188_the_craig_source_without_mathsat_says_it_did_not_run_and_names_the_variable() {
+        let _env = crate::adapter::env_var::override_for_test(
+            crate::adapter::btor2::native_interp::MATHSAT_PATH_ENV,
+            "/nonexistent/path/to/a/mathsat/binary/for/x1188",
+        );
+        let said = craig_source_warnings(PredicateSource::CraigInterpolation);
+        assert_eq!(said.len(), 1, "one warning for the run: {said:?}");
+        assert!(
+            said[0].contains(crate::adapter::btor2::native_interp::MATHSAT_PATH_ENV),
+            "the warning names the variable that fixes it: {said:?}"
+        );
+    }
+
+    /// A cvc5 that cannot be found is not this source's concern: with MathSAT's state left as
+    /// the host has it, hiding cvc5 changes nothing about what the loop says.
+    #[test]
+    fn x1188_a_missing_cvc5_does_not_change_what_the_craig_source_says() {
+        let with_the_host_s_cvc5 = craig_source_warnings(PredicateSource::CraigInterpolation);
         let _env = crate::adapter::env_var::override_for_test(
             "MUNUNU_CVC5_PATH",
-            "/nonexistent/path/to/cvc5/binary/from/3_4/test",
+            "/nonexistent/path/to/a/cvc5/binary/for/x1188",
         );
-
-        let formula = parser::parse("true").expect("formula parses");
-        let initial = vec![PredicateSpec {
-            name: "p".into(),
-            register: "reg_a".into(),
-            value: 0,
-        }];
-        let env = Environment::new(2);
-        let cegar_opts = CegarOptions {
-            max_iterations: 4,
-            predicate_source: PredicateSource::CraigInterpolation,
-            max_cube_count: 1024,
-            capture_approximants: false,
-            enable_approximant_reuse: false,
-            smart_uf_cap: false,
-            lift_strategy: LiftStrategy::Eager,
-
-            must_edge_inference: crate::adapter::btor2::kmts_lift::MustEdgeInference::Off,
-            may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::Off,
-            emit_ctxdsl: false,
-        };
-        let trace_result = cegar_refine_loop(
-            &formula,
-            SMALL_BTOR2,
-            initial,
-            &env,
-            &AdapterOptions::default(),
-            &cegar_opts,
-        );
-
-        let trace = trace_result.expect("cegar should succeed by falling back to WP");
-        assert!(
-            trace
-                .warnings
-                .iter()
-                .any(|w| w.message.contains("needs cvc5")
-                    && w.message.contains("cvc5 binary was not available")),
-            "expected a warning naming the missing CVC5 binary; got: {:?}",
-            trace.warnings
+        assert_eq!(
+            craig_source_warnings(PredicateSource::CraigInterpolation),
+            with_the_host_s_cvc5
         );
     }
 
+    /// The warning belongs to the `craig` source: another source says nothing about MathSAT,
+    /// present or not.
     #[test]
-    fn r5_subitem_34_craig_no_warning_when_source_is_not_craig() {
-        // R.5 Item 3 sub-item 3.4 (2026-06-04) — when the
-        // predicate source is NOT CraigInterpolation, the
-        // sub-item-3.4 warning MUST NOT fire even if CVC5 is
-        // absent. The warning is specific to the Craig path.
-        let formula = parser::parse("true").expect("formula parses");
-        let initial = vec![PredicateSpec {
-            name: "p".into(),
-            register: "reg_a".into(),
-            value: 0,
-        }];
-        let env = Environment::new(2);
-        let cegar_opts = CegarOptions {
-            max_iterations: 4,
-            predicate_source: PredicateSource::WeakestPrecondition,
-            max_cube_count: 1024,
-            capture_approximants: false,
-            enable_approximant_reuse: false,
-            smart_uf_cap: false,
-            lift_strategy: LiftStrategy::Eager,
+    fn x1188_no_craig_warning_when_the_source_is_not_craig() {
+        let _env = crate::adapter::env_var::override_for_test(
+            crate::adapter::btor2::native_interp::MATHSAT_PATH_ENV,
+            "/nonexistent/path/to/a/mathsat/binary/for/x1188",
+        );
+        let said = craig_source_warnings(PredicateSource::WeakestPrecondition);
+        assert!(said.is_empty(), "{said:?}");
+    }
 
-            must_edge_inference: crate::adapter::btor2::kmts_lift::MustEdgeInference::Off,
-            may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::Off,
-            emit_ctxdsl: false,
-        };
-        let trace = cegar_refine_loop(
-            &formula,
-            SMALL_BTOR2,
-            initial,
-            &env,
-            &AdapterOptions::default(),
-            &cegar_opts,
-        )
-        .expect("cegar succeeds");
-        assert!(
-            !trace
-                .warnings
-                .iter()
-                .any(|w| w.message.contains("needs cvc5")),
-            "cvc5-missing warning MUST NOT fire when source != CraigInterpolation; got: {:?}",
-            trace.warnings
+    /// On any host, the loop-start warning is there exactly when MathSAT is not: it asserts on
+    /// a host with the tool and on one without (the `mununu-sva` image is one without).
+    #[test]
+    fn x1188_the_craig_source_warns_at_loop_start_exactly_when_mathsat_is_not_found() {
+        let found = crate::adapter::btor2::native_interp::locate_mathsat().is_ok();
+        let said = craig_source_warnings(PredicateSource::CraigInterpolation);
+        assert_eq!(
+            said.is_empty(),
+            found,
+            "MathSAT found: {found}; the loop said: {said:?}"
         );
     }
 
+    /// What a `craig` step that found nothing says before it falls back to WP, for every kind
+    /// of gap: nothing when the solver answered, the gap's own wording once when it did not,
+    /// and nothing the second time the same kind stops a step.
     #[test]
-    #[ignore = "requires the mununu-sva image (cvc5); run by the e2e sweep"]
-    fn e2e_r5_subitem_34_craig_invokes_cvc5_end_to_end() {
-        // R.5 Item 3 sub-item 3.4 (2026-06-04) — when CVC5 is
-        // available + the Craig source is selected, the CEGAR
-        // loop invokes CVC5 + emits predicates with the
-        // `craig_s<src>_t<tidx>` naming convention.
-        //
-        // Ignored by default; run with `cargo test -- --ignored`
-        // after `brew install cvc5`. Asserts that the CEGAR
-        // run completes AND (if any predicates were added)
-        // they include at least one with the craig naming
-        // convention.
-        let formula = parser::parse("true").expect("formula parses");
-        let initial = vec![PredicateSpec {
-            name: "p".into(),
-            register: "reg_a".into(),
-            value: 0,
-        }];
-        let env = Environment::new(2);
-        let cegar_opts = CegarOptions {
-            max_iterations: 4,
-            predicate_source: PredicateSource::CraigInterpolation,
-            max_cube_count: 1024,
-            capture_approximants: false,
-            enable_approximant_reuse: false,
-            smart_uf_cap: false,
-            lift_strategy: LiftStrategy::Eager,
-
-            must_edge_inference: crate::adapter::btor2::kmts_lift::MustEdgeInference::Off,
-            may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::Off,
-            emit_ctxdsl: false,
-        };
-        let trace = cegar_refine_loop(
-            &formula,
-            SMALL_BTOR2,
-            initial,
-            &env,
-            &AdapterOptions::default(),
-            &cegar_opts,
-        )
-        .expect("cegar succeeds with CVC5 available");
-        // No sub-item-3.4 warning should fire — CVC5 was
-        // discovered.
-        assert!(
-            !trace
-                .warnings
-                .iter()
-                .any(|w| w.message.contains("needs cvc5")
-                    && w.message.contains("cvc5 binary was not available")),
-            "cvc5-missing warning MUST NOT fire when CVC5 is available; got: {:?}",
-            trace.warnings
+    fn x1188_a_craig_step_cut_short_is_reported_once_per_kind_and_an_answered_one_never() {
+        use crate::adapter::btor2::refine::{GapKind, RefineGap};
+        let mut reported = std::collections::HashSet::new();
+        for kind in GapKind::ALL {
+            let gaps = [
+                RefineGap::new(GapKind::NoInterpolant, "an answered query"),
+                RefineGap::new(kind, "the fact of this gap"),
+            ];
+            let first = craig_fallback_warning(&gaps, 3, &mut reported);
+            let again = craig_fallback_warning(&gaps, 4, &mut reported);
+            assert_eq!(again, None, "{kind:?}: a kind is reported once in a run");
+            if kind.solver_answered() {
+                assert_eq!(first, None, "{kind:?}: the solver answered every query");
+                continue;
+            }
+            let first = first.unwrap_or_else(|| panic!("{kind:?}: an unanswered query is said"));
+            assert!(first.starts_with(CRAIG_SOURCE_NOTE), "{first}");
+            assert!(first.contains("the fact of this gap"), "{first}");
+        }
+        assert_eq!(
+            reported.len(),
+            GapKind::ALL.iter().filter(|k| !k.solver_answered()).count()
         );
-        // The `true` formula converges immediately; no
-        // refinement happens. This test mostly proves the
-        // wiring + locate_cvc5 success path.
+        assert_eq!(craig_fallback_warning(&[], 0, &mut reported), None);
     }
 
     #[test]

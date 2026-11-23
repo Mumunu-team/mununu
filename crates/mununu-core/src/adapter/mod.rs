@@ -1138,14 +1138,23 @@ pub(crate) const MEMBER_CANCEL_GRACE: std::time::Duration = std::time::Duration:
 /// [`past_grace`](Self::past_grace) is true once [`MEMBER_CANCEL_GRACE`] has elapsed since —
 /// a member that finishes inside the window still lands. A flag that is never set, or no flag,
 /// never trips it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct CancelLatch {
+    grace: std::time::Duration,
     seen: Option<std::time::Instant>,
 }
 
 impl CancelLatch {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self::with_grace(MEMBER_CANCEL_GRACE)
+    }
+
+    /// A latch with a window other than [`MEMBER_CANCEL_GRACE`], which every member uses
+    /// ([`Self::new`]). This is the seam for a test of what a member does on each side of
+    /// the window (mununu#1236): with the real window, "the run finished inside it" is a
+    /// fact about the host, so such a test passes a window no run outlasts, or none at all.
+    pub(crate) fn with_grace(grace: std::time::Duration) -> Self {
+        Self { grace, seen: None }
     }
 
     /// Poll the flag: `true` once it has been set for the grace. `None` = no flag.
@@ -1155,7 +1164,7 @@ impl CancelLatch {
                 .seen
                 .get_or_insert_with(std::time::Instant::now)
                 .elapsed()
-                >= MEMBER_CANCEL_GRACE
+                >= self.grace
     }
 }
 
@@ -1194,6 +1203,18 @@ mod cancel_latch_tests {
         std::thread::sleep(MEMBER_CANCEL_GRACE + std::time::Duration::from_millis(20));
         assert!(latch.past_grace(Some(&flag)));
         assert!(latch.past_grace(Some(&flag)), "and stays tripped");
+    }
+
+    /// mununu#1236 — the window is the latch's own: with none, a set flag trips it at the
+    /// first sighting; an unset flag, or no flag, still never does.
+    #[test]
+    fn a_latch_with_no_window_trips_at_the_first_sighting_of_a_set_flag() {
+        let flag = AtomicBool::new(false);
+        let mut latch = CancelLatch::with_grace(std::time::Duration::ZERO);
+        assert!(!latch.past_grace(None));
+        assert!(!latch.past_grace(Some(&flag)));
+        flag.store(true, Ordering::Relaxed);
+        assert!(latch.past_grace(Some(&flag)));
     }
 }
 
