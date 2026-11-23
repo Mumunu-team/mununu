@@ -24,5 +24,6 @@ mod server_paths_resolve_through_one_function;
 mod source_built_tools_are_pinned_1242;
 mod source_scan;
 mod third_party_inventory_g1;
+mod timeout_setter_named_on_its_surface_1197;
 mod unconfirmed_paths_reach_every_report_1175;
 mod verilator_build_directories_1176;

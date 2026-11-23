@@ -82,7 +82,7 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 
 ## Predicate-cube engines (`explicit`, `symbolic`) and the ⊥ re-plan
 
-> Source of truth: [`adapter::btor2::kmts_lift::MustEdgeInference`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1082) (`--must-edge-inference` / `must_edge_inference`) — surface: CLI+API
+> Source of truth: [`adapter::btor2::kmts_lift::MustEdgeInference`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1093) (`--must-edge-inference` / `must_edge_inference`) — surface: CLI+API
 
 | variable | purpose |
 |---|---|

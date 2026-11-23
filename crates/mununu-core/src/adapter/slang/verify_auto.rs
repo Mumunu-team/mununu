@@ -4216,7 +4216,7 @@ fn cube_outcome(
                     let on_run_budget = doubts.iter().any(|(_, d)| {
                         matches!(
                             d,
-                            crate::adapter::btor2::kmts_lift::InitialCubeDoubt::BudgetExpired
+                            crate::adapter::btor2::kmts_lift::InitialCubeDoubt::BudgetExpired(_)
                         )
                     });
                     return (
@@ -6883,6 +6883,7 @@ pub(crate) fn verify_auto_impl(
     let run_budget = crate::adapter::run_budget::Budget::child(
         &crate::adapter::run_budget::current(),
         crate::adapter::run_budget::run_budget_ms(),
+        crate::adapter::run_budget::SetBy::RunBudgetEnv,
     );
     let _run_guard = crate::adapter::run_budget::enter(&run_budget);
     let per_property_ms = crate::adapter::run_budget::property_budget_ms();
@@ -6987,9 +6988,12 @@ pub(crate) fn verify_auto_impl(
         // earlier of (now + per-property) and the run deadline, so a generous per-property value
         // cannot extend the run. RAII: the guard restores the previous budget on EVERY exit from
         // this loop body, of which there are many `continue`s.
-        let _budget_guard = crate::adapter::run_budget::enter(
-            &crate::adapter::run_budget::Budget::child(&run_budget, per_property_ms),
-        );
+        let _budget_guard =
+            crate::adapter::run_budget::enter(&crate::adapter::run_budget::Budget::child(
+                &run_budget,
+                per_property_ms,
+                crate::adapter::run_budget::SetBy::PropertyBudgetEnv,
+            ));
         // H.J.b — substitute the concretized config inputs (`cfg_* → const`) so a
         // relational-with-wide-input atom becomes a decidable state-vs-constant
         // comparison. The substituted string is BOTH parsed and reported (the
@@ -8157,7 +8161,7 @@ pub(crate) fn escalate_bottom_with_slice(
             notes.push(escalation_stopped_note(
                 &prop.name,
                 "⊥ escalation",
-                EscalationStop::Time,
+                EscalationStop::Time(crate::adapter::run_budget::current().set_by()),
             ));
             break;
         }
@@ -8172,6 +8176,7 @@ pub(crate) fn escalate_bottom_with_slice(
         let row_budget = crate::adapter::run_budget::Budget::child(
             &crate::adapter::run_budget::current(),
             crate::adapter::run_budget::property_budget_ms(),
+            crate::adapter::run_budget::SetBy::PropertyBudgetEnv,
         );
         let _row_guard = crate::adapter::run_budget::enter(&row_budget);
         // `MUNUNU_RESCUE_MONITOR_DUMP` names this row's monitor files after the row.
@@ -9070,7 +9075,7 @@ pub(crate) fn rescue_skipped_via_exact(
             notes.push(escalation_stopped_note(
                 &prop.name,
                 "exact rescue of skipped rows",
-                EscalationStop::Time,
+                EscalationStop::Time(crate::adapter::run_budget::current().set_by()),
             ));
             break;
         }
@@ -9087,6 +9092,7 @@ pub(crate) fn rescue_skipped_via_exact(
             let row_budget = crate::adapter::run_budget::Budget::child(
                 &crate::adapter::run_budget::current(),
                 crate::adapter::run_budget::property_budget_ms(),
+                crate::adapter::run_budget::SetBy::PropertyBudgetEnv,
             );
             let _row_guard = crate::adapter::run_budget::enter(&row_budget);
             crate::adapter::btor2::symbolic_bitblast::exact_ladder_within_run_budget(
@@ -9302,8 +9308,11 @@ fn under_rescue_slice<T>(
     slice_expired: &mut bool,
     step: impl FnOnce() -> T,
 ) -> T {
-    let slice =
-        crate::adapter::run_budget::Budget::child(&crate::adapter::run_budget::current(), slice_ms);
+    let slice = crate::adapter::run_budget::Budget::child(
+        &crate::adapter::run_budget::current(),
+        slice_ms,
+        crate::adapter::run_budget::SetBy::RescueSliceEnv,
+    );
     let _guard = crate::adapter::run_budget::enter(&slice);
     let out = step();
     *slice_expired |= slice.expired();
@@ -9375,7 +9384,8 @@ fn trap_certificate_note(
 /// Why a later pass over the property list stopped early (mununu#871).
 pub(super) enum EscalationStop {
     Memory(crate::adapter::memory_budget::MemoryBudgetExceeded),
-    Time,
+    /// The budget in effect expired; the setter is who set it (mununu#1197).
+    Time(crate::adapter::run_budget::SetBy),
 }
 
 #[cfg(test)]
@@ -10731,6 +10741,7 @@ mod tests {
     #[test]
     fn a_violation_read_only_at_doubt_kept_initial_cubes_is_withheld_and_named() {
         use crate::adapter::btor2::kmts_lift::{InitialCubeDoubt, InitialCubes};
+        use crate::adapter::run_budget::SetBy;
         use crate::mu_calculus::trit::TritSet;
         use bitvec::prelude::*;
         // four cells over two predicates: cells 0 and 2 False, cells 1 and 3 True, none ⊥
@@ -10772,7 +10783,7 @@ mod tests {
         // The run budget's own expiry stops the run from here too, as from the ⊥ arm.
         let on_budget = InitialCubes {
             cubes: vec![1, 2],
-            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired)],
+            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired(SetBy::RunBudgetEnv))],
         };
         let (_, _, stop_b) = cube_outcome(Ok((set.clone(), false)), &on_budget, &names, true, true);
         assert!(
@@ -10796,7 +10807,7 @@ mod tests {
         // A False at an established initial cube (0) beside the doubted one: violated.
         let mixed = InitialCubes {
             cubes: vec![0, 2],
-            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired)],
+            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired(SetBy::RunBudgetEnv))],
         };
         let (o2, r2, _) = cube_outcome(Ok((set.clone(), false)), &mixed, &names, false, false);
         assert_eq!(o2.label(), "violated", "{o2:?}");
