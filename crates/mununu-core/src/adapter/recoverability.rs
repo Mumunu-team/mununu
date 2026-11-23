@@ -3519,7 +3519,7 @@ pub fn verify_safety_with_engine(
     engine: SafetyEngine,
 ) -> Result<(PropertyVerdict, Option<String>), String> {
     match engine {
-        SafetyEngine::Cube => Ok((verify_safety_scalable(btor2_content)?, None)),
+        SafetyEngine::Cube => verify_safety_cube(btor2_content),
         SafetyEngine::Ic3 => {
             use crate::adapter::btor2::abs_safety::{AbsVerdict, verify_safety_ic3};
             let file = crate::adapter::btor2::parser::parse(btor2_content)
@@ -3532,7 +3532,7 @@ pub fn verify_safety_with_engine(
                     format!("inductive invariant over {predicates} predicates")
                 }
                 AbsVerdict::Unsafe { depth } => format!("counterexample at depth {depth}"),
-                AbsVerdict::Unknown { reason } => reason.clone(),
+                AbsVerdict::Unknown { reason, .. } => reason.clone(),
             };
             let verdict = match av {
                 AbsVerdict::Safe { .. } => PropertyVerdict::Holds,
@@ -3544,7 +3544,43 @@ pub fn verify_safety_with_engine(
     }
 }
 
+/// What `btor2 verify` offers in the cube's place, on each surface the cube runs on.
+const CUBE_OTHER_ENGINES: &str = "the default portfolio (`--engine portfolio` on `btor2 verify`, `engine: \"portfolio\"` \
+     on the API) decides the same property with its SAT and IC3 members";
+
+/// What the cube's report says of a last-resort predicate discovery that stopped before its
+/// fixpoint because a query was not answered (mununu#1188); `None` when it ran to its end, or
+/// stopped on an answer.
+///
+/// The discovery used to return its predicates and nothing else, so a cvc5 that was absent or
+/// stopped at the query limit read as "no predicate to find". On an `unknown` the note is the
+/// reason the cube may have lacked a dimension; on a definite verdict it says the verdict does
+/// not rest on the discovery, which only proposes predicates the loop then checks.
+fn discovery_stop_detail(
+    stopped: Option<&crate::adapter::btor2::refine::RefineGap>,
+    verdict: PropertyVerdict,
+) -> Option<String> {
+    const STEP: &str = "an interpolation query of the cube's last-resort predicate discovery";
+    let gap = stopped?;
+    if verdict == PropertyVerdict::Unknown {
+        return gap.cut_short(STEP, Some(CUBE_OTHER_ENGINES));
+    }
+    let text = gap.cut_short(STEP, None)?;
+    Some(format!(
+        "{text}. The verdict does not depend on it: the discovery only proposes predicates, \
+         and the cube decided without them"
+    ))
+}
+
 pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, String> {
+    verify_safety_cube(btor2_content).map(|(verdict, _)| verdict)
+}
+
+/// [`verify_safety_scalable`] with the cube's own diagnosis: what a step that did less than
+/// asked left for the report's `detail` (today: the last-resort discovery's stop).
+pub fn verify_safety_cube(
+    btor2_content: &str,
+) -> Result<(PropertyVerdict, Option<String>), String> {
     let file = crate::adapter::btor2::parser::parse(btor2_content)
         .map_err(|e| format!("safety cube path: parsing BTOR2: {}", e.message))?;
     let has_constraints = file
@@ -3631,11 +3667,18 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
     // the only regime where a discovered bound/ordering can add a genuinely new dimension. A cube
     // already carrying relational structure skips the expensive step (sub-second, unchanged).
     const DISCOVERY_LAST_RESORT_WATERMARK: usize = 2;
+    // The gap that stopped the discovery before its fixpoint, when one did: it goes to the
+    // report's detail (mununu#1188), because a discovery that was cut short is not a discovery
+    // that found nothing.
+    let mut discovery_stopped: Option<crate::adapter::btor2::refine::RefineGap> = None;
     if compound_seeds.len() < DISCOVERY_LAST_RESORT_WATERMARK
         && specs.len() + compound_seeds.len() < MAX_AUTO_SEED
         && crate::adapter::env_var::read("MUNUNU_NO_INTERP_DISCOVERY").is_none()
     {
-        for expr in crate::adapter::btor2::refine::discover_relational_predicates(&file, 8, 4_000) {
+        let discovery =
+            crate::adapter::btor2::refine::discover_relational_predicates(&file, 8, 4_000);
+        discovery_stopped = discovery.stopped;
+        for expr in discovery.predicates {
             if specs.len() + compound_seeds.len() >= MAX_AUTO_SEED {
                 break;
             }
@@ -3726,7 +3769,13 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
         &cegar_opts,
     ) {
         Ok(t) => t,
-        Err(_) => return Ok(PropertyVerdict::Unknown),
+        Err(_) => {
+            let verdict = PropertyVerdict::Unknown;
+            return Ok((
+                verdict,
+                discovery_stop_detail(discovery_stopped.as_ref(), verdict),
+            ));
+        }
     };
 
     // Reset-cube verdict. A predicate over a register with no `init` line (free at cycle 0) is
@@ -3761,10 +3810,15 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
     );
     // SOUNDNESS: with `constraint` lines the cube's must-path may violate an assumption, so a
     // `Violated` is not trustworthy — downgrade to `Unknown`. `Holds` stays (over-approx is sound).
-    if has_constraints && verdict == PropertyVerdict::Violated {
-        return Ok(PropertyVerdict::Unknown);
-    }
-    Ok(verdict)
+    let verdict = if has_constraints && verdict == PropertyVerdict::Violated {
+        PropertyVerdict::Unknown
+    } else {
+        verdict
+    };
+    Ok((
+        verdict,
+        discovery_stop_detail(discovery_stopped.as_ref(), verdict),
+    ))
 }
 
 #[cfg(test)]
@@ -6098,5 +6152,46 @@ mod tests {
             "SPCR removes the array-must wall: registerize the accessed cell, drop the array, \
              the QF_BV must-query decides AG EF(busy==0) = Holds"
         );
+    }
+
+    /// ENUMERATING (mununu#1188) — what the cube's report says of its last-resort discovery,
+    /// for every kind of gap and every verdict: nothing when the discovery ran to its end or
+    /// stopped on an answer; a note when a query was not answered — and on a definite verdict
+    /// a different note from an `unknown`'s, because there the verdict does not rest on it.
+    #[test]
+    fn x1188_the_cube_reports_a_discovery_stop_exactly_when_a_query_was_not_answered() {
+        use crate::adapter::btor2::refine::{GapKind, RefineGap};
+        let verdicts = [
+            PropertyVerdict::Holds,
+            PropertyVerdict::Violated,
+            PropertyVerdict::Unknown,
+        ];
+        for verdict in verdicts {
+            assert_eq!(discovery_stop_detail(None, verdict), None, "{verdict:?}");
+        }
+        for kind in GapKind::ALL {
+            let gap = RefineGap::new(kind, format!("the fact of {kind:?}"));
+            let notes: Vec<Option<String>> = verdicts
+                .iter()
+                .map(|verdict| discovery_stop_detail(Some(&gap), *verdict))
+                .collect();
+            for (verdict, note) in verdicts.iter().zip(&notes) {
+                assert_eq!(
+                    note.is_none(),
+                    kind.solver_answered(),
+                    "{kind:?} under {verdict:?}: {note:?}"
+                );
+                if let Some(note) = note {
+                    assert!(note.contains(&gap.what), "{kind:?}: {note}");
+                }
+            }
+            if !kind.solver_answered() {
+                assert_eq!(
+                    notes[0], notes[1],
+                    "{kind:?}: one note for a definite verdict"
+                );
+                assert_ne!(notes[0], notes[2], "{kind:?}: and another for an unknown");
+            }
+        }
     }
 }

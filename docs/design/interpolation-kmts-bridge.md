@@ -70,7 +70,7 @@ Map to our code:
 | Spurious abstract path | `CegarIteration` abstract counterexample (lasso or prefix), recipe §4.2 |
 | Path-infeasibility proof | concrete-discharge UNSAT, recipe §4.3 ([cegar.rs](../../crates/mununu-core/src/adapter/btor2/cegar.rs) discharge query) |
 | **Per-location interpolant → new predicate** | `PredicateSource::CraigInterpolation` — **the placeholder** |
-| Add predicates, re-abstract | `predicate_cube_lift(P ∪ {I_j})`, the eager lifter (R.2.5), [cegar.rs:1053](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L1053) |
+| Add predicates, re-abstract | `predicate_cube_lift(P ∪ {I_j})`, the eager lifter (R.2.5), [cegar.rs:1053](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L1064) |
 | Bounded iteration / progress | `CegarOptions::max_iterations` (default 16), `CegarTermination` |
 
 The single most useful thing to carry from paper 2 into our codebase: **interpolate at every cut point of the spurious trace, not just one.** Our discharge query is a bounded-unrolling of the may-trace, so it has exactly the sequence of cut points Henzinger et al. interpolate at (`I_0, I_1, … I_{n-1}`, one per unrolled step). Harvesting the whole sequence in one refinement round is what gives the loop its empirical termination; harvesting one predicate per round (the naive reading) is what makes CEGAR oscillate. Recipe doc §6.3 cause-1 ("the interpolant repeats from earlier rounds → the loop is oscillating") is the failure mode this paper's per-cut-point harvesting is designed to avoid. When you wire `CraigInterpolation`, return `Vec<PredicateSpec>` from the cut sequence, not a single predicate.

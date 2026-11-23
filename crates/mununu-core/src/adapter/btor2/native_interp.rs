@@ -754,7 +754,9 @@ fn interpolate_bool_cancellable(
 
     let stdout = match run_cvc5_raw_cancellable(&query, timeout_ms, cancel) {
         Ok(s) => s,
-        Err(e) => return InterpStep::Unavailable(e),
+        // This is the reach portfolio's member, whose query limit follows the run budget:
+        // `member_text` adds that remedy to a limit stop.
+        Err(e) => return InterpStep::Unavailable(e.member_text()),
     };
     if stdout.trim().is_empty()
         || stdout.contains("(error")
@@ -786,8 +788,54 @@ fn interpolate_bool_cancellable(
     }
 }
 
+/// Why a solver query gave no reply (mununu#1188). The kind is what a caller branches on: a
+/// query that was never answered is not an answer of "no interpolant", and a caller that reads
+/// it as one reports a grammar ceiling where the solver ran out of time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum QueryStop {
+    /// The solver binary was not found, or its probe did not answer.
+    Missing,
+    /// The solver stopped at the query's limit: by its own exit, or killed by the backstop.
+    Limit,
+    /// The caller's flag went up, or the run that asked was cancelled.
+    Cancelled,
+    /// The solver died (exit status, signal) or could not be started.
+    Failed,
+}
+
+/// A solver query that gave no reply: the kind, and the fact in one clause.
+///
+/// `what` carries NO remedy, because the remedy depends on who asked. The reach portfolio's
+/// interpolation member derives its query limit from the run budget, so for it a limit stop is
+/// answered by a larger budget ([`QueryError::member_text`]). The refinement queries of
+/// `refine.rs` run under limits no flag reaches, and each of their callers says so in its own
+/// words (mununu#1188: they used to inherit the member's remedy, or drop the reason).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueryError {
+    pub(crate) stop: QueryStop,
+    pub(crate) what: String,
+}
+
+impl QueryError {
+    fn new(stop: QueryStop, what: impl Into<String>) -> Self {
+        QueryError {
+            stop,
+            what: what.into(),
+        }
+    }
+
+    /// The reason as the reach portfolio's interpolation member reports it: the fact, and on a
+    /// limit stop the one remedy that member has.
+    pub(crate) fn member_text(&self) -> String {
+        match self.stop {
+            QueryStop::Limit => format!("{}; {RUN_BUDGET_REMEDY}", self.what),
+            QueryStop::Missing | QueryStop::Cancelled | QueryStop::Failed => self.what.clone(),
+        }
+    }
+}
+
 /// Run cvc5 on an interpolation query, returning raw stdout.
-pub(crate) fn run_cvc5_raw(query: &str, timeout_ms: u32) -> Result<String, String> {
+pub(crate) fn run_cvc5_raw(query: &str, timeout_ms: u32) -> Result<String, QueryError> {
     run_cvc5_raw_cancellable(query, timeout_ms, None)
 }
 
@@ -800,8 +848,9 @@ pub(crate) fn run_cvc5_raw_cancellable(
     query: &str,
     timeout_ms: u32,
     cancel: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<String, String> {
-    let bin = crate::adapter::cvc5::locate_cvc5().map_err(|e| format!("cvc5 unavailable: {e}"))?;
+) -> Result<String, QueryError> {
+    let bin = crate::adapter::cvc5::locate_cvc5()
+        .map_err(|e| QueryError::new(QueryStop::Missing, format!("cvc5 unavailable: {e}")))?;
     let mut command = std::process::Command::new(&bin.path);
     // `--tlimit` is cvc5's own per-run budget; the wall-clock kill in `run_solver_query` is
     // the hard backstop if it overruns. Either stop returns `Err` → `Unavailable` →
@@ -852,7 +901,7 @@ fn run_solver_query(
     timeout_ms: u32,
     grace_ms: u64,
     cancel: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<String, String> {
+) -> Result<String, QueryError> {
     let wall = std::time::Duration::from_millis(u64::from(timeout_ms) + grace_ms);
     match crate::adapter::run_with_timeout_cancellable(
         command,
@@ -866,22 +915,30 @@ fn run_solver_query(
         // Killed: by the flag (after its grace) or by the wall. A flag that is up says which;
         // when both happened in the same poll the cancellation is the one reported.
         Ok(None) if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) => {
-            Err(format!("{tool} {CANCELLED_BY_CALLER}"))
+            Err(QueryError::new(
+                QueryStop::Cancelled,
+                format!("{tool} {CANCELLED_BY_CALLER}"),
+            ))
         }
-        Ok(None) => Err(query_limit_stop(
-            tool,
-            timeout_ms,
-            LimitStop::Backstop { grace_ms },
+        Ok(None) => Err(QueryError::new(
+            QueryStop::Limit,
+            query_limit_fact(tool, timeout_ms, LimitStop::Backstop { grace_ms }),
         )),
         // mununu#1147 — the run that asked is gone; the helper's text says so.
-        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Err(format!("{tool}: {e}")),
-        Err(e) => Err(format!("run {tool}: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Err(QueryError::new(
+            QueryStop::Cancelled,
+            format!("{tool}: {e}"),
+        )),
+        Err(e) => Err(QueryError::new(
+            QueryStop::Failed,
+            format!("run {tool}: {e}"),
+        )),
     }
 }
 
 /// Which mechanism stopped a solver child at its query limit (mununu#1186). From the user's
 /// side both are the same stop — the query did not finish within its limit — so
-/// [`query_limit_stop`] words both with one sentence and one remedy.
+/// [`query_limit_fact`] words both with one sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LimitStop {
     /// The solver stopped by itself at the limit it was given, with this exit code.
@@ -891,9 +948,11 @@ pub(crate) enum LimitStop {
 }
 
 /// The one sentence for a solver query that stopped at its limit, whichever mechanism fired
-/// (mununu#1186). The backstop used to say "cvc5 exceeded <n>ms": no remedy, and a test of the
-/// `--tlimit` wording failed whenever a loaded host let the backstop win the race.
-pub(crate) fn query_limit_stop(tool: &str, timeout_ms: u32, how: LimitStop) -> String {
+/// (mununu#1186). The backstop used to say "cvc5 exceeded <n>ms", and a test of the `--tlimit`
+/// wording failed whenever a loaded host let the backstop win the race. The sentence is the
+/// fact alone: who may change the limit depends on the caller (mununu#1188), so the remedy is
+/// the caller's — [`QueryError::member_text`] for the interpolation member.
+pub(crate) fn query_limit_fact(tool: &str, timeout_ms: u32, how: LimitStop) -> String {
     let how = match how {
         LimitStop::SolverExit(code) => code.map(|c| format!(" (exit {c})")).unwrap_or_default(),
         LimitStop::Backstop { grace_ms } => {
@@ -902,7 +961,7 @@ pub(crate) fn query_limit_stop(tool: &str, timeout_ms: u32, how: LimitStop) -> S
     };
     format!(
         "{tool} stopped at its {timeout_ms} ms query limit{how} — a budget stop, not an \
-         interpolation gap; {RUN_BUDGET_REMEDY}"
+         interpolation gap"
     )
 }
 
@@ -923,7 +982,7 @@ pub(crate) fn solver_reply(
     stdout: String,
     stderr: &str,
     timeout_ms: u32,
-) -> Result<String, String> {
+) -> Result<String, QueryError> {
     let first_err = stderr
         .lines()
         .find(|l| !l.trim().is_empty())
@@ -933,34 +992,35 @@ pub(crate) fn solver_reply(
         || stderr.to_ascii_lowercase().contains("time limit");
     match exit_code {
         Some(0) => Ok(stdout),
-        code if timed_out => Err(query_limit_stop(
-            tool,
-            timeout_ms,
-            LimitStop::SolverExit(code),
+        code if timed_out => Err(QueryError::new(
+            QueryStop::Limit,
+            query_limit_fact(tool, timeout_ms, LimitStop::SolverExit(code)),
         )),
-        Some(code) => Err(format!(
-            "{tool} exited with status {code} and no reply{}",
-            if first_err.is_empty() {
-                String::new()
-            } else {
-                format!(": {first_err}")
-            }
+        Some(code) => Err(QueryError::new(
+            QueryStop::Failed,
+            format!(
+                "{tool} exited with status {code} and no reply{}",
+                if first_err.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {first_err}")
+                }
+            ),
         )),
-        None => Err(format!(
-            "{tool} was stopped by a signal and gave no reply{}",
-            if first_err.is_empty() {
-                String::new()
-            } else {
-                format!(": {first_err}")
-            }
+        None => Err(QueryError::new(
+            QueryStop::Failed,
+            format!(
+                "{tool} was stopped by a signal and gave no reply{}",
+                if first_err.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {first_err}")
+                }
+            ),
         )),
     }
 }
 
-/// Locate the MathSAT 5 binary: `MUNUNU_MATHSAT_PATH` or `mathsat` on PATH. Unlike cvc5's
-/// `locate_tool` (which invokes `--version`), MathSAT uses `-version` (single dash), so this does
-/// a light `-version` probe purely to confirm the binary is invokable; the actual interpolation
-/// query surfaces any real problem as an `Err`.
 /// Is MathSAT invokable? The optional-tool gate for tests that need it: MathSAT
 /// ships in the `mununu-sva-pono` image, not `mununu-sva`, so a test that requires
 /// it must SKIP rather than fail when it is absent — an absent optional tool is not
@@ -972,17 +1032,27 @@ pub(crate) fn mathsat_available() -> Result<(), String> {
     locate_mathsat().map(|_| ())
 }
 
-fn locate_mathsat() -> Result<std::path::PathBuf, String> {
+/// The variable that names the MathSAT binary.
+pub(crate) const MATHSAT_PATH_ENV: &str = "MUNUNU_MATHSAT_PATH";
+
+/// Locate the MathSAT 5 binary: `MUNUNU_MATHSAT_PATH` or `mathsat` on PATH. Unlike cvc5's
+/// `locate_tool` (which invokes `--version`), MathSAT uses `-version` (single dash), so this does
+/// a light `-version` probe purely to confirm the binary is invokable; the actual interpolation
+/// query surfaces any real problem as an `Err`.
+///
+/// The remedy has to be one the user can take (mununu#1106). The text used to offer "the
+/// `mununu-sva` image", which ships no MathSAT (measured 2026-11-23: `which mathsat` fails in
+/// it), so the only fix is the variable.
+pub(crate) fn locate_mathsat() -> Result<std::path::PathBuf, String> {
     use std::path::PathBuf;
-    let path = crate::adapter::env_var::read("MUNUNU_MATHSAT_PATH")
+    let path = crate::adapter::env_var::read(MATHSAT_PATH_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("mathsat"));
     match crate::adapter::probe_tool(&path, &["-version"]) {
         Ok(_) => Ok(path),
         Err(e) => Err(format!(
-            "mathsat unavailable ({e}); set MUNUNU_MATHSAT_PATH or use the `mununu-sva` image \
-             (proof-based lazy-BV interpolation — the must-precondition query cvc5's SyGuS \
-             interpolation cannot synthesize)."
+            "mathsat unavailable ({e}); set {MATHSAT_PATH_ENV} to a MathSAT 5 binary (MathSAT is \
+             not bundled with mununu, and the `mununu-sva` image does not ship it)"
         )),
     }
 }
@@ -992,8 +1062,8 @@ fn locate_mathsat() -> Result<std::path::PathBuf, String> {
 /// (`"eager bv solver does not support proof generation"`). The query must use MathSAT's
 /// `(! φ :interpolation-group g)` + `(get-interpolant (g))` API (distinct from cvc5's
 /// `(get-interpolant I B)`). Output is `<sat-result>\n<interpolant s-expr>`.
-pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, String> {
-    let bin = locate_mathsat()?;
+pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, QueryError> {
+    let bin = locate_mathsat().map_err(|e| QueryError::new(QueryStop::Missing, e))?;
     let mut command = std::process::Command::new(&bin);
     command.arg("-theory.bv.eager=false");
     run_solver_query(
@@ -1072,133 +1142,16 @@ fn reparse_over_shared(raw: &str, shared: &BTreeMap<Nid, BV>) -> Option<Bool> {
     asserts.into_iter().next()
 }
 
+/// Stand-in solver binaries, for this module's tests and for the tests of the code that reads a
+/// solver's stop (`refine`, `abs_safety`, `recoverability`).
+///
+/// `pub`, not `pub(crate)`: the source scans of `tests/policy` drop a test-only block whose
+/// header reads `mod` or `pub mod`, and read anything else as shipped code.
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-
-    /// mununu#1129 — cvc5 stops at its own `--tlimit` by exiting (status 134, empty stdout,
-    /// "cvc5 interrupted by timeout." on stderr). The runner used to hand that empty stdout
-    /// through as a reply, which the loop read as "no interpolant" and reported as an
-    /// interpolation gap. A query no solver finishes in 1 ms must come back as a budget stop
-    /// that names the limit. Skips when cvc5 is not installed (the nightly makes that a failure).
-    ///
-    /// mununu#1186 — on a loaded host cvc5 does not always exit within the backstop's grace, and
-    /// the backstop then stops it instead. Both stops are worded by `query_limit_stop` now, so
-    /// what this asserts holds whichever fires; it used to fail with "cvc5 exceeded 1ms".
-    #[test]
-    fn x1129_a_cvc5_time_limit_exit_is_a_budget_stop_not_an_empty_reply() {
-        if crate::adapter::cvc5::locate_cvc5().is_err() {
-            eprintln!("SKIP: cvc5 unavailable");
-            return;
-        }
-        // Factoring 2^32 + 1 through a bit-blasted 64-bit multiply: seconds for a SAT solver,
-        // never 1 ms.
-        let query = "(set-logic QF_BV)\n(set-option :produce-interpolants true)\n\
-                     (declare-const x (_ BitVec 64))\n(declare-const y (_ BitVec 64))\n\
-                     (declare-const z (_ BitVec 64))\n\
-                     (assert (and (= z (bvmul x y)) (= z #x0000000100000001) \
-                     (bvugt x #x0000000000000001) (bvugt y #x0000000000000001)))\n\
-                     (get-interpolant I (= (bvmul y x) #x0000000100000002))\n(exit)\n";
-        let err = run_cvc5_raw_cancellable(query, 1, None)
-            .expect_err("a 1 ms limit on this query is a stop, not a reply");
-        assert!(
-            err.contains("query limit") && err.contains("budget stop"),
-            "the stop names the limit and what it is: {err}"
-        );
-        assert!(
-            err.contains("`--timeout-ms` on the `btor2` verbs"),
-            "and the knob of the verb that raises it: {err}"
-        );
-    }
-
-    /// mununu#1129 — the seam: a clean exit hands stdout through (empty included — that is
-    /// what cvc5 says for a real gap), a timeout exit is a budget stop, any other non-zero exit
-    /// or a signal names the status and the first stderr line.
-    #[test]
-    fn x1129_solver_reply_classifies_the_exit_before_the_stdout() {
-        assert_eq!(
-            solver_reply("cvc5", Some(0), "".into(), "", 50),
-            Ok(String::new())
-        );
-        assert_eq!(
-            solver_reply("cvc5", Some(0), "fail\n".into(), "", 50),
-            Ok("fail\n".to_string())
-        );
-        let stop = solver_reply(
-            "cvc5",
-            Some(134),
-            String::new(),
-            "cvc5 interrupted by timeout.\n",
-            5000,
-        )
-        .expect_err("a timeout exit");
-        assert!(
-            stop.contains("5000 ms query limit") && stop.contains("(exit 134)"),
-            "{stop}"
-        );
-        assert!(stop.contains("not an interpolation gap"), "{stop}");
-        let died = solver_reply(
-            "mathsat",
-            Some(1),
-            String::new(),
-            "boom: bad option\nmore\n",
-            50,
-        )
-        .expect_err("a failure exit");
-        assert!(
-            died.contains("status 1") && died.contains("boom: bad option"),
-            "{died}"
-        );
-        assert!(!died.contains("more"), "first stderr line only: {died}");
-        let signalled = solver_reply("cvc5", None, String::new(), "", 50).expect_err("a signal");
-        assert!(signalled.contains("signal"), "{signalled}");
-    }
-    use crate::adapter::btor2::parser;
-
-    /// mununu#1186 — one sentence for a query that stopped at its limit, whichever mechanism
-    /// fired: the limit, that it is a budget stop and not a gap, and the knob. The match over
-    /// `LimitStop` is exhaustive, so a new mechanism does not compile until it says what it adds.
-    #[test]
-    fn x1186_a_query_limit_stop_reads_the_same_whichever_mechanism_fired() {
-        for tool in ["cvc5", "mathsat"] {
-            for how in [
-                LimitStop::SolverExit(Some(134)),
-                LimitStop::SolverExit(None),
-                LimitStop::Backstop { grace_ms: 2_000 },
-            ] {
-                let text = query_limit_stop(tool, 5000, how);
-                assert!(
-                    text.starts_with(&format!("{tool} stopped at its 5000 ms query limit")),
-                    "{how:?}: {text}"
-                );
-                assert!(
-                    text.contains("a budget stop, not an interpolation gap"),
-                    "{how:?}: {text}"
-                );
-                assert!(
-                    text.contains("`--timeout-ms` on the `btor2` verbs")
-                        && text.contains("the run budget on `sv verify-auto`"),
-                    "{how:?} names the knob of each surface: {text}"
-                );
-                assert!(!text.contains("exceeded"), "{how:?}: {text}");
-                match how {
-                    LimitStop::SolverExit(Some(code)) => {
-                        assert!(text.contains(&format!("(exit {code})")), "{text}")
-                    }
-                    LimitStop::SolverExit(None) => assert!(!text.contains("(exit"), "{text}"),
-                    LimitStop::Backstop { grace_ms } => assert!(
-                        text.contains(&format!("(killed {grace_ms} ms past it")),
-                        "{text}"
-                    ),
-                }
-            }
-        }
-    }
-
+pub mod stand_in_solver {
     /// What a stand-in solver does with a query.
     #[derive(Debug, Clone, Copy)]
-    enum StandIn {
+    pub enum StandIn {
         /// Never answers: sleeps 30 s.
         Hangs,
         /// Reads the query to its end, writes this many bytes of `a` and exits 0.
@@ -1211,7 +1164,7 @@ mod tests {
     /// does, and on any other invocation does `what`. It exists on every OS (the OS matrix's
     /// same-tests rule): a `/bin/sh` script on Unix, a `.bat` + PowerShell pair on Windows.
     #[cfg(unix)]
-    fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
+    pub fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let body = match what {
             StandIn::Hangs => "exec sleep 30".to_string(),
@@ -1248,7 +1201,7 @@ mod tests {
     /// the other stand-in tools of this crate's tests do. The script reads and writes the raw
     /// standard streams, so the reply's bytes are the ones written.
     #[cfg(windows)]
-    fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
+    pub fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
         let body = match what {
             StandIn::Hangs => "Start-Sleep 30\r\n".to_string(),
             StandIn::Replies { bytes } => format!(
@@ -1285,6 +1238,149 @@ mod tests {
         .expect("write the stand-in's launcher");
         bat
     }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::stand_in_solver::{StandIn, stand_in};
+    use super::*;
+
+    /// mununu#1129 — cvc5 stops at its own `--tlimit` by exiting (status 134, empty stdout,
+    /// "cvc5 interrupted by timeout." on stderr). The runner used to hand that empty stdout
+    /// through as a reply, which the loop read as "no interpolant" and reported as an
+    /// interpolation gap. A query no solver finishes in 1 ms must come back as a budget stop
+    /// that names the limit. Skips when cvc5 is not installed (the nightly makes that a failure).
+    ///
+    /// mununu#1186 — on a loaded host cvc5 does not always exit within the backstop's grace, and
+    /// the backstop then stops it instead. Both stops are worded by `query_limit_fact` now, so
+    /// what this asserts holds whichever fires; it used to fail with "cvc5 exceeded 1ms".
+    #[test]
+    fn x1129_a_cvc5_time_limit_exit_is_a_budget_stop_not_an_empty_reply() {
+        if crate::adapter::cvc5::locate_cvc5().is_err() {
+            eprintln!("SKIP: cvc5 unavailable");
+            return;
+        }
+        // Factoring 2^32 + 1 through a bit-blasted 64-bit multiply: seconds for a SAT solver,
+        // never 1 ms.
+        let query = "(set-logic QF_BV)\n(set-option :produce-interpolants true)\n\
+                     (declare-const x (_ BitVec 64))\n(declare-const y (_ BitVec 64))\n\
+                     (declare-const z (_ BitVec 64))\n\
+                     (assert (and (= z (bvmul x y)) (= z #x0000000100000001) \
+                     (bvugt x #x0000000000000001) (bvugt y #x0000000000000001)))\n\
+                     (get-interpolant I (= (bvmul y x) #x0000000100000002))\n(exit)\n";
+        let stop = run_cvc5_raw_cancellable(query, 1, None)
+            .expect_err("a 1 ms limit on this query is a stop, not a reply");
+        assert_eq!(stop.stop, QueryStop::Limit, "{stop:?}");
+        let err = stop.member_text();
+        assert!(
+            err.contains("query limit") && err.contains("budget stop"),
+            "the stop names the limit and what it is: {err}"
+        );
+        assert!(
+            err.contains("`--timeout-ms` on the `btor2` verbs"),
+            "and the knob of the verb that raises it: {err}"
+        );
+    }
+
+    /// mununu#1129 — the seam: a clean exit hands stdout through (empty included — that is
+    /// what cvc5 says for a real gap), a timeout exit is a budget stop, any other non-zero exit
+    /// or a signal names the status and the first stderr line.
+    #[test]
+    fn x1129_solver_reply_classifies_the_exit_before_the_stdout() {
+        assert_eq!(
+            solver_reply("cvc5", Some(0), "".into(), "", 50),
+            Ok(String::new())
+        );
+        assert_eq!(
+            solver_reply("cvc5", Some(0), "fail\n".into(), "", 50),
+            Ok("fail\n".to_string())
+        );
+        let stop = solver_reply(
+            "cvc5",
+            Some(134),
+            String::new(),
+            "cvc5 interrupted by timeout.\n",
+            5000,
+        )
+        .expect_err("a timeout exit");
+        assert_eq!(stop.stop, QueryStop::Limit, "{stop:?}");
+        let stop = stop.what;
+        assert!(
+            stop.contains("5000 ms query limit") && stop.contains("(exit 134)"),
+            "{stop}"
+        );
+        assert!(stop.contains("not an interpolation gap"), "{stop}");
+        let died = solver_reply(
+            "mathsat",
+            Some(1),
+            String::new(),
+            "boom: bad option\nmore\n",
+            50,
+        )
+        .expect_err("a failure exit");
+        assert_eq!(died.stop, QueryStop::Failed, "{died:?}");
+        let died = died.what;
+        assert!(
+            died.contains("status 1") && died.contains("boom: bad option"),
+            "{died}"
+        );
+        assert!(!died.contains("more"), "first stderr line only: {died}");
+        let signalled = solver_reply("cvc5", None, String::new(), "", 50).expect_err("a signal");
+        assert_eq!(signalled.stop, QueryStop::Failed, "{signalled:?}");
+        assert!(signalled.what.contains("signal"), "{signalled:?}");
+    }
+
+    /// The text of a query stopped at its limit as the interpolation member reports it.
+    fn member_limit_text(tool: &str, timeout_ms: u32, how: LimitStop) -> String {
+        QueryError::new(QueryStop::Limit, query_limit_fact(tool, timeout_ms, how)).member_text()
+    }
+    use crate::adapter::btor2::parser;
+
+    /// mununu#1186 — one sentence for a query that stopped at its limit, whichever mechanism
+    /// fired: the limit, that it is a budget stop and not a gap, and the knob. The match over
+    /// `LimitStop` is exhaustive, so a new mechanism does not compile until it says what it adds.
+    #[test]
+    fn x1186_a_query_limit_stop_reads_the_same_whichever_mechanism_fired() {
+        for tool in ["cvc5", "mathsat"] {
+            for how in [
+                LimitStop::SolverExit(Some(134)),
+                LimitStop::SolverExit(None),
+                LimitStop::Backstop { grace_ms: 2_000 },
+            ] {
+                // mununu#1188 — the fact carries no remedy: the remedy is the caller's, and
+                // only the interpolation member's limit follows the run budget.
+                let fact = query_limit_fact(tool, 5000, how);
+                assert!(!fact.contains(RUN_BUDGET_REMEDY), "{how:?}: {fact}");
+                let text = member_limit_text(tool, 5000, how);
+                assert_eq!(text, format!("{fact}; {RUN_BUDGET_REMEDY}"));
+                assert!(
+                    text.starts_with(&format!("{tool} stopped at its 5000 ms query limit")),
+                    "{how:?}: {text}"
+                );
+                assert!(
+                    text.contains("a budget stop, not an interpolation gap"),
+                    "{how:?}: {text}"
+                );
+                assert!(
+                    text.contains("`--timeout-ms` on the `btor2` verbs")
+                        && text.contains("the run budget on `sv verify-auto`"),
+                    "{how:?} names the knob of each surface: {text}"
+                );
+                assert!(!text.contains("exceeded"), "{how:?}: {text}");
+                match how {
+                    LimitStop::SolverExit(Some(code)) => {
+                        assert!(text.contains(&format!("(exit {code})")), "{text}")
+                    }
+                    LimitStop::SolverExit(None) => assert!(!text.contains("(exit"), "{text}"),
+                    LimitStop::Backstop { grace_ms } => assert!(
+                        text.contains(&format!("(killed {grace_ms} ms past it")),
+                        "{text}"
+                    ),
+                }
+            }
+        }
+    }
 
     /// REPRODUCER (mununu#1186) — a cvc5 that does not stop at `--tlimit` is killed by the wall
     /// backstop, and the report reads as the budget stop it is, with the knob: the same
@@ -1297,8 +1393,10 @@ mod tests {
         let fake = stand_in(dir.path(), StandIn::Hangs);
         let _env = crate::adapter::env_var::override_for_test("MUNUNU_CVC5_PATH", &fake);
         let t0 = std::time::Instant::now();
-        let err = run_cvc5_raw_cancellable("(exit)\n", 1, None)
+        let stop = run_cvc5_raw_cancellable("(exit)\n", 1, None)
             .expect_err("a solver that never answers is a stop, not a reply");
+        assert_eq!(stop.stop, QueryStop::Limit, "{stop:?}");
+        let err = stop.member_text();
         assert!(
             err.contains("1 ms query limit") && err.contains("budget stop"),
             "the stop names the limit and what it is: {err}"
@@ -1362,19 +1460,17 @@ mod tests {
         };
         assert_eq!(
             run("cvc5", at_its_limit, 30_000, None),
-            Err(query_limit_stop(
-                "cvc5",
-                30_000,
-                LimitStop::SolverExit(Some(134))
+            Err(QueryError::new(
+                QueryStop::Limit,
+                query_limit_fact("cvc5", 30_000, LimitStop::SolverExit(Some(134)))
             ))
         );
         // The wall backstop (MathSAT's only limit).
         assert_eq!(
             run("mathsat", StandIn::Hangs, 1, None),
-            Err(query_limit_stop(
-                "mathsat",
-                1,
-                LimitStop::Backstop { grace_ms: 100 }
+            Err(QueryError::new(
+                QueryStop::Limit,
+                query_limit_fact("mathsat", 1, LimitStop::Backstop { grace_ms: 100 })
             ))
         );
         // The caller's flag: the runner says the caller cancelled and names no cause.
@@ -1382,7 +1478,10 @@ mod tests {
         let t0 = std::time::Instant::now();
         assert_eq!(
             run("cvc5", StandIn::Hangs, 30_000, Some(&up)),
-            Err(format!("cvc5 {CANCELLED_BY_CALLER}"))
+            Err(QueryError::new(
+                QueryStop::Cancelled,
+                format!("cvc5 {CANCELLED_BY_CALLER}")
+            ))
         );
         assert!(
             t0.elapsed() < std::time::Duration::from_secs(10),
@@ -1397,7 +1496,11 @@ mod tests {
             budget.cancel();
             let t0 = std::time::Instant::now();
             let gone = run("cvc5", StandIn::Hangs, 30_000, None).expect_err("a cancelled run");
-            assert!(gone.contains(crate::adapter::RUN_CANCELLED), "{gone}");
+            assert_eq!(gone.stop, QueryStop::Cancelled, "{gone:?}");
+            assert!(
+                gone.what.contains(crate::adapter::RUN_CANCELLED),
+                "{gone:?}"
+            );
             assert!(
                 t0.elapsed() < std::time::Duration::from_secs(10),
                 "the cancellation ended it, not the 30 s limit: {:?}",
@@ -1410,7 +1513,11 @@ mod tests {
             stderr: "boom",
         };
         let died = run("mathsat", failed, 30_000, None).expect_err("an exit 3");
-        assert!(died.contains("status 3") && died.contains("boom"), "{died}");
+        assert_eq!(died.stop, QueryStop::Failed, "{died:?}");
+        assert!(
+            died.what.contains("status 3") && died.what.contains("boom"),
+            "{died:?}"
+        );
         // A death by signal (Unix: Windows has no such exit).
         #[cfg(unix)]
         {
@@ -1418,7 +1525,8 @@ mod tests {
             sh.arg("-c").arg("kill -9 $$");
             let signalled =
                 run_solver_query("cvc5", &mut sh, "q\n", 30_000, 100, None).expect_err("a signal");
-            assert!(signalled.contains("signal"), "{signalled}");
+            assert_eq!(signalled.stop, QueryStop::Failed, "{signalled:?}");
+            assert!(signalled.what.contains("signal"), "{signalled:?}");
         }
     }
 
@@ -1461,7 +1569,7 @@ mod tests {
             other => panic!("a deadline already past stops the search at depth 1: {other:?}"),
         }
         assert!(RUN_BUDGET_REMEDY.contains("`--timeout-ms`"));
-        let stop = query_limit_stop("cvc5", 10, LimitStop::SolverExit(Some(134)));
+        let stop = member_limit_text("cvc5", 10, LimitStop::SolverExit(Some(134)));
         assert!(stop.ends_with(RUN_BUDGET_REMEDY), "{stop}");
     }
 
@@ -1491,7 +1599,11 @@ mod tests {
         });
         let took = t0.elapsed();
         match out {
-            Err(why) => assert!(why.contains("cancelled"), "reason names the cancel: {why}"),
+            Err(why) => assert_eq!(
+                why.stop,
+                QueryStop::Cancelled,
+                "the stop is the cancel: {why:?}"
+            ),
             // cvc5 finished the query inside the grace — then nothing was cancelled, and the
             // test cannot say more on this host; it is not a failure of the mechanism.
             Ok(_) => assert!(

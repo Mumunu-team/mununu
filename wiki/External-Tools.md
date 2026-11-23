@@ -12,7 +12,8 @@ Mununu's verification engine, model checker, and synthesiser are **pure Rust + t
 | **sv2v** | SystemVerilog preprocessing | discovered subprocess | `brew install zachjs-sv2v` / build from source |
 | **Yosys** | SystemVerilog → BTOR2 | discovered subprocess | `brew install yosys` / `apt install yosys` |
 | **SymbiYosys (sby)** | RTL verification oracle | discovered subprocess | bundled with Yosys (OSS-CAD-Suite) |
-| **CVC5** | Craig-interpolation predicates (`--predicate-source craig`) | discovered subprocess | `brew install cvc5` / `apt install cvc5` |
+| **CVC5** | the interpolation member of the reachability portfolio; the refinement queries of `btor2 verify --engine ic3` / `--engine cube` | discovered subprocess | `brew install cvc5` / `apt install cvc5` |
+| **MathSAT 5** | Craig-interpolation predicates (`--predicate-source craig`) | discovered subprocess | download from its site (its own licence terms) |
 | **Verilator** | reset-state simulation seeding (sidecar `simulate_reset`) | discovered subprocess | `brew install verilator` / `apt install verilator` |
 | **circt-verilog** | alternative extraction frontend (`mununu-extract circt`) | pipe input | build CIRCT / release tarball |
 
@@ -29,4 +30,4 @@ The only real license-contamination vector — the **linked Cargo crate graph** 
 
 - [Getting Started](Getting-Started) — installation + first example.
 - [RTL Verification Pipeline](RTL-Verification-Pipeline) — where sv2v / Yosys / Verilator are used end-to-end.
-- [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) — where CVC5's Craig interpolation plugs in.
+- [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) — where MathSAT's Craig interpolation plugs in.
