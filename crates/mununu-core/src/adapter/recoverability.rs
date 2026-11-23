@@ -3555,7 +3555,7 @@ const CUBE_OTHER_ENGINES: &str = "the default portfolio (`--engine portfolio` on
 /// The discovery used to return its predicates and nothing else, so a cvc5 that was absent or
 /// stopped at the query limit read as "no predicate to find". On an `unknown` the note is the
 /// reason the cube may have lacked a dimension; on a definite verdict it says the verdict does
-/// not rest on the discovery, which only proposes predicates the loop then checks.
+/// not rest on the discovery: a definite verdict is sound whichever predicates the cube has.
 fn discovery_stop_detail(
     stopped: Option<&crate::adapter::btor2::refine::RefineGap>,
     verdict: PropertyVerdict,
@@ -3567,8 +3567,8 @@ fn discovery_stop_detail(
     }
     let text = gap.cut_short(STEP, None)?;
     Some(format!(
-        "{text}. The verdict does not depend on it: the discovery only proposes predicates, \
-         and the cube decided without them"
+        "{text}. The verdict does not depend on it: the discovery only proposes predicates for \
+         the cube's abstraction, and a definite verdict is sound whichever predicates it is built on"
     ))
 }
 
