@@ -10,6 +10,13 @@
 //!
 //! Scanned: product code of both crates (test modules and comment lines dropped). Not scanned:
 //! the setters a surface does not own — the `MUNUNU_*` variables read the same way on both.
+//!
+//! The second half is the flag's spelling. A core message that writes `--timeout-ms` itself needs
+//! no setter to put the flag in an API response, so the first half does not see it: the justice
+//! ladder's l2s note did exactly that and passed. Core spells the flag in one place, where
+//! `SetBy::setting` returns it; every other product line that does is in the table below with
+//! the reason it stands, and the table is exact, so a new line fails here and so does a line
+//! that went away without its row.
 
 use std::path::Path;
 
@@ -24,6 +31,32 @@ const HOMES: &[(&str, &str)] = &[
     ("TimeoutFlag", "crates/mununu-cli/src/"),
     ("TimeoutField", "crates/mununu-core/src/api/"),
 ];
+
+/// The CLI flag as a user types it.
+const FLAG: &str = "--timeout-ms";
+
+/// Core product lines outside [`DEFINITION`] that spell [`FLAG`]: `(file, lines, why it stands)`.
+const FLAG_SPELLED_IN_CORE: &[(&str, usize, &str)] = &[
+    (
+        "crates/mununu-core/src/adapter/btor2/native_bmc.rs",
+        1,
+        "the stop at the deterministic query budget names the flag for the `btor2` verbs on \
+         every surface: open, mununu#1243",
+    ),
+    (
+        "crates/mununu-core/src/adapter/slang/verify_auto.rs",
+        1,
+        "the `sv verify-auto` note says the flag is not this verb's; it offers the variable",
+    ),
+];
+
+/// How many product lines of `src` spell [`FLAG`] (test modules and comment lines dropped).
+fn flag_lines(src: &str) -> usize {
+    blank_test_modules_keeping_lines(src)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//") && line.contains(FLAG))
+        .count()
+}
 
 fn is_word(text: &str, at: usize, len: usize) -> bool {
     let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -102,6 +135,45 @@ fn a_surface_setter_is_named_only_by_its_surface() {
          a parameter, or the report names a setting its reader does not have.",
         found.join("\n  ")
     );
+}
+
+#[test]
+fn core_spells_the_flag_only_where_the_setter_names_it() {
+    let root = repo_root();
+    let mut spelled: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for path in rust_files_under(&root.join("crates/mununu-core/src")) {
+        let rel = relative(&root, &path);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{rel} is readable as text: {e}"));
+        let lines = flag_lines(&src);
+        if lines > 0 {
+            spelled.insert(rel, lines);
+        }
+    }
+    // Control: the scan read the one line that may spell the flag.
+    assert_eq!(
+        spelled.remove(DEFINITION),
+        Some(1),
+        "{DEFINITION} spells `{FLAG}` once, where the setter returns it (control)"
+    );
+    let expected: std::collections::BTreeMap<String, usize> = FLAG_SPELLED_IN_CORE
+        .iter()
+        .map(|(file, lines, _)| (file.to_string(), *lines))
+        .collect();
+    assert_eq!(
+        spelled, expected,
+        "the core product lines that spell `{FLAG}` are not the ones in the table. A message \
+         both surfaces reach takes the setting from the limit's setter (`SetBy::setting`, or a \
+         closing clause made from it) and does not write the flag, which the HTTP API does not \
+         have. A line that went away takes its row with it."
+    );
+}
+
+/// What the spelling scan counts: a product line, not a comment and not a test module.
+#[test]
+fn the_spelling_scan_counts_product_lines_only() {
+    let src = "fn f() -> &'static str {\n    // `--timeout-ms` in a comment\n    \"raise --timeout-ms\"\n}\n#[cfg(test)]\nmod tests {\n    const T: &str = \"--timeout-ms\";\n}\n";
+    assert_eq!(flag_lines(src), 1);
 }
 
 /// What the scan reads and what it leaves: a product line is a finding wherever it is, a test

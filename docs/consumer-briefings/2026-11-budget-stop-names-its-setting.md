@@ -2,7 +2,7 @@
 
 > Source of truth: [`SetBy`](../../crates/mununu-core/src/adapter/run_budget.rs#L56) — surface: CLI+API — the member reasons in `abstained` / `undecided` of `btor2 verify` / `POST /api/v1/btor2/verify`, the `portfolio` block and the notes of `sv verify-auto` rows
 
-**Audience:** anyone who reads or matches the `reason` text of a reach-portfolio member, the `detail` of the `time-budget-exceeded` / `memory-budget-exceeded` escalation notes, or the reason text of a `budget-expired` row.
+**Audience:** anyone who reads or matches the `reason` text of a reach-portfolio member, the l2s note of a justice verdict, the `detail` of the `time-budget-exceeded` / `memory-budget-exceeded` escalation notes, or the reason text of a `budget-expired` row.
 
 ## TL;DR
 
@@ -42,6 +42,7 @@
   | `detail` of the escalation note `time-budget-exceeded` | `… what the engines can decide. Raise or disable the budget (`0`) to attempt them.` | ``… what the engines can decide; the budget follows `<setting>`: raise it to attempt them.`` |
   | `detail` of the escalation note `memory-budget-exceeded` | the same sentence | ``…; the ceiling follows `MUNUNU_MAX_PROCESS_MEMORY_BYTES`: raise it, or set it to `0` for no ceiling, to attempt them.`` |
   | reason text of a `budget-expired` row | names `MUNUNU_PROPERTY_BUDGET_MS` and `MUNUNU_RESCUE_SLICE_MS` | also names `MUNUNU_VERIFY_BUDGET_MS`, for the whole run |
+  | the l2s note of `btor2 verify-justice` / `btor2 verify-liveness --justice` (CLI and API) when no timeout was given | ``… undecided at the members' default budgets (60 s per subprocess member; `--timeout-ms` raises them)`` | ``… undecided at the members' default budgets (60 s per subprocess member); this limit is the member's default: a limit given with `--timeout-ms` replaces it`` (the API names the request's `timeout_ms`) |
 
 - **Match on the list and the member, not on the clause.** The clause differs by verb, by surface and by which budget was in effect; that is the point of the change. A consumer that needs to know a stop was a budget stop reads which list the member is in (`abstained` after a clock stop, `undecided` for the interpolation member's own limits), the row's `bottom_reason` (`budget-expired`) or the note's `kind`.
 
@@ -66,11 +67,12 @@ Earlier briefings quote wordings this one replaces: `2026-11-member-clock-stop-p
 ## Provenance
 
 - **Found by:** mununu#1197 (the remedy audit of mununu#1121: three budget-stop remedies on `sv verify-auto` named "the run budget"), and the sweep for other budget remedies with no setting that the issue asked for.
-- **Tests:** over every setter: `x1197_every_setter_names_its_own_setting_or_says_there_is_none`, `x1197_a_child_reports_the_setter_of_the_deadline_that_binds`, `x1197_an_unbounded_budget_keeps_the_setting_that_would_bound_it`, `x1197_a_limit_origin_names_its_setter_or_says_there_is_none`. What each verb's run reads: `x1197_the_full_portfolio_reads_each_limit_from_the_budget_and_the_wall`, `x1197_the_owned_only_driver_names_the_setter_of_the_wall_that_binds`. The seam between the interpolation search and the member lists: `x1197_the_search_deadline_is_a_typed_limit_stop_that_names_no_setting`, `x1197_an_interp_limit_stop_closes_with_the_origin_of_the_limit_it_hit`. `policy::timeout_setter_named_on_its_surface_1197` keeps the flag's name in the CLI and the request field's name in the API handlers.
+- **Tests:** over every setter: `x1197_every_setter_names_its_own_setting_or_says_there_is_none`, `x1197_a_child_reports_the_setter_of_the_deadline_that_binds`, `x1197_an_unbounded_budget_keeps_the_setting_that_would_bound_it`, `x1197_a_limit_origin_names_its_setter_or_says_there_is_none`. What each verb's run reads: `x1197_the_full_portfolio_reads_each_limit_from_the_budget_and_the_wall`, `x1197_the_owned_only_driver_names_the_setter_of_the_wall_that_binds`. The seam between the interpolation search and the member lists: `x1197_the_search_deadline_is_a_typed_limit_stop_that_names_no_setting`, `x1197_an_interp_limit_stop_closes_with_the_origin_of_the_limit_it_hit`. The justice ladder's l2s note, over every setter: `the_l2s_abstention_note_names_the_default_cap_and_every_member_reason`. `policy::timeout_setter_named_on_its_surface_1197` keeps the flag's name in the CLI and the request field's name in the API handlers, and holds the core lines that spell the flag to an exact table.
 - **Class:** `budget-remedy-knob` in [`docs/defect-classes.md`](../defect-classes.md).
 
 ## Not covered here
 
-- **Seven reports of a time stop still state the fact and name no setting** (mununu#1243): a subprocess member with no verdict within its budget, native BMC's wall-clock stop, the SAT BMC and owned IC3 members at their own deadline (the model build at a member's deadline among them), the witness search that did not run, the justice ladder's rung notes, and `btor2 verify --bmc-only`. None of them names a setting that does not exist; they name none.
+- **Seven reports of a time stop still state the fact and name no setting** (mununu#1243): a subprocess member with no verdict within its budget, native BMC's wall-clock stop, the SAT BMC and owned IC3 members at their own deadline (the model build at a member's deadline among them), the witness search that did not run, the justice ladder's rung notes under a timeout (and the k-liveness rung's note without one), and `btor2 verify --bmc-only`. None of them names a setting that does not exist; they name none.
+- **Native BMC's stop at its deterministic query budget still names `--timeout-ms` on the API** (mununu#1243). Its text offers `MUNUNU_NATIVE_QUERY_RLIMIT` on any verb and the flag "on the `btor2` verbs that take it"; on the HTTP routes that setting is the request's `timeout_ms`. Unchanged here.
 - **No limit changed.** Every default, every derivation of a member's limit from the wall or the budget, and the 60000 ms threshold are as before; only what the report says about them changed.
 - **The predicate-cube lift's, the symbolic refinement's and the CEGAR loop's budget errors** already named `MUNUNU_PROPERTY_BUDGET_MS` and `MUNUNU_VERIFY_BUDGET_MS` and are unchanged.

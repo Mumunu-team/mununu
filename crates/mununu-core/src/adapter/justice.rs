@@ -331,7 +331,7 @@ fn l2s_rung(
         }
         Some((LivenessVerdict::Inconclusive, outcome)) => {
             // On a contradiction the unconfirmed side is the first thing a reader needs.
-            let mut notes = vec![l2s_undecided_note(budget, &outcome)];
+            let mut notes = vec![l2s_undecided_note(budget, scoped.set_by(), &outcome)];
             notes.extend(l2s_unconfirmed_notes(&outcome));
             (PropertyVerdict::Unknown, Vec::new(), notes)
         }
@@ -433,8 +433,19 @@ fn l2s_unconfirmed_notes(outcome: &crate::adapter::reach_portfolio::ReachOutcome
 /// The l2s rung's abstention note: the budget the portfolio ran under and every member's refusal
 /// or budget abstention, so a reader can tell "more time may help" from "no member carries this"
 /// (Failure Paths: the note used to say only "undecided", hiding a fixed 60 s member cap).
+///
+/// `set_by` is the setter of the budget the rung entered ([`Budget::set_by`]: with no deadline,
+/// whose setting would set one). With no budget the members ran at their defaults, and the note
+/// closes that fact with the clause of a default that a given limit replaces (mununu#1197): the
+/// setting in the name of the surface that ran the verb, or that there is none. This arm used to
+/// spell the CLI's flag, and the API's route reaches it too. Under a budget the note states the
+/// fact alone: a member that refused is not helped by more time, and a member the portfolio's
+/// clock stopped closes its own reason with the clause.
+///
+/// [`Budget::set_by`]: crate::adapter::run_budget::Budget::set_by
 fn l2s_undecided_note(
     budget: Option<std::time::Duration>,
+    set_by: crate::adapter::run_budget::SetBy,
     outcome: &crate::adapter::reach_portfolio::ReachOutcome,
 ) -> String {
     let mut note = match budget {
@@ -442,9 +453,11 @@ fn l2s_undecided_note(
             "l2s: the reachability portfolio left the fair-cycle monitor undecided within a {} ms budget",
             b.as_millis()
         ),
-        None => "l2s: the reachability portfolio left the fair-cycle monitor undecided at the \
-                 members' default budgets (60 s per subprocess member; `--timeout-ms` raises them)"
-            .to_string(),
+        None => format!(
+            "l2s: the reachability portfolio left the fair-cycle monitor undecided at the \
+             members' default budgets (60 s per subprocess member); {}",
+            crate::adapter::reach_portfolio::LimitOrigin::default_until_set(set_by).remedy()
+        ),
     };
     for (member, why) in &outcome.refused {
         note.push_str(&format!("; {member} refused: {why}"));
@@ -1339,31 +1352,56 @@ mod policy_tests {
         );
     }
 
+    /// mununu#1197 — with no budget the note closes with the clause of a default that a given
+    /// limit replaces, in the name of whoever would set that limit: the CLI's flag on the CLI,
+    /// the request's field on the API, and that there is no setting when the limit is mununu's
+    /// own. It used to spell the CLI's flag whoever ran the verb. Every setter is a row; the
+    /// note names its own setting and no other's.
     #[test]
     fn the_l2s_abstention_note_names_the_default_cap_and_every_member_reason() {
+        use crate::adapter::reach_portfolio::LimitOrigin;
+        use crate::adapter::run_budget::SetBy;
         let outcome = crate::adapter::reach_portfolio::ReachOutcome {
             refused: vec![("pono", "array sort unsupported".to_string())],
             abstained: vec![("native", "resource limit at depth 9".to_string())],
             undecided: vec![("interp", "no fixpoint within 24 iterations".to_string())],
             ..Default::default()
         };
-        let note = l2s_undecided_note(None, &outcome);
-        assert!(
-            note.contains("interp undecided: no fixpoint within 24 iterations"),
-            "{note}"
-        );
-        assert!(note.contains("60 s per subprocess member"), "{note}");
-        assert!(note.contains("--timeout-ms"), "{note}");
-        assert!(
-            note.contains("pono refused: array sort unsupported"),
-            "{note}"
-        );
-        assert!(
-            note.contains("native abstained: resource limit at depth 9"),
-            "{note}"
-        );
-        let bounded = l2s_undecided_note(Some(std::time::Duration::from_secs(5)), &outcome);
-        assert!(bounded.contains("within a 5000 ms budget"), "{bounded}");
+        for by in SetBy::ALL {
+            let note = l2s_undecided_note(None, by, &outcome);
+            let clause = LimitOrigin::default_until_set(by).remedy();
+            assert!(note.contains(&clause), "{by:?}: {note}");
+            for other in SetBy::ALL {
+                let Some(setting) = other.setting() else {
+                    continue;
+                };
+                assert_eq!(
+                    note.contains(setting),
+                    other == by,
+                    "under {by:?}, naming {setting}: {note}"
+                );
+            }
+            assert!(
+                note.contains("interp undecided: no fixpoint within 24 iterations"),
+                "{note}"
+            );
+            assert!(
+                note.contains("pono refused: array sort unsupported"),
+                "{note}"
+            );
+            assert!(
+                note.contains("native abstained: resource limit at depth 9"),
+                "{note}"
+            );
+            // Under a budget the note states the bound and names no setting of its own.
+            let bounded = l2s_undecided_note(Some(std::time::Duration::from_secs(5)), by, &outcome);
+            assert!(bounded.contains("5000 ms"), "{bounded}");
+            for other in SetBy::ALL {
+                if let Some(setting) = other.setting() {
+                    assert!(!bounded.contains(setting), "{by:?}: {bounded}");
+                }
+            }
+        }
     }
 
     /// Track V — the k-liveness rung proves the stuck design: `¬s` holds only at reset, so

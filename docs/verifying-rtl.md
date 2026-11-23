@@ -261,7 +261,7 @@ the slice leaves (the reach portfolio's members take their bounds from it), then
 (`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L363)) with half of
 what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
 60 s defaults and each abstention note says so, naming every member's refusal or budget abstention.
-`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L564)) races the three
+`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L577)) races the three
 rungs on threads, returns the first definite verdict and cancels the rest. In the race the l2s portfolio
 runs without its exact member, which has no cancellation point (#816), and k-liveness runs rIC3 as one
 `-e ic3` process instead of its portfolio (#986). **It is not a speed-up on a small host:** on the 129

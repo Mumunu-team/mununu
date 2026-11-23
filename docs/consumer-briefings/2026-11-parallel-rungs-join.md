@@ -1,6 +1,6 @@
 # Consumer briefing — `--parallel-rungs` returns when the first rung wins (2026-11)
 
-> Source of truth: [`verify_justice_with`](../../crates/mununu-core/src/adapter/justice.rs#L564), [`ReachMembers::cancellable`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L1606) and [`ReachMembers::PROOF_DIRECTED_RACED`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L1594) — surface: CLI+API (`mununu btor2 verify-liveness --justice --parallel-rungs`, `POST /api/v1/btor2/verify-liveness` with `parallel_rungs: true`).
+> Source of truth: [`verify_justice_with`](../../crates/mununu-core/src/adapter/justice.rs#L577), [`ReachMembers::cancellable`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L1606) and [`ReachMembers::PROOF_DIRECTED_RACED`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L1594) — surface: CLI+API (`mununu btor2 verify-liveness --justice --parallel-rungs`, `POST /api/v1/btor2/verify-liveness` with `parallel_rungs: true`).
 
 > **Audience:** anyone who passes `--parallel-rungs` / `parallel_rungs: true` to the justice verb — rosf and monono (CI gates in the `mununu-sva` image), and agents on the HTTP API. If you never pass it, nothing in this briefing affects you.
 >
