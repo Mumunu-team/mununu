@@ -120,8 +120,8 @@ pub fn parse_cvc5_version(output: &str) -> Option<String> {
 }
 
 /// R.5 Item 3 sub-item 3.3 (2026-06-03) — options controlling
-/// a CVC5 interpolant query invocation. Default timeout is 30s,
-/// matching the breakdown doc's sub-item 3.3 spec.
+/// a CVC5 interpolant query invocation. The default timeout is
+/// the one `Default` sets below (10 s).
 #[derive(Debug, Clone)]
 pub struct InterpolantQueryOptions {
     /// Wall-clock (and, via `--tlimit`, cvc5-internal) budget for one interpolant

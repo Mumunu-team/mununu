@@ -32,7 +32,8 @@ use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node};
 use crate::adapter::btor2::native_bmc::{BmcOutcome, bmc_bad_reachable};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
 use crate::adapter::btor2::refine::{
-    RefineOutcome, sequence_interpolant_predicates, synthesize_refinement_predicate,
+    GapKind, RefineGap, RefineOutcome, sequence_interpolant_predicates,
+    synthesize_refinement_predicate, telling_gap,
 };
 use crate::adapter::owner::{mununu_defect, mununu_limitation, technique_limit};
 use crate::adapter::sidecar::predicate_image::btor2_encode::{SignalKind, encode_design};
@@ -53,6 +54,66 @@ fn solver_timeout(timeout_ms: u32, query: &str) -> String {
         ),
         Some(OTHER_ENGINES),
     )
+}
+
+/// The words a report carries only when every query of the refinement step was answered: the
+/// step met the interpolants themselves, and none is a predicate the abstraction can take.
+pub(crate) const GRAMMAR_CEILING: &str = "grammar ceiling";
+
+/// How a refinement step that gave the abstraction nothing new ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarrenStep {
+    /// No query gave a predicate.
+    NoPredicate,
+    /// The queries gave predicates, and the abstraction already had every one.
+    NothingNew,
+}
+
+/// What this pass reports when a refinement step gave nothing new, and the kind of the gap
+/// that cut the step short when one did (mununu#1188).
+///
+/// Before the gaps were typed, both sites said "grammar ceiling" whatever had happened — for a
+/// cvc5 that stopped at its query limit as for one that answered. The ceiling is a statement
+/// about the interpolants, so it is made only when [`telling_gap`] finds no unanswered query.
+/// Otherwise the report names that gap, in the words that fit its kind: the query limit is
+/// fixed by this pass's caller (no verb exposes it), so a stop at it is a mununu limitation
+/// with the other engines as the way out, never a budget the user is told to raise.
+fn barren_refinement(step: BarrenStep, gaps: &[RefineGap]) -> (String, Option<GapKind>) {
+    let Some(gap) = telling_gap(gaps) else {
+        let what = match step {
+            BarrenStep::NoPredicate => format!(
+                "the spurious abstract counterexample could not be ruled out: every \
+                 interpolation query was answered, and no interpolant is a predicate the \
+                 abstraction takes (the {GRAMMAR_CEILING})"
+            ),
+            BarrenStep::NothingNew => format!(
+                "the refinement stalled: every interpolation query was answered, and the \
+                 abstraction already has each predicate they gave (the {GRAMMAR_CEILING})"
+            ),
+        };
+        return (technique_limit(&what, OTHER_ENGINES), None);
+    };
+    let cut_short = match step {
+        BarrenStep::NoPredicate => {
+            "the interpolation query that would rule out the spurious abstract counterexample"
+        }
+        BarrenStep::NothingNew => {
+            "the refinement gave no predicate the abstraction lacks, and one of its \
+             interpolation queries"
+        }
+    };
+    match gap.cut_short(cut_short, Some(OTHER_ENGINES)) {
+        Some(text) => (text, Some(gap.kind)),
+        // `telling_gap` returns only gaps of queries the solver did not answer, and those are
+        // the kinds `cut_short` has words for.
+        None => (
+            mununu_defect(&format!(
+                "an answered refinement query was read as an unanswered one: {}",
+                gap.what
+            )),
+            None,
+        ),
+    }
 }
 
 /// A `sat` answer without a model: the solver contradicted itself, or we misread it.
@@ -81,7 +142,37 @@ pub enum AbsVerdict {
     Unsafe { depth: u32 },
     /// Abstained: refinement stalled (a needed predicate is outside the parseable
     /// grammar), the abstraction blew up, cvc5 was absent, or a solver timed out.
-    Unknown { reason: String },
+    ///
+    /// `refinement` is set when a refinement step that was CUT SHORT is why (mununu#1188):
+    /// the kind of the query that was not answered — a solver stopped at its limit, absent,
+    /// failed, cancelled, or a query that could not be posed. `None` on every other
+    /// abstention, the grammar ceiling included: there the queries were answered.
+    Unknown {
+        reason: String,
+        refinement: Option<GapKind>,
+    },
+}
+
+impl AbsVerdict {
+    /// An abstention that no cut-short refinement explains.
+    fn unknown(reason: impl Into<String>) -> Self {
+        AbsVerdict::Unknown {
+            reason: reason.into(),
+            refinement: None,
+        }
+    }
+
+    /// The abstention of a refinement step that gave nothing new.
+    fn barren(step: BarrenStep, gaps: &[RefineGap]) -> Self {
+        let (reason, refinement) = barren_refinement(step, gaps);
+        AbsVerdict::Unknown { reason, refinement }
+    }
+}
+
+/// The predicates a refinement step gave, and the gap of each of its queries that gave none.
+struct Refinement {
+    predicates: Vec<PredicateExpr>,
+    gaps: Vec<RefineGap>,
 }
 
 /// A cube = a full valuation of the predicate set (indexed by predicate position).
@@ -110,25 +201,49 @@ pub fn verify_safety_abs(
             PassResult::Unsafe { depth } => return AbsVerdict::Unsafe { depth },
             PassResult::Refine(p) => {
                 if preds.iter().any(|q| q == &p) {
-                    return AbsVerdict::Unknown {
-                        reason: "refinement produced an already-present predicate (stalled)".into(),
-                    };
+                    return AbsVerdict::unknown(
+                        "refinement produced an already-present predicate (stalled)",
+                    );
                 }
                 preds.push(p);
             }
-            PassResult::Unknown(reason) => return AbsVerdict::Unknown { reason },
+            PassResult::NoRefinement(gaps) => {
+                let (reason, refinement) = no_single_step_refinement(&gaps);
+                return AbsVerdict::Unknown { reason, refinement };
+            }
+            PassResult::Unknown(reason) => return AbsVerdict::unknown(reason),
         }
     }
-    AbsVerdict::Unknown {
-        reason: format!("no fixpoint within {max_refine} refinements"),
-    }
+    AbsVerdict::unknown(format!("no fixpoint within {max_refine} refinements"))
 }
 
 enum PassResult {
     Safe,
-    Unsafe { depth: u32 },
+    Unsafe {
+        depth: u32,
+    },
     Refine(PredicateExpr),
+    /// No edge of the spurious path gave a predicate; the gaps of the edges whose query gave
+    /// none (an edge that is realizable leaves no gap).
+    NoRefinement(Vec<RefineGap>),
     Unknown(String),
+}
+
+/// What [`verify_safety_abs`] reports when no edge of the spurious path refined. With every
+/// query answered that is this pass's own limit (it has no path interpolation); with one cut
+/// short, the path may well have had a refinable edge, and the report says what cut it short.
+fn no_single_step_refinement(gaps: &[RefineGap]) -> (String, Option<GapKind>) {
+    if telling_gap(gaps).is_some() {
+        return barren_refinement(BarrenStep::NoPredicate, gaps);
+    }
+    (
+        mununu_limitation(
+            "the spurious abstract counterexample has no single-step-refinable edge; ruling it \
+             out needs a path-interpolation refinement this pass does not have",
+            Some(OTHER_ENGINES),
+        ),
+        None,
+    )
 }
 
 /// One abstraction pass at a fixed predicate set: build the may-reachable cube set;
@@ -375,6 +490,7 @@ fn one_pass(
         // every edge is realizable but the composed path is not — need the
         // interpolation engine's frame refinement; P2.2b.)
         let path = recover_path(&bad_cube, &parent);
+        let mut gaps: Vec<RefineGap> = Vec::new();
         for w in path.windows(2) {
             let (src, dst) = (&w[0], &w[1]);
             let source = cube_to_predicates(src, preds);
@@ -382,14 +498,10 @@ fn one_pass(
             match synthesize_refinement_predicate(file, &source, &target, timeout_ms) {
                 RefineOutcome::Predicate(p) => return PassResult::Refine(p),
                 RefineOutcome::Realizable => continue,
-                RefineOutcome::Unavailable(_) => continue,
+                RefineOutcome::Unavailable(gap) => gaps.push(gap),
             }
         }
-        PassResult::Unknown(mununu_limitation(
-            "the spurious abstract counterexample has no single-step-refinable edge; ruling it \
-             out needs a path-interpolation refinement this pass does not have",
-            Some(OTHER_ENGINES),
-        ))
+        PassResult::NoRefinement(gaps)
     })
 }
 
@@ -587,7 +699,9 @@ fn extract_cube(model: &z3::Model, pred_cur: &[Bool]) -> IcCube {
 /// FOUNDATION whose *reusable* value is the refinement primitives in
 /// [`super::refine`] (P2.1/P2.3, reused by the branching driver P2.4), not a
 /// production safety engine — safety-at-scale is covered by
-/// [`super::native_interp`] + z3-SPACER. Not wired into any surface.
+/// [`super::native_interp`] + z3-SPACER. Its one surface is `btor2 verify --engine ic3`
+/// (`recoverability::verify_safety_with_engine`), where an abstention's reason is the
+/// report's `detail`.
 pub fn verify_safety_ic3(
     file: &Btor2File,
     max_frames: usize,
@@ -603,32 +717,36 @@ pub fn verify_safety_ic3(
                 };
             }
             Ic3Pass::Unsafe { depth } => return AbsVerdict::Unsafe { depth },
-            Ic3Pass::Refine(ps) => {
+            Ic3Pass::Refine(step) => {
                 let before = preds.len();
-                for p in ps {
+                for p in step.predicates {
                     if !preds.contains(&p) {
                         preds.push(p);
                     }
                 }
                 if preds.len() == before {
-                    return AbsVerdict::Unknown {
-                        reason: "IC3 refinement stalled (no new predicate — grammar ceiling)"
-                            .into(),
-                    };
+                    return AbsVerdict::barren(BarrenStep::NothingNew, &step.gaps);
                 }
             }
-            Ic3Pass::Unknown(reason) => return AbsVerdict::Unknown { reason },
+            Ic3Pass::NoRefinement(gaps) => {
+                return AbsVerdict::barren(BarrenStep::NoPredicate, &gaps);
+            }
+            Ic3Pass::Unknown(reason) => return AbsVerdict::unknown(reason),
         }
     }
-    AbsVerdict::Unknown {
-        reason: format!("IC3 no convergence within {max_refine} refinements"),
-    }
+    AbsVerdict::unknown(format!(
+        "IC3 no convergence within {max_refine} refinements"
+    ))
 }
 
 enum Ic3Pass {
     Safe,
-    Unsafe { depth: u32 },
-    Refine(Vec<PredicateExpr>),
+    Unsafe {
+        depth: u32,
+    },
+    Refine(Refinement),
+    /// The spurious counterexample's refinement gave no predicate; its queries' gaps.
+    NoRefinement(Vec<RefineGap>),
     Unknown(String),
 }
 
@@ -716,7 +834,10 @@ fn ic3_pass(
                             BlockResult::Unsafe { depth } => {
                                 return Ic3Pass::Unsafe { depth };
                             }
-                            BlockResult::Refine(p) => return Ic3Pass::Refine(p),
+                            BlockResult::Refine(step) => return Ic3Pass::Refine(step),
+                            BlockResult::NoRefinement(gaps) => {
+                                return Ic3Pass::NoRefinement(gaps);
+                            }
                             BlockResult::Unknown(r) => return Ic3Pass::Unknown(r),
                         }
                     }
@@ -757,8 +878,13 @@ fn ic3_pass(
 
 enum BlockResult {
     Blocked,
-    Unsafe { depth: u32 },
-    Refine(Vec<PredicateExpr>),
+    Unsafe {
+        depth: u32,
+    },
+    Refine(Refinement),
+    /// Neither the single-step query nor the sequence interpolation gave a predicate; the
+    /// gaps of their queries.
+    NoRefinement(Vec<RefineGap>),
     Unknown(String),
 }
 
@@ -806,23 +932,31 @@ fn rec_block(
                     // Spurious. First try the cheap single-step refinement.
                     let source = cube_to_predicate_list(scope, &c);
                     let bad_atoms = bad_target_atoms(file);
-                    if let RefineOutcome::Predicate(p) =
-                        synthesize_refinement_predicate(file, &source, &bad_atoms, timeout_ms)
-                    {
-                        return BlockResult::Refine(vec![p]);
+                    // Every query that gives no predicate leaves its gap: whether the step
+                    // met the grammar or was cut short is read from them (mununu#1188).
+                    let mut gaps: Vec<RefineGap> = Vec::new();
+                    match synthesize_refinement_predicate(file, &source, &bad_atoms, timeout_ms) {
+                        RefineOutcome::Predicate(p) => {
+                            return BlockResult::Refine(Refinement {
+                                predicates: vec![p],
+                                gaps,
+                            });
+                        }
+                        RefineOutcome::Realizable => {}
+                        RefineOutcome::Unavailable(gap) => gaps.push(gap),
                     }
                     // P2.3b — targeted per-trace refinement: SEQUENCE-interpolate the
                     // depth-n BMC unrolling of this spurious counterexample → a SET of
                     // reachability predicates that collectively rule the trace out.
-                    let ps = sequence_interpolant_predicates(file, frames.len(), timeout_ms);
-                    if !ps.is_empty() {
-                        return BlockResult::Refine(ps);
+                    let seq = sequence_interpolant_predicates(file, frames.len(), timeout_ms);
+                    gaps.extend(seq.gaps);
+                    if !seq.predicates.is_empty() {
+                        return BlockResult::Refine(Refinement {
+                            predicates: seq.predicates,
+                            gaps,
+                        });
                     }
-                    return BlockResult::Unknown(
-                        "IC3 spurious CEX; sequence interpolation yielded no parseable \
-                         predicate (grammar ceiling — emergent-K)"
-                            .into(),
-                    );
+                    return BlockResult::NoRefinement(gaps);
                 }
             }
         }
@@ -1146,7 +1280,24 @@ fn seed_predicates(file: &Btor2File) -> Vec<PredicateExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::btor2::native_interp::stand_in_solver::{StandIn, stand_in};
     use crate::adapter::btor2::parser;
+
+    /// Whether `v` is an abstention these tests cannot judge on this host: the refinement had
+    /// no cvc5. Read from the typed gap, not from the reason's words; and under
+    /// `MUNUNU_REQUIRE_TOOLS=1` it is a failure, not a skip (mununu#981).
+    fn skipped_without_cvc5(v: &AbsVerdict) -> bool {
+        let AbsVerdict::Unknown {
+            reason,
+            refinement: Some(GapKind::SolverMissing),
+        } = v
+        else {
+            return false;
+        };
+        crate::adapter::require_tool("cvc5 (the abstract IC3 refinement)", false);
+        eprintln!("SKIP: {reason}");
+        true
+    }
 
     /// Trivially safe: `x` holds at 0, `bad = (x == 3)`. R# = {x==0} excludes bad
     /// and is inductive — Safe with no refinement.
@@ -1157,11 +1308,7 @@ mod tests {
         let file = parser::parse(HOLD).expect("parse");
         match verify_safety_abs(&file, 8, 4096, 5_000) {
             AbsVerdict::Safe { .. } => {}
-            AbsVerdict::Unknown { reason }
-                if reason.contains("cvc5") || reason.contains("timeout") =>
-            {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             other => panic!("expected Safe, got {other:?}"),
         }
     }
@@ -1181,11 +1328,7 @@ mod tests {
         let file = parser::parse(D).expect("parse");
         match verify_safety_abs(&file, 8, 4096, 5_000) {
             AbsVerdict::Safe { .. } => {}
-            AbsVerdict::Unknown { reason }
-                if reason.contains("cvc5") || reason.contains("timeout") =>
-            {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             // NEVER Unsafe (b never reaches 2).
             other => panic!("expected Safe via abstraction, got {other:?}"),
         }
@@ -1201,9 +1344,7 @@ mod tests {
         let file = parser::parse(REACH).expect("parse");
         match verify_safety_abs(&file, 8, 4096, 5_000) {
             AbsVerdict::Unsafe { .. } => {}
-            AbsVerdict::Unknown { reason } if reason.contains("cvc5") => {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             other => panic!("expected Unsafe, got {other:?}"),
         }
     }
@@ -1216,9 +1357,7 @@ mod tests {
         let file = parser::parse(INIT_BAD).expect("parse");
         match verify_safety_abs(&file, 8, 4096, 5_000) {
             AbsVerdict::Unsafe { depth } => assert_eq!(depth, 0),
-            AbsVerdict::Unknown { reason } if reason.contains("cvc5") => {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             other => panic!("expected Unsafe depth 0, got {other:?}"),
         }
     }
@@ -1232,9 +1371,7 @@ mod tests {
         let file = parser::parse(HOLD).expect("parse");
         match verify_safety_ic3(&file, 32, 8, 5_000) {
             AbsVerdict::Safe { .. } => {}
-            AbsVerdict::Unknown { reason } if reason.contains("cvc5") => {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             other => panic!("expected Safe (IC3), got {other:?}"),
         }
     }
@@ -1247,9 +1384,7 @@ mod tests {
         let file = parser::parse(REACH).expect("parse");
         match verify_safety_ic3(&file, 32, 8, 5_000) {
             AbsVerdict::Unsafe { .. } => {}
-            AbsVerdict::Unknown { reason } if reason.contains("cvc5") => {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             other => panic!("expected Unsafe (IC3), got {other:?}"),
         }
     }
@@ -1261,9 +1396,7 @@ mod tests {
         let file = parser::parse(INIT_BAD).expect("parse");
         match verify_safety_ic3(&file, 32, 8, 5_000) {
             AbsVerdict::Unsafe { depth } => assert_eq!(depth, 0),
-            AbsVerdict::Unknown { reason } if reason.contains("cvc5") => {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             other => panic!("expected Unsafe depth 0 (IC3), got {other:?}"),
         }
     }
@@ -1313,11 +1446,140 @@ mod tests {
         let file = parser::parse(D).expect("parse");
         match verify_safety_ic3(&file, 32, 8, 5_000) {
             AbsVerdict::Safe { .. } => {}
-            AbsVerdict::Unknown { reason } if reason.contains("cvc5") => {
-                eprintln!("SKIP: {reason}")
-            }
+            v if skipped_without_cvc5(&v) => {}
             // NEVER Unsafe (b never reaches 2) — the soundness gate guarantees it.
             other => panic!("expected Safe via IC3 blocking, got {other:?}"),
+        }
+    }
+
+    /// The design of the mununu#1188 reproducer: a 3-bit `x` from 0 that steps by 2, and
+    /// `bad = (x == 5)`. It is safe (`x` stays even), and the seeds `x == 0` / `x == 5` do not
+    /// prove it: `x == 3`, the predecessor of `bad`, is in the first frame, so the IC3 pass has
+    /// a spurious counterexample to rule out and asks cvc5 for an interpolant.
+    const STEP_BY_TWO: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 x\n4 init 1 3 2\n\
+                               5 constd 1 2\n6 add 1 3 5\n7 next 1 3 6\n8 constd 1 5\n\
+                               9 sort bitvec 1\n10 eq 9 3 8\n11 bad 10\n";
+
+    /// The IC3 pass on [`STEP_BY_TWO`] with a stand-in for cvc5 that does `what` with every
+    /// query. z3 runs for real: only the interpolation queries meet the stand-in.
+    fn ic3_with_a_stand_in_cvc5(what: StandIn) -> AbsVerdict {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = stand_in(dir.path(), what);
+        let _env = crate::adapter::env_var::override_for_test("MUNUNU_CVC5_PATH", &fake);
+        let file = parser::parse(STEP_BY_TWO).expect("parse");
+        verify_safety_ic3(&file, 32, 8, 5_000)
+    }
+
+    /// REPRODUCER (mununu#1188) — a cvc5 that stops at the query limit on every interpolation
+    /// query leaves the IC3 pass with no predicate, and the report says the query was cut
+    /// short: it carries the gap's kind and does not call the stop a grammar ceiling. Fails on
+    /// the parent, where the reason of this run read "grammar ceiling" and nothing in the
+    /// verdict told a stopped solver from an answered one. The stand-in exits the way cvc5
+    /// does at `--tlimit`, at once, so the row is the same on every host.
+    #[test]
+    fn x1188_a_refinement_cut_short_at_the_query_limit_is_not_called_a_grammar_ceiling() {
+        let v = ic3_with_a_stand_in_cvc5(StandIn::Exits {
+            code: 134,
+            stderr: "cvc5 interrupted by timeout.",
+        });
+        let AbsVerdict::Unknown { reason, refinement } = &v else {
+            panic!("no interpolation query was answered, so the pass abstains: {v:?}");
+        };
+        assert_eq!(
+            *refinement,
+            Some(GapKind::SolverStopped),
+            "the abstention carries what cut the refinement short: {reason}"
+        );
+        assert!(
+            !reason.contains(GRAMMAR_CEILING),
+            "a query the solver did not answer says nothing about the interpolants: {reason}"
+        );
+    }
+
+    /// The control of the reproducer: the same design, and a cvc5 that answers every query
+    /// with something the predicate grammar does not take. Every query was answered, so this
+    /// one is the ceiling, and no gap kind is reported as having cut the step short.
+    #[test]
+    fn x1188_a_refinement_whose_every_query_was_answered_is_the_grammar_ceiling() {
+        let v = ic3_with_a_stand_in_cvc5(StandIn::Replies { bytes: 4 });
+        let AbsVerdict::Unknown { reason, refinement } = &v else {
+            panic!("no interpolant the grammar takes, so the pass abstains: {v:?}");
+        };
+        assert_eq!(*refinement, None, "{reason}");
+        assert!(reason.contains(GRAMMAR_CEILING), "{reason}");
+    }
+
+    /// ENUMERATING (mununu#1188, class `member-stop-reason`) — every kind of refinement gap,
+    /// at both sites of the IC3 pass that report a barren refinement and at the single-step
+    /// pass's: an answered query (no interpolant, one outside the grammar) is the technique's
+    /// ceiling and names no kind; every other kind is named, carries its fact, and is never
+    /// called the ceiling — alone, and beside an answered query in either order. Exhaustive
+    /// over [`GapKind::ALL`], so a new kind is judged here before it ships.
+    #[test]
+    fn x1188_every_gap_kind_decides_whether_a_barren_refinement_is_the_grammar_ceiling() {
+        let gap = |kind: GapKind| RefineGap::new(kind, format!("the fact of {kind:?}"));
+        let answered: Vec<GapKind> = GapKind::ALL
+            .into_iter()
+            .filter(|k| k.solver_answered())
+            .collect();
+        assert_eq!(
+            answered,
+            [GapKind::NoInterpolant, GapKind::OutsideGrammar],
+            "the answered kinds"
+        );
+        for step in [BarrenStep::NoPredicate, BarrenStep::NothingNew] {
+            let (reason, told) = barren_refinement(step, &[]);
+            assert_eq!(told, None, "{step:?}, no gap: {reason}");
+            assert!(reason.contains(GRAMMAR_CEILING), "{step:?}: {reason}");
+            for kind in GapKind::ALL {
+                let (reason, told) = barren_refinement(step, &[gap(kind)]);
+                if kind.solver_answered() {
+                    assert_eq!(told, None, "{step:?} / {kind:?}: {reason}");
+                    assert!(
+                        reason.contains(GRAMMAR_CEILING),
+                        "{step:?} / {kind:?}: {reason}"
+                    );
+                    continue;
+                }
+                assert_eq!(told, Some(kind), "{step:?} / {kind:?}: {reason}");
+                assert!(
+                    !reason.contains(GRAMMAR_CEILING),
+                    "{step:?} / {kind:?}: {reason}"
+                );
+                assert!(
+                    reason.contains(&gap(kind).what),
+                    "{step:?} / {kind:?}: the report carries the gap's fact: {reason}"
+                );
+                for other in &answered {
+                    for gaps in [[gap(*other), gap(kind)], [gap(kind), gap(*other)]] {
+                        let (reason, told) = barren_refinement(step, &gaps);
+                        assert_eq!(
+                            told,
+                            Some(kind),
+                            "{step:?} / {kind:?} beside {other:?}: {reason}"
+                        );
+                        assert!(
+                            !reason.contains(GRAMMAR_CEILING),
+                            "{step:?} / {kind:?} beside {other:?}: {reason}"
+                        );
+                    }
+                }
+            }
+        }
+        // The single-step pass has no ceiling of its own to claim: with every query answered
+        // it says what it lacks, and with one cut short it says what the IC3 pass says.
+        for kind in GapKind::ALL {
+            let (reason, told) = no_single_step_refinement(&[gap(kind)]);
+            assert!(!reason.contains(GRAMMAR_CEILING), "{kind:?}: {reason}");
+            if kind.solver_answered() {
+                assert_eq!(told, None, "{kind:?}: {reason}");
+            } else {
+                assert_eq!(
+                    (reason, told),
+                    barren_refinement(BarrenStep::NoPredicate, &[gap(kind)]),
+                    "{kind:?}"
+                );
+            }
         }
     }
 }

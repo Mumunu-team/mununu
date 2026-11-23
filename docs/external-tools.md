@@ -16,7 +16,8 @@ This document is the single canonical place describing each optional tool: what 
 | [sv2v](#sv2v--dev-only-differential-oracle) | **dev-only**: the `read_verilog` + sv2v differential oracle of `test_support` builds — never the product lift | `brew install zachjs-sv2v` | Build from [zachjs/sv2v](https://github.com/zachjs/sv2v) | `MUNUNU_SV2V_PATH` (dev-only) |
 | [Yosys](#yosys) | SystemVerilog → BTOR2 lift via yosys-slang's `read_slang` (built into yosys ≥ 0.67; `MUNUNU_YOSYS_SLANG_PLUGIN` loads a plugin on an older yosys) | `brew install yosys` | `apt install yosys` | `MUNUNU_YOSYS_PATH` |
 | [SymbiYosys (sby)](#sby--symbiyosys) | Verification oracle on RTL fixtures | Bundled with Yosys via OSS-CAD-Suite | Bundled with Yosys | `MUNUNU_SBY_PATH` |
-| [CVC5](#cvc5) | Craig interpolation predicate source (`--predicate-source craig`) | `brew install cvc5` | `apt install cvc5` (Debian 12+ / Ubuntu 24.04+) | `MUNUNU_CVC5_PATH` |
+| [CVC5](#cvc5) | The interpolation member of the reachability portfolio, and the refinement queries of `btor2 verify --engine ic3` and `--engine cube` | `brew install cvc5` | `apt install cvc5` (Debian 12+ / Ubuntu 24.04+) | `MUNUNU_CVC5_PATH` |
+| [MathSAT 5](#mathsat) | Craig interpolation predicate source (`--predicate-source craig`) | download from its site | download from its site | `MUNUNU_MATHSAT_PATH` |
 | [Verilator](#verilator) | Reset-state simulation seeding (R-S2b, sidecar `simulate_reset`) | `brew install verilator` | `apt install verilator` | `MUNUNU_VERILATOR_PATH` |
 | [slang](#slang) | SVA front-end (`sv extract-sva` / `POST /api/v1/sv/extract-sva`) | release tarball / build from source | release tarball / build from source | `MUNUNU_SLANG_PATH` |
 | [circt-verilog](#circt-verilog) | Alternative extraction frontend (`mununu-extract circt`) | build CIRCT / release tarball | build CIRCT / release tarball | n/a (pipe input) |
@@ -186,13 +187,16 @@ Missing-tool behaviour: the milestone validation harness skips fixtures that req
 
 > Source of truth: [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L74) — surface: CLI+API
 
-[CVC5](https://cvc5.github.io/) is an open-source SMT solver developed at Stanford + The University of Iowa, with strong support for SMT-LIB Craig interpolation via `(get-interpolant ...)`. Mununu uses it as a **second SMT backend** (alongside Z3) for the `PredicateSource::CraigInterpolation` path in the R.5 CEGAR loop.
+[CVC5](https://cvc5.github.io/) is an open-source SMT solver developed at Stanford + The University of Iowa, with strong support for SMT-LIB Craig interpolation via `(get-interpolant ...)`. Mununu uses it as a **second SMT backend** (alongside Z3) wherever it needs an interpolant over bit-vectors and arrays.
 
 CVC5 is invoked via subprocess (mirroring the sv2v / Yosys / SBY pattern); mununu does not link the `cvc5` / `cvc5-sys` Rust crates because they carry heavy build dep chains (GMP, CLN, antlr3-c).
 
 Used by:
-- The R.5 CEGAR loop when the predicate source is `Craig` (CLI: `--predicate-source craig`; sidecar: `cegar.predicate_source = "craig"`).
-- Future Craig-based refinement paths (mununu's roadmap may extend CVC5 use to other refinement strategies).
+- The interpolation member (`interp`) of the reachability portfolio behind `btor2 verify` and `sv verify-auto`.
+- The refinement queries of the experimental abstract IC3 engine (`btor2 verify --engine ic3`).
+- The last-resort predicate discovery of the cube engine (`btor2 verify --engine cube`).
+
+Not used by the `craig` predicate source of `btor2 cegar`: that one runs [MathSAT](#mathsat).
 
 ### macOS
 ```bash
@@ -223,7 +227,11 @@ cd build && make -j
 
 ### Missing-tool behaviour
 
-When `PredicateSource::CraigInterpolation` is selected (via CLI or sidecar) but CVC5 isn't found at runtime, mununu emits an `AdapterWarning` documenting the missing dep + the install instructions, then **falls back to the WeakestPrecondition heuristic** for the CEGAR run. The verification verdict is still computed; it just uses a less precise predicate-discovery mechanism. Other mununu pipelines that don't request Craig are unaffected.
+Without cvc5 each user says so where its result is read, and the run goes on with what is left:
+
+- The portfolio lists the `interp` member under `refused` with the reason; the other members still decide.
+- `btor2 verify --engine ic3` reports in `detail` that the interpolation query did not run, and why. It does not call that a grammar ceiling: those words are kept for a refinement whose every query was answered (mununu#1188).
+- `btor2 verify --engine cube`, on a run that reaches its last-resort predicate discovery, reports in `detail` that the discovery's query did not run. On a definite verdict the note says the verdict does not depend on the discovery.
 
 ### Version requirements
 
@@ -235,9 +243,25 @@ CVC5 is **not** installed by `docker/Dockerfile.dev`. Contributors install it lo
 
 - Pro: CI doesn't pay the CVC5 build/install cost (~50MB image growth).
 - Pro: Mininum Docker image stays small.
-- Con: CI doesn't exercise the Craig path; the `#[ignore]`d integration tests stay ignored on CI. Contributors run them locally via `cargo test -- --ignored` after `brew install cvc5`.
+- Con: the pull-request runner does not exercise the cvc5 paths; a test that needs cvc5 skips there. The `mununu-sva` image (`docker/Dockerfile.sva`) does carry cvc5, and the nightly runs those tests in it.
 
-When the Craig path becomes load-bearing for a milestone (e.g. V.3 speculative non-interference), a pattern-A follow-up will add CVC5 to `Dockerfile.dev` + remove the `#[ignore]`s. Tracked as sub-item 3.6 in the R-track multi-session breakdown — a deferred-with-trigger entry that fires when mununu opens a binary distribution channel (Homebrew formula / Debian package / Docker Hub image).
+---
+
+## MathSAT
+
+> Source of truth: [`locate_mathsat`](../crates/mununu-core/src/adapter/btor2/native_interp.rs#L1046) — surface: CLI+API
+
+[MathSAT 5](https://mathsat.fbk.eu/) is an SMT solver with interpolation over bit-vectors. Mununu runs it as a subprocess for one thing: the `craig` predicate source of the predicate-cube CEGAR loop (CLI: `mununu btor2 cegar --predicate-source craig`; API: `predicate_source: "craig"`; sidecar: `cegar.predicate_source = "craig"`), which asks it for the interpolant of a may-but-not-must transition.
+
+MathSAT is distributed by its authors under its own licence terms; read them before you install it. Mununu does not bundle it, and the `mununu-sva` image does not ship it (checked 2026-11-23).
+
+### Discovery
+1. `MUNUNU_MATHSAT_PATH` env var (explicit override).
+2. `mathsat` on `$PATH`.
+
+### Missing-tool behaviour
+
+When the `craig` source is selected and MathSAT is not found, the run emits one warning that names `MUNUNU_MATHSAT_PATH` and refines every iteration with the weakest-precondition source (`wp`). The verdict is still computed. When MathSAT is found and a query is not answered — it stopped at the query limit, which is fixed at 10 s and which no flag changes, or it failed — the iteration refines with `wp`, and the run warns once for each kind of stop. A query MathSAT answered with no usable interpolant is the source working, and is not a warning.
 
 ---
 
@@ -389,6 +413,9 @@ sby --help
 
 # CVC5
 cvc5 --version
+
+# MathSAT 5
+mathsat -version
 
 # Verilator
 verilator --version

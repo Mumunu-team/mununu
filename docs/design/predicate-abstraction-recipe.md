@@ -298,7 +298,7 @@ process-algebra world (the explicit-CLTS path), not the cube.
 **Out-of-fragment forms are gated, not silently answered.**
 [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L381)
 (wired into the CEGAR loop at
-[`cegar.rs`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L1263), surfaced
+[`cegar.rs`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L1272), surfaced
 on the `warnings` channel across all three surfaces) emits a soundness warning —
 *not* a hard reject, so V.6's controllability-aware cube keeps working — for:
 
