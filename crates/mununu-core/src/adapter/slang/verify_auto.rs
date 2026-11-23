@@ -72,7 +72,8 @@ use crate::mu_calculus::{Formula, Node};
 use super::verify_auto_text::{
     IMMEDIATE_ASSUME_REASON, annotation_note, bottom_reason_note, build_notes,
     coverage_summary_note, dropped_immediate_notes, escalation_stopped_note, exact_abandoned_note,
-    exact_skip_rescue_note, fair_cycle_rescue_note, liveness_rescue_note, reachability_rescue_note,
+    exact_skip_rescue_note, fair_cycle_rescue_note, isolated_engine_died_note,
+    isolated_engine_stopped_note, liveness_rescue_note, reachability_rescue_note,
     recoverability_bot_reason_note, recoverability_rescue_note, rescue_note, strong_reading_notes,
     trap_certificate_search_note, trap_certificate_withheld_note, two_state_fold_notes,
     unseedable_skip_reason, witness_miss_note,
@@ -6496,6 +6497,128 @@ fn dump_prepared_model(btor2: &str, properties: &[(String, String)], fault_model
     }
 }
 
+/// mununu#1196 — what a row becomes when the isolated `exact-symbolic` child came back with
+/// `iso`: its outcome, the reason on the row, and the note. `None` = isolation could not be
+/// attempted, and the row runs in process. One exhaustive `match`, so a new way for the child
+/// to end cannot be added without saying what the row reports.
+fn isolated_row(
+    name: &str,
+    iso: &crate::adapter::engine_isolate::Isolated,
+) -> Option<(
+    VerifyOutcome,
+    Option<BottomReason>,
+    Option<VerificationNote>,
+)> {
+    use crate::adapter::engine_isolate::Isolated;
+    Some(match iso {
+        Isolated::Unavailable(_) => return None,
+        Isolated::Holds => (VerifyOutcome::Holds, None, None),
+        // No witness under isolation — the child returns a verdict, not a counterexample.
+        // Recorded in `engine_isolate`'s docs; a consumer gating on `properties[].outcome` is
+        // unaffected, one reading traces is not.
+        Isolated::Violated => (VerifyOutcome::Violated { false_cells: 1 }, None, None),
+        Isolated::Abstained(why) => (
+            VerifyOutcome::Skipped {
+                reason: format!("exact symbolic MC (isolated): {why}"),
+            },
+            None,
+            None,
+        ),
+        // THE CASE ISOLATION EXISTS FOR. `unknown`, never `skipped`: the engine was attempted
+        // and reached no answer, and `ci_exit_code` does not fail on `skipped` — so `skipped`
+        // here would let a strict gate pass green on a property whose engine crashed.
+        Isolated::Died(why) => (
+            VerifyOutcome::Unknown { unknown_cells: 0 },
+            Some(BottomReason::EngineCrashed {
+                detail: why.to_string(),
+            }),
+            Some(isolated_engine_died_note(name, why)),
+        ),
+        // The parent ended the child on the property's budget or on a cancelled run: the row
+        // the in-process engine reports when the driver stops waiting for it (mununu#1063) —
+        // `unknown` with the budget's reason, so `--fail-on unknown` sees it.
+        Isolated::Stopped(stop) => (
+            VerifyOutcome::Unknown { unknown_cells: 0 },
+            Some(BottomReason::BudgetExpired),
+            Some(isolated_engine_stopped_note(name, *stop)),
+        ),
+    })
+}
+
+#[cfg(test)]
+mod isolated_row_tests {
+    use super::*;
+    use crate::adapter::engine_isolate::{Isolated, IsolatedStop};
+
+    /// mununu#1196 — the seam between the isolation layer and the report: every way the child
+    /// can end, and what the row says. A stop and a death are both `unknown`, and are told
+    /// apart by the reason on the row and by the note's kind.
+    #[test]
+    fn x1196_every_way_an_isolated_child_ends_has_a_row() {
+        type Row = (&'static str, Option<&'static str>, Option<&'static str>);
+        let stopped: Row = (
+            "unknown",
+            Some("budget-expired"),
+            Some("time-budget-exceeded"),
+        );
+        let cases: Vec<(Isolated, Option<Row>)> = vec![
+            (Isolated::Holds, Some(("holds", None, None))),
+            (Isolated::Violated, Some(("violated", None, None))),
+            (
+                Isolated::Abstained("bit cap".into()),
+                Some(("skipped", None, None)),
+            ),
+            (
+                Isolated::Died("signal 11".into()),
+                Some(("unknown", Some("engine-crashed"), Some("engine-isolation"))),
+            ),
+            (
+                Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms: 250 }),
+                Some(stopped),
+            ),
+            (
+                Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms: 0 }),
+                Some(stopped),
+            ),
+            (Isolated::Stopped(IsolatedStop::RunCancelled), Some(stopped)),
+            (Isolated::Unavailable("no self path".into()), None),
+        ];
+        for (iso, expected) in &cases {
+            // Exhaustive on purpose: a new outcome, or a new stop, does not compile here until
+            // it has a case above.
+            match iso {
+                Isolated::Holds
+                | Isolated::Violated
+                | Isolated::Abstained(_)
+                | Isolated::Died(_)
+                | Isolated::Unavailable(_)
+                | Isolated::Stopped(IsolatedStop::BudgetSpent { .. })
+                | Isolated::Stopped(IsolatedStop::RunCancelled) => {}
+            }
+            let got = isolated_row("p_live", iso);
+            let shape: Option<Row> = got.as_ref().map(|(outcome, bottom, note)| {
+                (
+                    outcome.label(),
+                    bottom.as_ref().map(BottomReason::tag),
+                    note.as_ref().map(|n| match n.kind.as_str() {
+                        "engine-isolation" => "engine-isolation",
+                        "time-budget-exceeded" => "time-budget-exceeded",
+                        _ => "another kind",
+                    }),
+                )
+            });
+            assert_eq!(&shape, expected, "{iso:?}");
+            if let Some((_, _, Some(note))) = &got {
+                assert_eq!(
+                    note.property.as_deref(),
+                    Some("p_live"),
+                    "the note joins to its row: {iso:?}"
+                );
+            }
+        }
+    }
+}
+
 /// The single-engine verify body: extraction → lift → reset/pin → per-property engine →
 /// replan / rescue / notes. `prelift` is `Some` when the planner supplies a shared SV → BTOR2
 /// lift (the portfolio path lifts once), `None` to lift inline (the single-engine path).
@@ -7075,70 +7198,22 @@ pub(crate) fn verify_auto_impl(
             // every OTHER property in the run still reports. A consumer measured losing 5 of 8 full
             // lane runs (62%) to that abort.
             if crate::adapter::engine_isolate::enabled() {
-                use crate::adapter::engine_isolate::Isolated;
                 let iso = crate::adapter::engine_isolate::exact_symbolic(&btor2, &formula_str);
-                // `Unavailable` falls THROUGH to the in-process path: isolation could not be
-                // attempted, which is our problem and not a reason to abstain on the property.
-                if !matches!(iso, Isolated::Unavailable(_)) {
-                    let outcome = match &iso {
-                        Isolated::Holds => VerifyOutcome::Holds,
-                        // No witness under isolation — the child returns a verdict, not a
-                        // counterexample. Recorded in `engine_isolate`'s docs; a consumer gating on
-                        // `properties[].outcome` is unaffected, one reading traces is not.
-                        Isolated::Violated => VerifyOutcome::Violated { false_cells: 1 },
-                        Isolated::Abstained(why) => VerifyOutcome::Skipped {
-                            reason: format!("exact symbolic MC (isolated): {why}"),
-                        },
-                        // THE CASE THIS EXISTS FOR. `unknown`, never `skipped`: the engine was
-                        // attempted and reached no answer, and `ci_exit_code` does not fail on
-                        // `skipped` — so `skipped` here would let a strict gate pass green on a
-                        // property whose engine crashed.
-                        Isolated::Died(_) => VerifyOutcome::Unknown { unknown_cells: 0 },
-                        Isolated::Unavailable(_) => unreachable!("filtered above"),
-                    };
-                    if let Isolated::Died(why) = &iso {
-                        report.notes.push(VerificationNote {
-                            kind: "engine-isolation".to_string(),
-                            level: NoteLevel::ScopeCaveat,
-                            summary: format!(
-                                "`{}`: the exact-symbolic engine DIED in its isolated child — {why}. \
-                                 The property is `unknown`; every other property in this run is \
-                                 unaffected, which is what isolation buys (mununu#543).",
-                                t.name
-                            ),
-                            detail: "The engine ran in a child process because \
-                                     MUNUNU_ISOLATE_ENGINES is set. Without isolation this death \
-                                     would have ended the whole run with no report at all. The \
-                                     underlying defect is an unbounded recursion in OxiDD's \
-                                     `apply_bin` on a malformed diagram; it is not a defect in the \
-                                     design under verification, and this property's verdict is \
-                                     absent rather than negative."
-                                .to_string(),
-                            items: vec![format!("property:{}", t.name)],
-                            // mununu#548 O-2 — the property is a FIELD now. `items` keeps its
-                            // `property:<name>` entry for one release so a consumer already
-                            // reading it does not break on the same commit that gives them the
-                            // better route.
-                            property: Some(t.name.clone()),
-                        });
-                    }
+                // `None` (isolation could not be attempted) falls THROUGH to the in-process
+                // path: that is our problem and not a reason to abstain on the property.
+                if let Some((outcome, bottom_reason, note)) = isolated_row(&t.name, &iso) {
+                    report.notes.extend(note);
                     report.properties.push(PropertyVerdict {
                         name: t.name.clone(),
                         label: t.label.clone(),
                         kind: t.kind,
                         formula: formula_str.clone(),
-                        // ask 26 — the death reason was already captured for the
-                        // `engine-isolation` NOTE above. Carry it on the FIELD as well: a crash
+                        // ask 26 — the reason is on the FIELD as well as in the note: a crash
                         // and a budget abstention were previously byte-identical here
                         // (`unknown`, `unknown_cells: 0`), so a consumer could not tell "your
                         // engine died" from "this needed more budget" — and the note that said
                         // so was filterable.
-                        bottom_reason: match &iso {
-                            Isolated::Died(why) => Some(BottomReason::EngineCrashed {
-                                detail: why.to_string(),
-                            }),
-                            _ => None,
-                        },
+                        bottom_reason,
                         outcome,
                         seeded_predicates: Vec::new(),
                         counterexample: None,

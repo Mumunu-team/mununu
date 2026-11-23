@@ -1273,6 +1273,25 @@ pub(crate) fn run_with_timeout_cancellable(
     }
 }
 
+/// mununu#1196 — wait for a child to its end, as `Command::output` does, through the one helper:
+/// for a tool that has no wall, or whose wall the user turned off (`MUNUNU_LIFT_TIMEOUT_MS=0`).
+/// "No wall" is not "no owner": the child leads its own group, its pipes are drained while it
+/// runs, and a cancelled run budget kills it ([`RUN_CANCELLED`], kind `Interrupted`) — a bare
+/// `output()` left it running after the request that started it was gone. Standard input is
+/// closed and both outputs are text, lossily decoded, as every caller read them.
+pub(crate) fn run_to_end(
+    command: &mut std::process::Command,
+) -> std::io::Result<(std::process::ExitStatus, String, String)> {
+    // `Duration::MAX` is never reached: the helper compares the time elapsed with it.
+    match run_with_timeout_cancellable(command, None, std::time::Duration::MAX, None)? {
+        Some(done) => Ok(done),
+        // The wall and the flag are the only two ways to a `None`, and this wait has neither.
+        None => Err(std::io::Error::other(
+            "the wait for the tool ended with no wall and no cancel flag",
+        )),
+    }
+}
+
 /// A child's pipe read to its end, as text. Bytes that are not UTF-8 become U+FFFD:
 /// `read_to_string` returns nothing at all for such a stream, so a solver's reply, or the
 /// stderr line that says why it stopped, was dropped whole — the two solver runners decoded

@@ -892,14 +892,11 @@ pub fn run_replay(dir: &std::path::Path, with_trace: bool) -> Result<ReplayRun, 
         if verilator.path.is_absolute() {
             cmd.arg(format!("VERILATOR={}", verilator.path.display()));
         }
-        let out = cmd
-            .output()
+        // mununu#1196 — through the adapter's one waiting helper: no wall (mununu#1223), and a
+        // cancelled run ends the build or the simulation `make` started.
+        let (_status, stdout, stderr) = crate::adapter::run_to_end(&mut cmd)
             .map_err(|e| format!("make: {e} (is `make` installed?)"))?;
-        Ok(format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ))
+        Ok(format!("{stdout}{stderr}"))
     };
     let mut output = run(None)?;
     let mut parse = parse_replay_output(&output);
