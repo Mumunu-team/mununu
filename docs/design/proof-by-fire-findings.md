@@ -443,7 +443,7 @@ without modifying that file.
 **Recommended engineering work to unlock pipeline D for modern RTL.**
 
 - Add an `sv2v`-based preprocessing stage to the sv-yosys driver
-  ([`crates/mununu-core/src/adapter/yosys/mod.rs:3676`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3676)). Source: [`zachjs/sv2v`](https://github.com/zachjs/sv2v) is the de-facto open-source preprocessor for this layer; integrates as a stdin/stdout filter.
+  ([`crates/mununu-core/src/adapter/yosys/mod.rs:3676`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3778)). Source: [`zachjs/sv2v`](https://github.com/zachjs/sv2v) is the de-facto open-source preprocessor for this layer; integrates as a stdin/stdout filter.
 - Tracking issue and scoping: outside this plan's READY-pipelines-only constraint.
 
 **Reproduction.**

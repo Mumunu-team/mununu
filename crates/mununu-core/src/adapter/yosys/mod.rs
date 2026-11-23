@@ -625,12 +625,16 @@ fn artifacts_from_cached(
     })?;
     // mununu#1198 — a stored netlist the scan cannot read is not "no storage cell on any
     // clock": the hit is refused before the multi-clock refusal is asked anything, under the
-    // opt-in too (its `clock-domains-merged` note is written from these domains).
+    // opt-in too (its `clock-domains-merged` note is written from these domains). Only the
+    // flattened netlist is read again here, by the scan itself; `LiftCache::lookup` is what
+    // checks both snapshots of an entry.
     let clock_domains = clock_domains_with_hierarchy(&hit.flat_netlist_json, &hit.hier_json)
         .map_err(|damage| AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: crate::adapter::owner::mununu_defect(&format!(
-                "adapter/yosys: the lift cache entry's flattened netlist snapshot cannot be used                  ({damage}); the cache lookup treats such an entry as a miss, so the clock check                  was reached without a netlist to run on"
+                "adapter/yosys: the lift cache entry's flattened netlist snapshot cannot be used \
+                 ({damage}); the cache lookup treats such an entry as a miss, so the clock check \
+                 was reached without a netlist to run on"
             )),
             location: None,
         })?;
@@ -1118,11 +1122,11 @@ fn run_sv_flatten_btor2_concrete(
 }
 
 /// A JSON snapshot the lift's script writes, read back; missing or empty is a lift error that
-/// names the file (mununu#957), and so is one that is not a netlist ([`snapshot_modules`],
-/// mununu#1198): every reader downstream answers "nothing found" for a text it cannot parse.
+/// names the file (mununu#957), and so is one that is not a netlist (mununu#1198): every reader
+/// downstream answers "nothing found" for a text it cannot parse. [`snapshot_modules`] is the
+/// one judge of the text, the empty one included.
 fn read_lift_snapshot(path: &Path, what: &str) -> Result<String, AdapterError> {
     match std::fs::read_to_string(path) {
-        Ok(text) if text.trim().is_empty() => Err(lift_snapshot_error(path, what, "it is empty")),
         Ok(text) => match snapshot_modules(&text) {
             Ok(_) => Ok(text),
             Err(damage) => Err(lift_snapshot_error(path, what, &damage.to_string())),
@@ -1138,7 +1142,9 @@ fn read_lift_snapshot(path: &Path, what: &str) -> Result<String, AdapterError> {
 /// yosys wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotDamage {
-    /// Not JSON (a truncated file, an empty one); the parser's message.
+    /// No text at all (an empty file, an empty field of a cache entry).
+    Empty,
+    /// Not JSON (a truncated file); the parser's message.
     NotJson(String),
     /// JSON with no `modules` object, or with an empty one.
     NoModules,
@@ -1149,6 +1155,7 @@ pub enum SnapshotDamage {
 impl std::fmt::Display for SnapshotDamage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SnapshotDamage::Empty => f.write_str("it is empty"),
             SnapshotDamage::NotJson(e) => write!(f, "it is not JSON: {e}"),
             SnapshotDamage::NoModules => f.write_str("it holds no module"),
             SnapshotDamage::ModuleWithoutCells(module) => {
@@ -1165,6 +1172,9 @@ impl std::fmt::Display for SnapshotDamage {
 pub(crate) fn snapshot_modules(
     text: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, SnapshotDamage> {
+    if text.trim().is_empty() {
+        return Err(SnapshotDamage::Empty);
+    }
     let root = serde_json::from_str::<serde_json::Value>(text)
         .map_err(|e| SnapshotDamage::NotJson(e.to_string()))?;
     let modules = match root {
@@ -2630,8 +2640,9 @@ fn translate_sv_per_module_impl(
         ),
         location: None,
     })?;
-    // mununu#1198 — a snapshot that is not a netlist is said to be one: read on, it is "no
-    // non-blackbox modules" below, which names the design for what the snapshot lacks.
+    // mununu#1198 — a snapshot that is not a netlist is reported as that. Left to the readers
+    // below it would be "no non-blackbox modules", which blames the design for what the
+    // snapshot lacks.
     if let Err(damage) = snapshot_modules(&hier_body) {
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -4476,6 +4487,9 @@ mod tests {
     /// What a snapshot can be when it is not a netlist, with the damage each one is: a
     /// truncated write, an empty file (a missing one read as nothing), JSON of another shape.
     fn damaged_snapshots() -> Vec<DamagedSnapshot> {
+        fn empty(d: &SnapshotDamage) -> bool {
+            matches!(d, SnapshotDamage::Empty)
+        }
         fn not_json(d: &SnapshotDamage) -> bool {
             matches!(d, SnapshotDamage::NotJson(_))
         }
@@ -4491,7 +4505,8 @@ mod tests {
                 ONE_CLOCK_NETLIST[..ONE_CLOCK_NETLIST.len() / 2].to_string(),
                 not_json,
             ),
-            ("empty", String::new(), not_json),
+            ("empty", String::new(), empty),
+            ("blank", " \n".to_string(), empty),
             ("not JSON", "not json".to_string(), not_json),
             ("an array", "[]".to_string(), no_modules),
             (

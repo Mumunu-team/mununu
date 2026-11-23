@@ -300,9 +300,9 @@ impl LiftCache {
             return None;
         }
         // mununu#1198 — a stored snapshot that is not a netlist (one an earlier build stored
-        // from a yosys run that wrote a partial file, one written by hand) is a miss: read as one, the clock scan and the black-box scan find
-        // nothing in it, and the hit would be a lift with neither check. The lift that follows
-        // the miss replaces the entry.
+        // from a yosys run that wrote a partial file, one written by hand) is a miss: read as
+        // one, the clock scan and the black-box scan find nothing in it, and the hit would be a
+        // lift with neither check. The lift that follows the miss replaces the entry.
         for (what, snapshot) in [
             ("hierarchy", &lift.hier_json),
             ("flattened netlist", &lift.flat_netlist_json),
