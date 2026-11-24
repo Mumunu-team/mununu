@@ -28,3 +28,4 @@ mod third_party_inventory_g1;
 mod timeout_setter_named_on_its_surface_1197;
 mod unconfirmed_paths_reach_every_report_1175;
 mod verilator_build_directories_1176;
+mod written_scripts_wait_out_a_busy_file_1247;

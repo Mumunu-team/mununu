@@ -2074,4 +2074,14 @@ endmodule
         assert!(part.holds.is_empty() && part.unknown.is_empty());
         assert!(!part.exhaustive, "one of the two reset levels");
     }
+
+    /// mununu#1189 — the seam between the request and the wording of its cut notes: with an
+    /// inventory the reader is the one whose notes owe the inventory's rule too, without one it
+    /// is the encoding scan's. Only the image test of the routes covered this choice; this
+    /// pins it where `make ci` runs.
+    #[test]
+    fn a_check_fsm_request_with_an_inventory_is_read_as_the_inventory_reader() {
+        assert_eq!(fsm_check_reader(true), LiftReader::FsmLiveness);
+        assert_eq!(fsm_check_reader(false), LiftReader::FsmEncoding);
+    }
 }

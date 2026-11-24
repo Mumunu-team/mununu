@@ -299,6 +299,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).ok()?;
+            crate::adapter::stand_in_script::wait_out_a_busy_script(&p, "--probe");
         }
         Some(p)
     }
@@ -336,17 +337,7 @@ mod tests {
         )
         .expect("write the stand-in");
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        // A fork on another test's thread can hold this file open for writing for an instant,
-        // and an exec in that instant fails with ETXTBSY (errno 26). Wait it out here, where
-        // the retry is the test's to make and not the runner's.
-        for _ in 0..100 {
-            match std::process::Command::new(&fake).arg("--probe").output() {
-                Err(e) if e.raw_os_error() == Some(26) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10))
-                }
-                _ => break,
-            }
-        }
+        crate::adapter::stand_in_script::wait_out_a_busy_script(&fake, "--probe");
         fake
     }
 
