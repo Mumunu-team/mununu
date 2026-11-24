@@ -2237,20 +2237,12 @@ struct SvEmitBtor2PerModuleArgs {
 /// cegar-extraction Stage 2 — `mununu sv cegar`. SV-direct CEGAR in one
 /// command: lift SV → single flattened BTOR2 (yosys-slang) → predicate-
 /// abstraction refinement loop. The CEGAR flags mirror `btor2 cegar`
-/// exactly; the source half mirrors `sv emit-btor2-per-module`.
+/// exactly; the lift arguments are the ones every lifting `sv` verb takes
+/// (mununu#1190).
 #[derive(Args, Debug)]
 struct SvCegarArgs {
-    /// Primary SystemVerilog source file (.sv / .v).
-    #[arg(value_name = "SV_FILE")]
-    file: PathBuf,
-    /// Additional SV source files (packages, sub-modules, `include`
-    /// targets), staged alongside the primary input. Repeatable.
-    #[arg(long = "source", value_name = "FILE")]
-    sources: Vec<PathBuf>,
-    /// Top module name. Recommended for multi-module designs so Yosys
-    /// flattens from the right root; omitted lets Yosys auto-detect.
-    #[arg(long = "top", value_name = "NAME")]
-    top: Option<String>,
+    #[command(flatten)]
+    lift: SvLiftArgs,
     /// Use Yosys's `setundef -anyseq` instead of the default
     /// `setundef -zero` (per-cycle havoc on undefined nets).
     #[arg(long = "setundef-anyseq")]
@@ -2513,8 +2505,8 @@ struct SvVerifyAutoArgs {
     expect: ExpectArgs,
 }
 
-/// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify-liveness` /
-/// `verify-recoverability`, the structural checks and `sv mutate`).
+/// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify-auto`, `sv verify-liveness`
+/// / `verify-recoverability`, `sv cegar`, the structural checks and `sv mutate`).
 #[derive(Args, Debug)]
 struct SvLiftArgs {
     /// Primary SystemVerilog source file (.sv / .v). Omit when using `--design-dir`.
@@ -4734,6 +4726,7 @@ fn btor2_cegar(args: Btor2CegarArgs) -> Result<(), String> {
             emit_ctxdsl: args.emit_ctxdsl.as_deref(),
             json: args.json,
             engine: args.engine,
+            lift_notes: &[],
         },
     )
 }
@@ -4742,38 +4735,46 @@ fn btor2_cegar(args: Btor2CegarArgs) -> Result<(), String> {
 /// command: lift SystemVerilog to a single flattened BTOR2 (yosys-slang) and run the same predicate-abstraction refinement loop as
 /// `btor2 cegar`. Surface peer of the API `POST /api/v1/sv/cegar`.
 fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
-    use std::collections::HashMap;
+    use mununu_core::adapter::sv_verify::{LiftReader, Lifted};
 
-    let primary_content = std::fs::read_to_string(&args.file)
-        .map_err(|e| format!("Failed to read SV source '{}': {e}", args.file.display()))?;
-    let mut additional: HashMap<String, String> = HashMap::new();
-    for src in &args.sources {
-        let name = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| format!("Invalid additional source path: {}", src.display()))?;
-        let body = std::fs::read_to_string(src)
-            .map_err(|e| format!("Failed to read additional source '{}': {e}", src.display()))?;
-        additional.insert(name.to_string(), body);
+    // The reset simulation a sidecar may ask for reads the design's primary file from disk.
+    // `--design-dir` names no file, and the simulation would be skipped without a word
+    // (mununu#1263), so the combination is refused with what to pass instead.
+    if args.lift.file.is_none()
+        && let Some(sidecar) = &args.sidecar
+        && sidecar_asks_for_reset_simulation(sidecar)?
+    {
+        return Err(format!(
+            "sv cegar: the sidecar '{}' asks for a reset simulation (`simulate_reset`), which \
+             reads the design's primary file, and --design-dir names none. Give the primary file \
+             as SV_FILE with --search-path <DIR> for the other sources (and --include-dir <DIR> \
+             for include fragments) in place of --design-dir, or take `simulate_reset` out of \
+             the sidecar.",
+            sidecar.display()
+        ));
     }
 
-    let yopts = mununu_core::adapter::yosys::YosysOptions {
-        top: args.top.clone(),
-        additional_sources: additional.into_iter().collect(),
-        primary_source_path: Some(args.file.display().to_string()),
-        frontend: mununu_core::adapter::yosys::SvFrontend::Slang,
-        setundef_anyseq: args.setundef_anyseq,
-        setundef_anyconst: args.setundef_anyconst,
-        ..Default::default()
-    };
-    // SV → single flattened BTOR2 (the predicate-cube lift wants one
-    // transition system, not the per-module split).
-    let btor2 = mununu_core::adapter::yosys::sv_to_btor2(&primary_content, &yopts)
-        .map_err(|e| format!("sv cegar: SV → BTOR2 (yosys-slang): {}", e.message))?;
+    let (setundef_anyseq, setundef_anyconst) = (args.setundef_anyseq, args.setundef_anyconst);
+    let primary_source_path = args.lift.file.as_ref().map(|p| p.display().to_string());
+    // SV → single flattened BTOR2 (the predicate-cube lift wants one transition system, not the
+    // per-module split), through the carrier of every lifting `sv` verb: the route's own call.
+    let Lifted {
+        lift_notes,
+        result: btor2,
+    } = read_sv_lift(&args.lift)?
+        .lift_with_notes_under(LiftReader::Cegar, |yopts| {
+            mununu_core::adapter::yosys::YosysOptions {
+                setundef_anyseq,
+                setundef_anyconst,
+                primary_source_path,
+                ..yopts
+            }
+        })
+        .map_err(|e| format!("sv cegar: {e}"))?;
 
     run_cegar_cli(
         &btor2,
-        &args.file.display().to_string(),
+        &args.lift.primary_display(),
         CegarCliParams {
             formula: &args.formula,
             predicates: &args.predicates,
@@ -4785,13 +4786,24 @@ fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
             config_values: &args.init_values,
             controllable_inputs: &args.controllable_inputs,
             // The SV input itself is the reset-simulation source.
-            sv_source: Some(args.file.as_path()),
+            sv_source: args.lift.file.as_deref(),
             sidecar: args.sidecar.as_deref(),
             emit_ctxdsl: args.emit_ctxdsl.as_deref(),
             json: args.json,
             engine: args.engine,
+            lift_notes: &lift_notes,
         },
     )
+}
+
+/// Whether the sidecar at `path` declares a `simulate_reset` block, read as the bit-blaster
+/// reads it. A sidecar that does not parse runs no reset simulation there, so it is not one that
+/// asks for it; a file that cannot be read is an error here as it is in the run.
+fn sidecar_asks_for_reset_simulation(path: &Path) -> Result<bool, String> {
+    use mununu_core::adapter::systemverilog::annotation::SvAnnotation;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read sidecar '{}': {e}", path.display()))?;
+    Ok(serde_json::from_str::<SvAnnotation>(&content).is_ok_and(|a| a.simulate_reset.is_some()))
 }
 
 /// XL.6a — `mununu sv extract-sva`: run the slang SVA front-end over an SV
@@ -5217,6 +5229,14 @@ fn lift_note_lines(notes: &[mununu_core::api::models::VerificationNoteView]) -> 
             std::iter::once(head).chain(items)
         })
         .collect()
+}
+
+/// The lift's notes under a hand-built text report (the CEGAR verbs), in the lines the typed
+/// reports print.
+fn print_lift_note_lines(notes: &[mununu_core::adapter::slang::verify_auto::VerificationNote]) {
+    for line in lift_note_lines(&mununu_core::api::models::lift_note_views(notes)) {
+        println!("{line}");
+    }
 }
 
 /// mununu#537 — the human-readable expectation verdict, printed after the report.
@@ -5742,6 +5762,9 @@ struct CegarCliParams<'a> {
     emit_ctxdsl: Option<&'a Path>,
     json: bool,
     engine: EngineArg,
+    /// What the lift decided about the design (`sv cegar`); empty on `btor2 cegar`, which
+    /// lifts nothing.
+    lift_notes: &'a [mununu_core::adapter::slang::verify_auto::VerificationNote],
 }
 
 /// Run the predicate-abstraction refinement loop over a BTOR2 design
@@ -5782,6 +5805,7 @@ fn run_symbolic_cegar_cli(
     config_values: &[String],
     max_iterations: usize,
     json: bool,
+    lift_notes: &[mununu_core::adapter::slang::verify_auto::VerificationNote],
 ) -> Result<(), String> {
     use mununu_core::adapter::btor2::symbolic_bitblast::MustSemantics;
     use mununu_core::adapter::btor2::symbolic_engine::{
@@ -5830,7 +5854,7 @@ fn run_symbolic_cegar_cli(
     };
 
     if json {
-        let summary = serde_json::json!({
+        let mut summary = serde_json::json!({
             "fixture": fixture_label,
             "engine": "symbolic",
             "refinement_iterations": refinements,
@@ -5844,11 +5868,8 @@ fn run_symbolic_cegar_cli(
             },
             "outcome": outcome,
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&summary)
-                .map_err(|e| format!("serialize summary: {e}"))?
-        );
+        attach_lift_notes(&mut summary, lift_notes)?;
+        print_json_summary(&summary)?;
     } else {
         println!("Symbolic predicate-cube CEGAR");
         println!("  fixture:              {fixture_label}");
@@ -5859,6 +5880,7 @@ fn run_symbolic_cegar_cli(
         println!("  feasible cubes:       {}", v.cube_verdicts.len());
         println!("  verdict cells:        T={t} F={f} ⊥={b}");
         println!("  outcome:              {outcome}");
+        print_lift_note_lines(lift_notes);
     }
     Ok(())
 }
@@ -5945,6 +5967,7 @@ fn run_cegar_cli(
             params.config_values,
             params.max_iterations,
             params.json,
+            params.lift_notes,
         );
     }
 
@@ -6125,7 +6148,7 @@ fn run_cegar_cli(
     let undecided_cells = trace.undecided_cells(WITNESS_CAP);
 
     if params.json {
-        let summary = serde_json::json!({
+        let mut summary = serde_json::json!({
             "fixture": fixture_label,
             "formula": params.formula,
             "predicate_source": format!("{:?}", params.predicate_source),
@@ -6158,11 +6181,8 @@ fn run_cegar_cli(
             "lazy_lift_pending": trace.lazy_lift_pending,
             "warnings": trace.warnings.iter().map(|w| w.message.clone()).collect::<Vec<_>>(),
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&summary)
-                .map_err(|e| format!("serialize summary: {e}"))?
-        );
+        attach_lift_notes(&mut summary, params.lift_notes)?;
+        print_json_summary(&summary)?;
     } else {
         println!("CEGAR refinement loop completed");
         println!("  fixture:           {fixture_label}");
@@ -6224,6 +6244,7 @@ fn run_cegar_cli(
                 println!("    - {}", w.message);
             }
         }
+        print_lift_note_lines(params.lift_notes);
     }
 
     Ok(())
@@ -11657,6 +11678,228 @@ mod lift_notes_tests {
                     .to_string(),
                 "        · clk_a (posedge, 1 cell)".to_string(),
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod sv_cegar_lift_args_tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    /// The `--long` names a command takes.
+    fn long_flags(command: &clap::Command) -> Vec<String> {
+        command
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The `sv` verbs, each with its `--long` names, read from the parser itself.
+    fn sv_verbs() -> Vec<(String, Vec<String>)> {
+        let cli = Cli::command();
+        let sv = cli.find_subcommand("sv").expect("the `sv` group");
+        sv.get_subcommands()
+            .map(|verb| (verb.get_name().to_string(), long_flags(verb)))
+            .collect()
+    }
+
+    fn sv_cegar_args(argv: &[&str]) -> SvCegarArgs {
+        let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        let Commands::Sv { command } = cli.command else {
+            panic!("{argv:?} is not an `sv` command");
+        };
+        let SvCommand::Cegar(args) = *command else {
+            panic!("{argv:?} is not `sv cegar`");
+        };
+        args
+    }
+
+    /// mununu#1190 — a verb that lifts through the shared lift arguments takes ALL of them.
+    /// `sv cegar` had its own three (`SV_FILE`, `--source`, `--top`), so a design that needs a
+    /// search path, an include directory, a parameter or a cut could not reach it. The verbs are
+    /// read from the parser; the one that takes `--merge-clock-domains` is the one that lifts
+    /// this way, and `cegar` is among them.
+    #[test]
+    fn every_sv_verb_that_takes_the_merge_flag_takes_every_lift_argument() {
+        let lift = long_flags(&<SvLiftArgs as clap::Args>::augment_args(
+            clap::Command::new("lift"),
+        ));
+        assert!(lift.iter().any(|flag| flag == "merge-clock-domains"));
+        let verbs = sv_verbs();
+        let lifting: Vec<&(String, Vec<String>)> = verbs
+            .iter()
+            .filter(|(_, flags)| flags.iter().any(|flag| flag == "merge-clock-domains"))
+            .collect();
+        assert!(
+            lifting.iter().any(|(verb, _)| verb == "cegar"),
+            "`sv cegar` takes the lift arguments; the verbs that do: {:?}",
+            lifting.iter().map(|(verb, _)| verb).collect::<Vec<_>>()
+        );
+        let mut missing = Vec::new();
+        for (verb, flags) in lifting {
+            for flag in &lift {
+                if !flags.contains(flag) {
+                    missing.push(format!("sv {verb} lacks --{flag}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{}", missing.join("\n"));
+    }
+
+    /// mununu#1190 — the lift arguments parse on `sv cegar` into the shared lift arguments, with
+    /// a file or, under `--design-dir`, with none; with neither it is a usage error.
+    #[test]
+    fn sv_cegar_parses_the_lift_arguments_with_a_file_or_a_design_dir() {
+        let cegar = ["--formula", "nu X. < true > X", "--predicate", "r == 0"];
+        let with_file = sv_cegar_args(
+            &[
+                &["mununu", "sv", "cegar", "d.sv", "--top", "top"][..],
+                &["--search-path", "rtl", "--include-dir", "inc"],
+                &["--source", "pkg.sv", "--param", "W=3"],
+                &[
+                    "--lift-override",
+                    "u_mem=mem_stub.sv",
+                    "--cutpoint",
+                    "u_core.busy",
+                ],
+                &["--merge-clock-domains"],
+                &cegar,
+            ]
+            .concat(),
+        );
+        let lift = &with_file.lift;
+        assert_eq!(lift.file.as_deref(), Some(Path::new("d.sv")));
+        assert_eq!(lift.top.as_deref(), Some("top"));
+        assert_eq!(lift.search_paths, [PathBuf::from("rtl")]);
+        assert_eq!(lift.include_dirs, [PathBuf::from("inc")]);
+        assert_eq!(lift.sources, [PathBuf::from("pkg.sv")]);
+        assert_eq!(lift.params, ["W=3"]);
+        assert_eq!(lift.lift_override, ["u_mem=mem_stub.sv"]);
+        assert_eq!(lift.cutpoint, ["u_core.busy"]);
+        assert!(lift.merge_clock_domains);
+
+        let with_dir = sv_cegar_args(
+            &[
+                &[
+                    "mununu",
+                    "sv",
+                    "cegar",
+                    "--design-dir",
+                    "rtl",
+                    "--top",
+                    "top",
+                ][..],
+                &["--exclude", "tb_top.sv"],
+                &cegar,
+            ]
+            .concat(),
+        );
+        assert_eq!(with_dir.lift.file, None);
+        assert_eq!(with_dir.lift.design_dir.as_deref(), Some(Path::new("rtl")));
+        assert_eq!(with_dir.lift.exclude, ["tb_top.sv"]);
+
+        let neither = [&["mununu", "sv", "cegar"][..], &cegar].concat();
+        assert!(Cli::try_parse_from(&neither).is_err());
+    }
+
+    /// A sidecar that asks for a reset simulation, and the same one without the block.
+    const WITH_RESET_SIMULATION: &str = r#"{
+        "module": "top",
+        "simulate_reset": {
+            "clock_signal": "clk",
+            "reset_signal": "rst",
+            "reset_asserted": 1,
+            "hold_cycles": 1
+        }
+    }"#;
+    const WITHOUT_RESET_SIMULATION: &str = r#"{ "module": "top" }"#;
+
+    /// The block is found as the run finds it: present, absent, and (a sidecar that does not
+    /// parse starts no reset simulation in the run) not present in a file that is not a sidecar.
+    /// A file that cannot be read is an error.
+    #[test]
+    fn a_sidecar_asks_for_a_reset_simulation_exactly_when_it_carries_the_block() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (name, content, asks) in [
+            ("with.json", WITH_RESET_SIMULATION, true),
+            ("without.json", WITHOUT_RESET_SIMULATION, false),
+            ("not-a-sidecar.json", "{ simulate_reset", false),
+        ] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).expect("write the sidecar");
+            assert_eq!(sidecar_asks_for_reset_simulation(&path), Ok(asks), "{name}");
+        }
+        assert!(sidecar_asks_for_reset_simulation(&tmp.path().join("absent.json")).is_err());
+    }
+
+    /// mununu#1190 — the reset simulation reads the design's primary file, and `--design-dir`
+    /// names none: the run would skip it without a word (mununu#1263), so the combination is
+    /// refused before the lift, and every flag the refusal names is one `sv cegar` takes. The
+    /// same command with a sidecar that asks for no simulation is not refused for it.
+    #[test]
+    fn a_reset_simulation_sidecar_under_design_dir_is_refused_with_flags_of_the_verb() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("rtl");
+        std::fs::create_dir(&dir).expect("create the design directory");
+        let run = |sidecar_name: &str, content: &str| {
+            let sidecar = tmp.path().join(sidecar_name);
+            std::fs::write(&sidecar, content).expect("write the sidecar");
+            sv_cegar(sv_cegar_args(&[
+                "mununu",
+                "sv",
+                "cegar",
+                "--design-dir",
+                dir.to_str().expect("a UTF-8 temporary path"),
+                "--top",
+                "top",
+                "--formula",
+                "nu X. < true > X",
+                "--predicate",
+                "r == 0",
+                "--sidecar",
+                sidecar.to_str().expect("a UTF-8 temporary path"),
+            ]))
+        };
+
+        let refusal = run("with.json", WITH_RESET_SIMULATION)
+            .expect_err("the combination is refused before the lift");
+        assert!(
+            refusal.contains("simulate_reset"),
+            "the refusal names the sidecar's key: {refusal}"
+        );
+        let cli = Cli::command();
+        let verb = cli
+            .find_subcommand("sv")
+            .and_then(|sv| sv.find_subcommand("cegar"))
+            .expect("`sv cegar`");
+        let taken = long_flags(verb);
+        let named: Vec<String> = refusal
+            .split_whitespace()
+            .filter_map(|word| word.strip_prefix("--"))
+            .map(|flag| {
+                flag.chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            named.len() >= 2,
+            "the refusal names what to pass instead: {refusal}"
+        );
+        for flag in &named {
+            assert!(
+                taken.contains(flag),
+                "`sv cegar` has no --{flag}: {refusal}"
+            );
+        }
+
+        // The directory is empty, so this run fails too, at the lift: for another reason.
+        let other = run("without.json", WITHOUT_RESET_SIMULATION);
+        assert!(
+            !matches!(&other, Err(e) if e.contains("simulate_reset")),
+            "a sidecar with no reset simulation is not refused for one: {other:?}"
         );
     }
 }
