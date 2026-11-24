@@ -188,7 +188,7 @@ The house style is conservative and consistent — read it once, recognize it ev
 - **`#[serde(default)]` + `deny_unknown_fields` + `rename_all = "snake_case"`** on every deserialized API struct — [contract/discover.rs:46](crates/mununu-core/src/contract/discover.rs#L46).
 - **`thiserror::Error` + `#[from]`** for error enums; hand-rolled `Display + Error` only when messages need dynamic formatting — [ltl/translator.rs:57](crates/mununu-core/src/ltl/translator.rs#L57).
 - **Pattern-first `match` guards** — reserve `if` clauses for runtime predicates, not shape checks a pattern would express — [abstraction/domains.rs:363](crates/mununu-core/src/abstraction/domains.rs#L363).
-- **`unsafe { … }` with a `// SAFETY:` line naming the invariant** — every naked block is a review finding — [adapter/yosys/mod.rs:1910](crates/mununu-core/src/adapter/yosys/mod.rs#L2077).
+- **`unsafe { … }` with a `// SAFETY:` line naming the invariant** — every naked block is a review finding — [adapter/yosys/mod.rs:1910](crates/mununu-core/src/adapter/yosys/mod.rs#L2076).
 - **`macro_rules!`** used only when a `fn` or a generic won't do (item-emitting macros, ≥ 3 call sites) — [clts/mod.rs:158](crates/mununu-core/src/clts/mod.rs#L158) (`impl_id_storage!`).
 - **Consume-self builders** (`mut self` chain → terminal `.finish()`) — no accidental re-use, no partial-state escape — [context/mod.rs:1148](crates/mununu-core/src/context/mod.rs#L1148) (`ContextBuilder`).
 - **`RefCell` inside `&self`-only structs** for interned caches — [composition/mod.rs:41](crates/mununu-core/src/composition/mod.rs#L41) (`ProductStateArena`). Prefer `&mut self` when the callsite shape allows.
