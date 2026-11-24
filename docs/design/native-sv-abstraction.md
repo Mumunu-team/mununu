@@ -117,7 +117,7 @@ Integration is a subprocess dependency, discovered via the same `locate_*` patte
 
 ### §3.2 Yosys with hierarchy preserved
 
-The current Yosys script at [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L4295) runs `read_verilog; hierarchy -top; proc; cutpoint -blackbox; flatten; async2sync; chformal -lower; dffunmap; setundef …; write_btor`. The `flatten` pass inlines every submodule, discarding the structural decomposition mununu needs for per-module abstraction.
+The current Yosys script at [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L4296) runs `read_verilog; hierarchy -top; proc; cutpoint -blackbox; flatten; async2sync; chformal -lower; dffunmap; setundef …; write_btor`. The `flatten` pass inlines every submodule, discarding the structural decomposition mununu needs for per-module abstraction.
 
 The replacement script:
 
@@ -136,7 +136,7 @@ foreach mod in $(submod -list):
     write_btor -x design_<mod>.btor    # one BTOR2 per submodule
 ```
 
-Per-module BTOR2 emission via `submod -name <mod>; write_btor` is ~200 LOC of script-generator change in [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L4295) plus multi-output handling in `translate_sv` (the orchestrator that today calls the BTOR2 adapter exactly once). **BTOR2 over AIGER** is non-negotiable: AIGER throws away word-level structure, names, and types, forcing the lifter to do bit-blasting that predicate abstraction (§6) would then have to undo. The pillow plan's §A.4a finding (`phase-a4-predicate-image.md`, an untracked note) confirms BTOR2 + named registers gets the predicate-image algorithm correct on Caliptra; AIGER would not.
+Per-module BTOR2 emission via `submod -name <mod>; write_btor` is ~200 LOC of script-generator change in [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L4296) plus multi-output handling in `translate_sv` (the orchestrator that today calls the BTOR2 adapter exactly once). **BTOR2 over AIGER** is non-negotiable: AIGER throws away word-level structure, names, and types, forcing the lifter to do bit-blasting that predicate abstraction (§6) would then have to undo. The pillow plan's §A.4a finding (`phase-a4-predicate-image.md`, an untracked note) confirms BTOR2 + named registers gets the predicate-image algorithm correct on Caliptra; AIGER would not.
 
 ### §3.3 Per-module lifter from BTOR2 to KMTS-aware `Clts`
 
@@ -600,7 +600,7 @@ Total addressable removal: ~7 400 lines across the SV adapter (~67% of the curre
 | Phase | Scope | Effort | Done-criteria |
 |---|---|---|---|
 | **R.0a — sv2v wrapper** | `mununu sv preprocess` CLI + `AdapterOptions::sv_preprocess: Sv2v`; subprocess discovery + version check. | 1 wk | All `examples/systemverilog/*.sv` round-trip through `sv2v` without warnings; coverage table §3.1 graduates 5 rows from ❌ to ✅. |
-| **R.0b — Yosys-no-flatten + BTOR2-per-module** | Modify [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L4295) to use `submod -name <m>; write_btor <m>.btor` per submodule; multi-output handling in `translate_sv`. | 1 wk | At least 3 multi-module fixtures emit one BTOR2 per submodule. |
+| **R.0b — Yosys-no-flatten + BTOR2-per-module** | Modify [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L4296) to use `submod -name <m>; write_btor <m>.btor` per submodule; multi-output handling in `translate_sv`. | 1 wk | At least 3 multi-module fixtures emit one BTOR2 per submodule. |
 | **R.0c — Pipeline-faithfulness regression harness** (RETIRED by S.2b) | New CLI `mununu sv compare-pipelines <fixture>` that runs both native and BTOR2-per-module paths, diffs verdicts + intermediate-shape stats. Includes SVA-elision gate writing `sva_elision_gate.json`. **Retired when S.2b excised the native parser — `compare-pipelines` + `sv_pipeline_compare` + `tests/sv_compare_pipelines.rs` are gone (singular pipeline = nothing to compare against). M.5 confirmed M.0's surviving frontend-reach intact.** | 1 wk | `kmts_pipeline_baseline.json` for every fixture; CI job runs polarity comparisons. Gates S.0–S.2. |
 | **R.1 — KMTS data-model extension** | `TransitionModality { Sharp, MayOnly }` on `Transition`; `state_3valued_predicates` on `Clts`; `TruthDomain` trait surfacing both lattices + `BoolDomain` instantiation; composition modality merge per §6.5; **`composition/mod.rs` audit lands in the same PR for both value-equality + modality-meet**. | 2 wk | All existing `cargo test --workspace` passes unchanged; KleeneDomain produces same verdicts as BoolDomain on Sharp-everywhere CLTSes; composition test asserts the modality-meet derivation. |
 | **R.2 — BTOR2 → KMTS lifter** | New [`adapter/btor2/kmts_lift.rs`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs); predicate seeding from BTOR2 IR; predicate-image via extended `kripke_smt`. | 3 wk | At least 5 fixtures produce KMTS via the new lifter; verdicts match the native-parser baseline. |
