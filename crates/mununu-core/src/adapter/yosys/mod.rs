@@ -8675,6 +8675,9 @@ mod lift_cache_tests {
         )
         .expect("write fake yosys");
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // The fake has no probe of its own: run with `-V` it finds no script, fails to write
+        // its output and exits; only whether the kernel ran it matters here.
+        crate::adapter::stand_in_script::wait_out_a_busy_script(&fake, "-V");
         fake
     }
 
