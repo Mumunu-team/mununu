@@ -345,3 +345,22 @@ The reports that state a stop at a time limit:
 | an install hint a script prints for a developer | not scanned: it is text, not a step of a build. The `cargo-outdated` hint names the same version as the job | mununu#1242 |
 
 **Enumerating test:** `every_tool_a_build_compiles_from_source_names_its_version` (`tests/policy`), over every workflow and every Dockerfile; its controls are `an_install_with_no_version_is_seen_in_a_workflow_and_in_a_dockerfile`, `the_version_is_read_from_the_command_it_belongs_to` and `a_comment_and_a_fixed_source_are_not_findings`. **Upkeep:** the named versions are raised by hand, together with the toolchain pin.
+
+### `busy-stand-in-script`
+
+**What varies:** the test that writes a script and runs it, and whether another thread of its test binary can fork while the script is open for writing. A child forked in that instant holds a copy of the descriptor until its own `exec`, and until then the kernel refuses to run the script ("Text file busy"). The test fails for a reason that is not its subject, once in many runs. No product code is in the class: the product runs executables nobody is writing.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| the verdict stubs of the `engine_isolate` tests (core lib) | the shared wait (`stand_in_script::wait_out_a_busy_script`): the stub is probed until the kernel runs it. Before, no wait: the observed failure | mununu#1247 |
+| the fake yosys of the lift tests (core lib) | the shared wait. Before, no wait: the same exposure, not observed | mununu#1247 |
+| the engine-child stand-in of the `engine_isolate` tests (core lib) | the shared wait, in place of a loop of its own | mununu#1247 |
+| the solver stand-in of the `native_interp` tests (core lib) | the shared wait, in place of a loop of its own | mununu#1247 |
+| the forking launcher of `tests/member_kill_875.rs` | already correct: its tests run one at a time under one lock, so no other thread forks while a launcher is open for writing | — |
+| the hanging launcher of `tests/probe_timeout_876.rs` | already correct: the binary has one test | — |
+| the wait's own test | holds the script open on purpose, asks the kernel whether it refuses, and expects the wait to have seen exactly that | mununu#1247 |
+| a kernel that runs a script still open for writing | the wait returns at its first probe; the test of the wait holds on both kinds of kernel | mununu#1247 |
+| a script that stays busy | the wait gives up after 500 probes and the test that runs the script fails on the kernel's own error | mununu#1247 |
+| the `.bat` and PowerShell stand-ins on Windows | not covered: the wait is Unix-only. No failure of this kind is recorded there | — |
+
+**Enumerating test:** `every_test_that_writes_a_script_and_runs_it_waits_out_a_busy_file` (`tests/policy`), over every Rust file of the crates: a line that makes a file executable is followed by the wait, or its file is listed with the reason no other thread can fork; its control is `a_script_run_with_no_wait_is_seen`. The wait itself is pinned by `x1247_the_wait_pauses_once_per_busy_refusal_and_ends_at_the_first_other_answer` (the loop, on every OS) and `x1247_a_script_still_open_for_writing_elsewhere_is_waited_out` (the kernel's side).

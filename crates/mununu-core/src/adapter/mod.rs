@@ -1831,3 +1831,147 @@ mod run_cancel_tests {
         }
     }
 }
+
+/// mununu#1247 — the wait a test makes before it runs a script it has just written.
+///
+/// A test writes a `/bin/sh` stand-in for a tool, makes it executable and runs it. While the
+/// file was open for writing, a thread of another test may have forked a child of its own; that
+/// child holds a copy of the descriptor until its own `exec`, and until then the kernel refuses
+/// to run the script (`ETXTBSY`, "Text file busy"). Nothing can take a new copy once the write
+/// has returned, so the first probe the kernel does not refuse ends the exposure.
+///
+/// `pub`, not `pub(crate)`: the source scans of `tests/policy` drop a test-only block whose
+/// header reads `mod` or `pub mod`, and read anything else as shipped code.
+#[cfg(test)]
+pub mod stand_in_script {
+    /// `ETXTBSY`, on Linux and on macOS.
+    const TEXT_FILE_BUSY: i32 = 26;
+
+    /// The probes the wait makes before it hands the script back as it is. The test that then
+    /// runs it fails on the exec, with the kernel's own error.
+    const TRIES: usize = 500;
+
+    /// Runs `script` with `probe_arg`, 10 ms apart, until the kernel no longer refuses it as
+    /// busy. `probe_arg` is an argument the script answers at once (`--version`, `--probe`);
+    /// what the probe run prints or returns is not looked at.
+    #[cfg(unix)]
+    pub fn wait_out_a_busy_script(script: &std::path::Path, probe_arg: &str) {
+        wait_out(
+            || {
+                std::process::Command::new(script)
+                    .arg(probe_arg)
+                    .output()
+                    .map(drop)
+            },
+            || std::thread::sleep(std::time::Duration::from_millis(10)),
+        );
+    }
+
+    /// The loop of `wait_out_a_busy_script` with its probe and its pause handed in. `pause`
+    /// runs after each probe the kernel refused as busy; the loop ends at the first probe that
+    /// is anything else, or after [`TRIES`] refusals. Returns how many probes were refused.
+    fn wait_out(mut probe: impl FnMut() -> std::io::Result<()>, mut pause: impl FnMut()) -> usize {
+        let mut refused = 0;
+        while refused < TRIES {
+            match probe() {
+                Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) => {
+                    refused += 1;
+                    pause();
+                }
+                _ => break,
+            }
+        }
+        refused
+    }
+
+    /// The loop alone, the same on every OS: it pauses once per refusal, stops at the first
+    /// answer that is not one, does not wait on another error (the test that runs the script
+    /// reports that), and gives up after [`TRIES`].
+    #[test]
+    fn x1247_the_wait_pauses_once_per_busy_refusal_and_ends_at_the_first_other_answer() {
+        let busy = || std::io::Error::from_raw_os_error(TEXT_FILE_BUSY);
+
+        let mut answers = vec![Ok(()), Err(busy()), Err(busy())];
+        let (mut probes, mut pauses) = (0, 0);
+        let refused = wait_out(
+            || {
+                probes += 1;
+                answers.pop().expect("three answers, three probes")
+            },
+            || pauses += 1,
+        );
+        assert_eq!((refused, probes, pauses), (2, 3, 2));
+
+        let mut probes = 0;
+        let refused = wait_out(
+            || {
+                probes += 1;
+                Err(std::io::Error::from_raw_os_error(2))
+            },
+            || panic!("an error that is not the busy one is not waited on"),
+        );
+        assert_eq!((refused, probes), (0, 1));
+
+        let mut probes = 0;
+        let refused = wait_out(
+            || {
+                probes += 1;
+                Err(busy())
+            },
+            || {},
+        );
+        assert_eq!((refused, probes), (TRIES, TRIES));
+    }
+
+    /// The kernel's side, on the hosts that have one to ask: a script somebody still holds open
+    /// for writing, which is what a fork on another test's thread leaves behind. A plain exec
+    /// asks the kernel first whether it refuses such a script. Where it does, the wait sees the
+    /// refusal, the pause lets the holder go, and the script then runs; where it does not, the
+    /// wait has nothing to do and the script runs all the same. No clock decides either branch.
+    /// The test exists on every OS (the OS matrix's same-tests rule). Its body is empty on
+    /// Windows, where the stand-ins are not `/bin/sh` scripts and this wait is not used.
+    #[test]
+    fn x1247_a_script_still_open_for_writing_elsewhere_is_waited_out() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let script = dir.path().join("stand-in");
+            std::fs::write(&script, "#!/bin/sh\necho ran\n").expect("write the script");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let run = || std::process::Command::new(&script).output();
+
+            let mut holder = Some(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&script)
+                    .expect("open the script for writing"),
+            );
+            let kernel_refuses =
+                matches!(run(), Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY));
+            // The first pause closes the holder. A later one waits for a copy that a fork of
+            // another test took while this test wrote the script, as the real wait does.
+            let refused = wait_out(
+                || run().map(drop),
+                || match holder.take() {
+                    Some(held) => drop(held),
+                    None => std::thread::sleep(std::time::Duration::from_millis(10)),
+                },
+            );
+            assert_eq!(
+                refused > 0,
+                kernel_refuses,
+                "the wait saw {refused} refusal(s) of a script the kernel {} to run while it \
+                 is open for writing",
+                if kernel_refuses {
+                    "refuses"
+                } else {
+                    "does not refuse"
+                }
+            );
+            let out = run().expect("the script runs once nobody holds it open");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran");
+        }
+    }
+}
