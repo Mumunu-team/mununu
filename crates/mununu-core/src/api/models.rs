@@ -1161,9 +1161,16 @@ pub struct Btor2VerifyResponse {
     /// inside the window). Absent when the member does not say (`ic3`, `btormc`, `ric3`,
     /// `ric3-bmc`: their own paths, never claimed shortest) and without a trace. A consumer that
     /// reads the trace cycle by cycle (a slice, a localisation) treats anything but `true` as a
-    /// path, not the first path.
+    /// path, not the first path. With a `target` (mununu#1257): `true` when the attack is the
+    /// shallowest one (the member established it, or `native-bmc` re-derived the first one),
+    /// `false` when it is not established the shallowest — `trace_not_shortest_reason` says why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_shortest: Option<bool>,
+    /// mununu#1257 — with a `target` and `trace_shortest: false`: why the first attack was not
+    /// re-derived (the search's stop, and the setting of the limit when there is one). Absent
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_not_shortest_reason: Option<String>,
     /// With `witness`: the bound within which no path was re-derived although the verdict is
     /// `violated` (another engine found a deeper one).
     #[serde(default, skip_serializing_if = "Option::is_none")]

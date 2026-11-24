@@ -171,13 +171,6 @@ pub(super) fn coverage_summary_note(report: &AutoVerifyReport) -> VerificationNo
     }
 }
 
-/// mununu#710 — attach a concrete counterexample to every VIOLATED safety property that has none — whichever
-/// engine decided it. Native BMC re-derives the shallowest reset → violation path on a one-path
-/// monitor of the formula ([`crate::adapter::reach_rescue::safety_witness`]); a path it finds is a
-/// genuine counterexample, so the trace also cross-checks the verdict. None within the bound (a
-/// deep violation, or one only the branching reading has) leaves the field empty — the verdict is
-/// unchanged either way. Runs after every verdict-changing pass but the consistency flags, so it
-/// only spends BMC on verdicts the report ships.
 /// mununu#803 — a VIOLATED row that ships no path says why: the stage of the path finder that
 /// declined and its reason. The verdict stands; the path is the explanation, not the evidence.
 pub(super) fn witness_miss_note(
@@ -198,6 +191,36 @@ pub(super) fn witness_miss_note(
             miss.reason
         ),
         items: vec![miss.stage.to_string()],
+        property: Some(name.to_string()),
+    }
+}
+
+/// mununu#1257 — a VIOLATED row whose path is a counterexample but not established the first
+/// one: the member `by` found it at `depth` cycles, and the search for the shallowest one did
+/// not finish (`why`: its stop, and the setting of the limit when there is one). The verdict
+/// and the path stand; a reader that takes the path cycle by cycle knows a shorter one may
+/// exist. This was a log line.
+pub(super) fn witness_not_shortest_note(
+    name: &str,
+    by: &str,
+    depth: usize,
+    why: &str,
+) -> VerificationNote {
+    VerificationNote {
+        kind: "witness-not-shortest".to_string(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "{name}: the counterexample path ({by}, {depth} cycles) is not established the \
+             shortest — {why}"
+        ),
+        detail: format!(
+            "the verdict stands, and so does the path: it is `{by}`'s own counterexample, {depth} \
+             cycles long, confirmed on the concrete simulator before it shipped. `{by}` does not \
+             establish that no shorter path reaches the violation, and the search for the first \
+             one (native BMC, one query per depth up to {depth}) did not finish: {why}. A shorter \
+             path may exist."
+        ),
+        items: vec![by.to_string()],
         property: Some(name.to_string()),
     }
 }

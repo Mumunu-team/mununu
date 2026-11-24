@@ -706,19 +706,32 @@ pub fn search_witness(
 /// `ic3` and the tools' traces are their own) is re-derived by native BMC bounded by the
 /// trace's own depth — one query per depth, so the first path it finds is the first one, and
 /// the bound guarantees one exists at or below it. A re-derivation that misses (its budget,
-/// an encode failure) keeps the carried trace and says so in the log; the verdict is never
-/// touched. Without a trace, unchanged.
+/// an encode failure) keeps the carried trace and returns why beside it: the caller's report
+/// says the path it ships is a path and not the first one (mununu#1257; it was a log line).
+/// The verdict is never touched. Without a trace, unchanged.
+///
+/// mununu#1257 — the re-derivation is one query per depth up to the carried depth, and a
+/// carried path can be hundreds of thousands of cycles long. Under a caller's deadline it
+/// stops there. With no deadline on this thread it runs under the rescue slice
+/// ([`crate::adapter::run_budget::RESCUE_SLICE_ENV`]) instead of without a bound.
 ///
 /// engine: native BMC (owned, z3 QF_BV unrolling to the carried depth, under this thread's
-/// run budget); role: the shortest trace behind a verdict another member decided.
-pub fn shortest_path_for(file: &Btor2File, shipped: ShippedWitness) -> ShippedWitness {
+/// run budget or the rescue slice); role: the shortest trace behind a verdict another member
+/// decided.
+pub fn shortest_path_for(
+    file: &Btor2File,
+    shipped: ShippedWitness,
+) -> (ShippedWitness, Option<String>) {
+    use crate::adapter::run_budget::{current, enter, rescue_slice_ms};
     let Some(trace) = &shipped.trace else {
-        return shipped;
+        return (shipped, None);
     };
     if shipped.shortest == Some(true) {
-        return shipped;
+        return (shipped, None);
     }
     let depth = u32::try_from(trace.states.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let budget = rederivation_budget(current(), rescue_slice_ms());
+    let _guard = enter(&budget);
     match bmc_bad_reachable_witness(file, depth) {
         Ok((BmcOutcome::Violated { depth: first }, Some(shortest))) => {
             tracing::info!(
@@ -727,30 +740,69 @@ pub fn shortest_path_for(file: &Btor2File, shipped: ShippedWitness) -> ShippedWi
                 first,
                 "witness: the carried path was not established shortest; re-derived by native BMC"
             );
-            ShippedWitness {
-                trace: Some(shortest),
-                by: Some("native-bmc"),
-                shortest: Some(true),
-                unavailable_within_k: None,
-                unavailable_reason: None,
-                contradicted_by: shipped.contradicted_by.clone(),
-            }
+            (
+                ShippedWitness {
+                    trace: Some(shortest),
+                    by: Some("native-bmc"),
+                    shortest: Some(true),
+                    unavailable_within_k: None,
+                    unavailable_reason: None,
+                    contradicted_by: shipped.contradicted_by.clone(),
+                },
+                None,
+            )
         }
         other => {
-            // Silence is a defect: the carried path ships, and the log says the shortest
-            // one was not re-derived and why.
+            // Silence is a defect: the carried path ships, and the caller is told the
+            // shortest one was not re-derived and why.
+            let why = match other {
+                Err(BmcError::BudgetExpired { k }) if crate::adapter::run_budget::cancelled() => {
+                    format!("the run was cancelled while native BMC was at depth {k}")
+                }
+                // The setting is named only when a limit was in force: the solver also
+                // reports a stop of its own this way, and with the slice disabled and no
+                // deadline there is nothing to raise.
+                Err(e @ BmcError::BudgetExpired { .. }) if budget.remaining_ms().is_some() => {
+                    format!("{e}; {}", budget.set_by().remedy())
+                }
+                Err(BmcError::BudgetExpired { k }) => format!(
+                    "native BMC stopped at depth {k} without an answer from the solver, and \
+                     no time limit was in force"
+                ),
+                Err(e) => e.to_string(),
+                Ok((BmcOutcome::Violated { depth: first }, _)) => format!(
+                    "native BMC reached `bad` at depth {first} but the solver returned no model"
+                ),
+                // The carried path replayed on this model, so a path of its depth exists.
+                Ok((BmcOutcome::NoCexWithin { k }, _)) => {
+                    crate::adapter::owner::mununu_defect(&format!(
+                        "native BMC found no path within the {k} cycles of a path that replays"
+                    ))
+                }
+            };
             tracing::warn!(
                 by = shipped.by,
                 depth,
-                outcome = %match &other {
-                    Ok((o, t)) => format!("{o:?}, model: {}", t.is_some()),
-                    Err(e) => format!("{e:?}"),
-                },
+                why = %why,
                 "witness: the carried path is not established shortest and native BMC did \
                  not re-derive one within its depth; the carried path ships"
             );
-            shipped
+            (shipped, Some(why))
         }
+    }
+}
+
+/// mununu#1257 — the budget [`shortest_path_for`] re-derives under: the caller's when it has a
+/// deadline, as it is; otherwise a child of it bounded by the rescue slice (`slice_ms`, `None`
+/// when the user disabled the slice — then the caller's lack of a bound stands).
+fn rederivation_budget(
+    outer: crate::adapter::run_budget::Budget,
+    slice_ms: Option<u64>,
+) -> crate::adapter::run_budget::Budget {
+    if outer.remaining_ms().is_none() {
+        crate::adapter::run_budget::Budget::child(&outer, slice_ms, SetBy::RescueSliceEnv)
+    } else {
+        outer
     }
 }
 
@@ -1312,29 +1364,101 @@ mod tests {
             unavailable_reason: None,
             contradicted_by: Vec::new(),
         };
-        let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(false)));
+        let (w, why) = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(false)));
         assert_eq!((w.by, w.shortest), (Some("native-bmc"), Some(true)));
+        assert_eq!(why, None);
         let t = w.trace.expect("the re-derived path");
         assert_eq!(t.states.len(), 4, "{t:?}");
         // The same without a claim either way (`ic3`'s trace) is re-derived too.
-        let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), None));
+        let (w, why) = shortest_path_for(&file, shipped(Some(six_steps.clone()), None));
         assert_eq!((w.by, w.shortest), (Some("native-bmc"), Some(true)));
+        assert_eq!(why, None);
         // Established shortest: ships as it is, no search.
-        let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(true)));
+        let (w, why) = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(true)));
         assert_eq!((w.by, w.shortest), (Some("sat-bmc"), Some(true)));
-        assert_eq!(w.trace, Some(six_steps));
+        assert_eq!(w.trace, Some(six_steps.clone()));
+        assert_eq!(why, None);
         // No trace: unchanged.
-        let w = shortest_path_for(&file, shipped(None, None));
+        let (w, why) = shortest_path_for(&file, shipped(None, None));
         assert_eq!((w.trace, w.by), (None, None));
+        assert_eq!(why, None);
         // A depth native BMC finds nothing within (a 1-step "path" on a design whose first
         // violation is at depth 3): the carried path ships, unchanged.
         let one_step = BmcTrace {
             states: vec![vec![]; 2],
             inputs: vec![vec![]; 2],
         };
-        let w = shortest_path_for(&file, shipped(Some(one_step.clone()), Some(false)));
+        let (w, why) = shortest_path_for(&file, shipped(Some(one_step.clone()), Some(false)));
         assert_eq!((w.by, w.shortest), (Some("sat-bmc"), Some(false)));
         assert_eq!(w.trace, Some(one_step));
+        assert!(
+            why.is_some(),
+            "the caller is told the path is not the first one"
+        );
+
+        // mununu#1257 — a re-derivation stopped by the time limit: the carried path ships as
+        // it is, and the reason closes with the setting of the limit that stopped it — for
+        // every setter, mununu's own included (then it says no setting moves it).
+        use crate::adapter::run_budget::{Budget, enter};
+        for set_by in SetBy::ALL {
+            let spent = Budget::child(&Budget::unbounded(), Some(0), set_by);
+            let (w, why) = {
+                let _guard = enter(&spent);
+                shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(false)))
+            };
+            assert_eq!(
+                (w.by, w.shortest),
+                (Some("sat-bmc"), Some(false)),
+                "{set_by:?}"
+            );
+            assert_eq!(w.trace, Some(six_steps.clone()), "{set_by:?}");
+            let why = why.unwrap_or_else(|| panic!("{set_by:?}: a stop without a reason"));
+            assert!(why.ends_with(&set_by.remedy()), "{set_by:?}: {why}");
+        }
+        // A cancelled run is not a limit to raise: no setting is named.
+        let cancelled = Budget::child(&Budget::unbounded(), None, SetBy::TimeoutFlag);
+        cancelled.cancel();
+        let (w, why) = {
+            let _guard = enter(&cancelled);
+            shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(false)))
+        };
+        assert_eq!(w.trace, Some(six_steps));
+        let why = why.expect("a cancelled re-derivation says so");
+        assert!(
+            SetBy::ALL.iter().all(|s| !why.ends_with(&s.remedy())),
+            "{why}"
+        );
+    }
+
+    /// mununu#1257 — the re-derivation never runs without a bound unless the user disabled
+    /// the slice: a caller's deadline is honoured as it is (and keeps its setter); with none,
+    /// the rescue slice bounds it and is the setting a stop names.
+    #[test]
+    fn x1257_a_rederivation_with_no_deadline_runs_under_the_rescue_slice() {
+        use crate::adapter::run_budget::Budget;
+        let b = rederivation_budget(Budget::unbounded(), Some(5_000));
+        assert!(b.remaining_ms().is_some_and(|ms| ms <= 5_000));
+        assert_eq!(b.set_by(), SetBy::RescueSliceEnv);
+        // Every setter of a caller's deadline: longer or shorter than the slice, it stands.
+        for set_by in SetBy::ALL {
+            for ms in [50, 600_000] {
+                let outer = Budget::child(&Budget::unbounded(), Some(ms), set_by);
+                let b = rederivation_budget(outer, Some(5_000));
+                assert_eq!(b.set_by(), set_by, "{set_by:?} at {ms} ms");
+                assert!(
+                    b.remaining_ms().is_some_and(|left| left <= ms),
+                    "{set_by:?} at {ms} ms"
+                );
+                if ms > 5_000 {
+                    assert!(b.remaining_ms().is_some_and(|left| left > 5_000));
+                }
+            }
+        }
+        // The slice disabled (`0`): the caller's lack of a bound stands.
+        assert_eq!(
+            rederivation_budget(Budget::unbounded(), None).remaining_ms(),
+            None
+        );
     }
 
     /// REPRODUCER (mununu#1076) — the fallback names the members that proved `bad` unreachable

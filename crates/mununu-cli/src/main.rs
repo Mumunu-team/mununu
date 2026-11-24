@@ -4441,6 +4441,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             "trace": (o.verdict == "violated" && o.depth.is_some())
                 .then(|| mununu_core::api::models::Trace::attack(o.depth, &o.attack)),
             "trace_by": o.trace_by,
+            "trace_shortest": o.trace_shortest,
+            "trace_not_shortest_reason": o.trace_not_shortest_reason,
             "trace_unavailable_reason": o.trace_unavailable_reason,
             "trace_replay_failed": o
                 .trace_replay_failed

@@ -76,7 +76,7 @@ use super::verify_auto_text::{
     isolated_engine_stopped_note, liveness_rescue_note, reachability_rescue_note,
     recoverability_bot_reason_note, recoverability_rescue_note, rescue_note, strong_reading_notes,
     trap_certificate_search_note, trap_certificate_withheld_note, two_state_fold_notes,
-    unseedable_skip_reason, witness_miss_note,
+    unseedable_skip_reason, witness_miss_note, witness_not_shortest_note,
 };
 pub(crate) use super::verify_auto_text::{
     clock_root_notes, lift_clock_notes, merged_clock_domains_note, row_not_run_reason,
@@ -1864,7 +1864,103 @@ fn contradicted_row(
     bottom_reason_note(&prop.name, reason)
 }
 
+/// mununu#1257 — why a row's path search does not start: the memory ceiling was reached, the
+/// run was cancelled, or the run's time is spent. `None` when it may start. The time clause
+/// closes with the setting of the limit that ended the run.
+fn path_work_stop() -> Option<String> {
+    use crate::adapter::run_budget::{cancelled, current, expired};
+    if let Err(hit) = crate::adapter::memory_budget::check_process_memory_budget() {
+        return Some(format!("the path search did not start: {hit}"));
+    }
+    if cancelled() {
+        return Some("the run was cancelled before this row's path search started".to_string());
+    }
+    expired().then(|| {
+        format!(
+            "the run's time ended before this row's path search started; {}",
+            current().set_by().remedy()
+        )
+    })
+}
+
+/// mununu#1257 — the safety path of one violated row, searched under a slice of its own: a
+/// child of this thread's budget bounded by the rescue slice (`slice_ms`; `None` when the user
+/// disabled the slice, and then the outer budget alone bounds the search). The row's verdict
+/// is fixed before this runs, so the path work of one row may not spend what the run has left
+/// for the rows after it: one row's path took the hour of the run budget, and the next
+/// violated row shipped with neither a path nor a note. A search that misses with the slice
+/// spent closes its reason with the setting of the limit that bound it, or says the run was
+/// cancelled.
+///
+/// engine: the trace-carrier portfolio (owned IC3 on CaDiCaL, SAT BMC, btormc / rIC3 /
+/// rIC3-BMC subprocesses), then native BMC (z3 QF_BV, one query per depth) to
+/// [`SAFETY_WITNESS_MAX_K`] past the monitor's depth; role: the path behind a verdict another
+/// engine decided, never the decider.
+fn safety_path_under_slice(
+    design_btor2: &str,
+    formula: &Formula,
+    reset_pinned: bool,
+    slice_ms: Option<u64>,
+) -> Result<crate::adapter::reach_rescue::SafetyPath, crate::adapter::reach_rescue::WitnessMiss> {
+    use crate::adapter::run_budget::{Budget, SetBy, cancelled, current, enter};
+    let slice = Budget::child(&current(), slice_ms, SetBy::RescueSliceEnv);
+    let _guard = enter(&slice);
+    let found = crate::adapter::reach_rescue::safety_witness_by(
+        design_btor2,
+        formula,
+        reset_pinned,
+        SAFETY_WITNESS_MAX_K,
+    );
+    match found {
+        Err(mut miss) if miss.stage == "search" && slice.expired() => {
+            let close = if cancelled() {
+                "the run was cancelled".to_string()
+            } else {
+                slice.set_by().remedy()
+            };
+            if !miss.reason.ends_with(&close) {
+                miss.reason = format!("{}; {close}", miss.reason);
+            }
+            Err(miss)
+        }
+        found => found,
+    }
+}
+
+/// mununu#710 — the path of every violated safety row that shipped without one, whichever
+/// engine decided it, searched after every verdict-changing pass but the consistency flags (so
+/// it only spends work on verdicts the report ships). A path found is a genuine
+/// counterexample, so it also cross-checks the verdict; without one the verdict is unchanged.
+/// A violated row leaves here with a path or with a `witness-unavailable` note that
+/// names the stage and the reason (mununu#803, #849, #1257): a formula that does not parse
+/// back (`parse`), a shape the safety path finder does not cover (`no-path`), a run that
+/// cannot start the search (`budget`), a search that missed. A row a verdict pass already
+/// explained is not noted a second time for the first three, and a row whose search already
+/// ran and missed (the re-plan's rescue lane, under the same slice) is not searched again.
+///
+/// One exit changes the verdict: a member that proves the violation unreachable during the
+/// search contradicts the row, which leaves `violated` (mununu#1076). That cross-check is
+/// part of the search, so it runs under the row's slice too: a contradiction a member would
+/// reach only after the slice is not found, the row stays `violated`, and its
+/// `witness-unavailable` note names the setting that gives the search more time.
 fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, reset_pinned: bool) {
+    attach_safety_witnesses_under(
+        report,
+        design_btor2,
+        reset_pinned,
+        crate::adapter::run_budget::rescue_slice_ms(),
+    );
+}
+
+/// [`attach_safety_witnesses`] with the slice each row's search runs under
+/// ([`safety_path_under_slice`]).
+fn attach_safety_witnesses_under(
+    report: &mut AutoVerifyReport,
+    design_btor2: &str,
+    reset_pinned: bool,
+    slice_ms: Option<u64>,
+) {
+    use crate::adapter::reach_rescue::WitnessMiss;
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     let mut misses: Vec<VerificationNote> = Vec::new();
     let explained: std::collections::HashSet<String> = report
@@ -1873,46 +1969,86 @@ fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, re
         .filter(|n| n.kind == "witness-unavailable")
         .filter_map(|n| n.property.clone())
         .collect();
+    // The re-plan's rescue lane searches under the same slice ([`safety_path_under_slice`]):
+    // a second search of a row it missed would spend a second slice to write the same note.
+    let searched: std::collections::HashSet<String> = report
+        .notes
+        .iter()
+        .filter(|n| {
+            n.kind == "witness-unavailable" && n.items.first().is_some_and(|s| s == "search")
+        })
+        .filter_map(|n| n.property.clone())
+        .collect();
     for prop in report.properties.iter_mut() {
-        if !matches!(prop.outcome, VerifyOutcome::Violated { .. }) || prop.counterexample.is_some()
+        if !matches!(prop.outcome, VerifyOutcome::Violated { .. })
+            || prop.counterexample.is_some()
+            || searched.contains(&prop.name)
         {
             continue;
         }
-        if crate::adapter::memory_budget::check_process_memory_budget().is_err()
-            || crate::adapter::run_budget::expired()
-        {
-            break;
-        }
-        let Ok(formula) = mu_parser::parse(&prop.formula) else {
-            continue;
+        // A reason this pass gives without searching: a net under the verdict passes, not a
+        // second voice beside a note one of them already wrote for the row.
+        let mut say = |prop: &PropertyVerdict, stage: &'static str, reason: String| {
+            if !explained.contains(&prop.name) {
+                misses.push(witness_miss_note(
+                    &prop.name,
+                    prop.decided_by.as_deref(),
+                    &WitnessMiss {
+                        stage,
+                        reason,
+                        contradicted_by: Vec::new(),
+                    },
+                ));
+            }
+        };
+        let formula = match mu_parser::parse(&prop.formula) {
+            Ok(formula) => formula,
+            Err(e) => {
+                // mununu#1257 — this was a bare `continue`: VIOLATED with no path and no note.
+                say(
+                    prop,
+                    "parse",
+                    crate::adapter::owner::mununu_defect(&format!(
+                        "the row's own formula does not parse back ({e})"
+                    )),
+                );
+                continue;
+            }
         };
         if formula.property_class() != PropertyClass::Safety {
             // mununu#849 — no safety path finder for this shape: the path, when there is one,
             // comes from the engine that decided the row. One that decided without a path and
             // recorded no reason (a fallback after an exact refusal, a rescue lane, an isolated
             // child) would otherwise ship VIOLATED with neither.
-            if !explained.contains(&prop.name) {
-                misses.push(witness_miss_note(
-                    &prop.name,
-                    prop.decided_by.as_deref(),
-                    &crate::adapter::reach_rescue::WitnessMiss {
-                        stage: "no-path",
-                        reason: "the engine that decided this non-safety row returned a verdict \
-                                 and no path, and the safety path finder does not cover its shape"
-                            .to_string(),
-                        contradicted_by: Vec::new(),
-                    },
-                ));
-            }
+            say(
+                prop,
+                "no-path",
+                "the engine that decided this non-safety row returned a verdict and no path, and \
+                 the safety path finder does not cover its shape"
+                    .to_string(),
+            );
             continue;
         }
-        match crate::adapter::reach_rescue::safety_witness(
-            design_btor2,
-            &formula,
-            reset_pinned,
-            SAFETY_WITNESS_MAX_K,
-        ) {
-            Ok(trace) => prop.counterexample = Some(safety_counterexample(trace)),
+        // mununu#1257 — this was a bare `break` (the #849 pair): every violated row from here on
+        // shipped with neither a path nor a note. Each one now says why its search did not
+        // start.
+        if let Some(why) = path_work_stop() {
+            say(prop, "budget", why);
+            continue;
+        }
+        match safety_path_under_slice(design_btor2, &formula, reset_pinned, slice_ms) {
+            Ok(path) => {
+                // The path ships either way; one not established the first one says so.
+                if let Some(why) = &path.not_shortest {
+                    misses.push(witness_not_shortest_note(
+                        &prop.name,
+                        path.by,
+                        path.trace.states.len().saturating_sub(1),
+                        why,
+                    ));
+                }
+                prop.counterexample = Some(safety_counterexample(path.trace));
+            }
             // mununu#1076 — a contradiction is not a miss: the row leaves `violated`.
             Err(miss) if miss.proved_unreachable() => {
                 let decided_by = prop.decided_by.clone();
@@ -2229,8 +2365,20 @@ fn attach_repair_candidates(
             repairs.push((p.name.clone(), rep));
             continue;
         }
-        let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
-            continue;
+        // mununu#1257 — a formula that does not parse back left the row with no localisation
+        // entry at all; it is said, like every other row the pass cannot work on.
+        let formula = match crate::mu_calculus::parser::parse(&p.formula) {
+            Ok(formula) => formula,
+            Err(e) => {
+                rep.status = Some(status(
+                    "unavailable",
+                    Some(crate::adapter::owner::mununu_defect(&format!(
+                        "the row's own formula does not parse back ({e})"
+                    ))),
+                ));
+                repairs.push((p.name.clone(), rep));
+                continue;
+            }
         };
         // The model with this row's violation as a `bad`: the safety witness monitor the path
         // itself came from. A row the monitor does not cover (not a safety shape) says so.
@@ -8245,39 +8393,34 @@ pub(crate) fn escalate_bottom_with_slice(
                             // BMC extracts the `Init → ¬invariant` path from the same bad-monitor.
                             // A safety CEX is a finite path (empty `cycle`); the monitor adds no
                             // state, so the trace is over the original design registers.
-                            let witness = under_rescue_slice(slice_ms, &mut slice_expired, || {
-                                Some(crate::adapter::reach_rescue::safety_witness(
-                                    design_btor2,
-                                    &formula,
-                                    reset_pinned,
-                                    SAFETY_WITNESS_MAX_K,
-                                ))
-                            });
+                            // mununu#1257 — under a slice of the row's own, shared with the
+                            // post-pass ([`safety_path_under_slice`]).
+                            let witness = safety_path_under_slice(
+                                design_btor2,
+                                &formula,
+                                reset_pinned,
+                                slice_ms,
+                            );
                             prop.counterexample = match witness {
-                                Some(Ok(trace)) => Some(safety_counterexample(trace)),
+                                Ok(path) => {
+                                    if let Some(why) = &path.not_shortest {
+                                        notes.push(witness_not_shortest_note(
+                                            &prop.name,
+                                            path.by,
+                                            path.trace.states.len().saturating_sub(1),
+                                            why,
+                                        ));
+                                    }
+                                    Some(safety_counterexample(path.trace))
+                                }
                                 // mununu#1076 — a contradiction is not a miss: the row
                                 // leaves `violated` (the rescue note below would name a
                                 // verdict the row no longer carries, so it is skipped).
-                                Some(Err(miss)) if miss.proved_unreachable() => {
+                                Err(miss) if miss.proved_unreachable() => {
                                     notes.push(contradicted_row(prop, Some("reach-rescue"), &miss));
                                     None
                                 }
-                                Some(Err(miss)) => {
-                                    notes.push(witness_miss_note(
-                                        &prop.name,
-                                        Some("reach-rescue"),
-                                        &miss,
-                                    ));
-                                    None
-                                }
-                                None => {
-                                    let miss = crate::adapter::reach_rescue::WitnessMiss {
-                                        stage: "slice",
-                                        reason:
-                                            "the rescue slice expired before the path search ran"
-                                                .to_string(),
-                                        contradicted_by: Vec::new(),
-                                    };
+                                Err(miss) => {
                                     notes.push(witness_miss_note(
                                         &prop.name,
                                         Some("reach-rescue"),
@@ -15199,6 +15342,289 @@ module uart_tx(); endmodule"#;
             .map(|n| n.items.clone())
             .collect();
         assert_eq!(misses, vec![vec!["exact-refused".to_string()]]);
+    }
+
+    /// A VIOLATED safety row as the exact engine leaves it: no path. The formula is the
+    /// weak-until of [`TWO_BIT_PULSES`], which the one-path monitor compiles and a three-cycle
+    /// path violates.
+    fn violated_weak_until_row(name: &str) -> PropertyVerdict {
+        let ltl = crate::ltl::parser::parse("G (a_q -> X (!a_q W b_q))").unwrap();
+        PropertyVerdict {
+            name: name.into(),
+            label: Some("alternates".into()),
+            kind: SvaKind::Assert,
+            formula: crate::ltl::universal::translate_universal_text(&ltl).unwrap(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: vec![],
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+            portfolio: None,
+        }
+    }
+
+    /// The `witness-unavailable` notes of `property`, as their stage lists.
+    fn path_miss_stages(report: &AutoVerifyReport, property: &str) -> Vec<Vec<String>> {
+        report
+            .notes
+            .iter()
+            .filter(|n| n.kind == "witness-unavailable" && n.property.as_deref() == Some(property))
+            .map(|n| n.items.clone())
+            .collect()
+    }
+
+    /// mununu#1257 — the path work runs after the verdicts, and a run whose time was spent
+    /// left the post-pass with a bare `break`: every violated row from there on shipped with
+    /// neither a path nor a note (measured on the raster twin: the second violated row of a run
+    /// whose first row's path took the budget). Each row now carries a `witness-unavailable`
+    /// note at stage `budget` that closes with the remedy of the setting that ended the run —
+    /// for every setter there is.
+    #[test]
+    fn every_violated_row_a_spent_run_cannot_search_names_the_setting_that_ended_it() {
+        use crate::adapter::run_budget::{Budget, SetBy, enter};
+        for set_by in SetBy::ALL {
+            let mut report = AutoVerifyReport::default();
+            report.properties.push(violated_weak_until_row("first"));
+            report.properties.push(violated_weak_until_row("second"));
+            let spent = Budget::child(&Budget::unbounded(), Some(0), set_by);
+            let _guard = enter(&spent);
+            attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+            for row in ["first", "second"] {
+                let notes: Vec<_> = report
+                    .notes
+                    .iter()
+                    .filter(|n| {
+                        n.kind == "witness-unavailable" && n.property.as_deref() == Some(row)
+                    })
+                    .collect();
+                assert_eq!(
+                    notes.iter().map(|n| n.items.clone()).collect::<Vec<_>>(),
+                    vec![vec!["budget".to_string()]],
+                    "{set_by:?}: `{row}` says once why it has no path; notes: {:?}",
+                    report.notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+                );
+                assert!(
+                    notes[0].detail.contains(&set_by.remedy()),
+                    "{set_by:?}: the note closes with that setter's remedy: {}",
+                    notes[0].detail
+                );
+            }
+            assert!(
+                report.properties.iter().all(|p| p.counterexample.is_none()
+                    && matches!(p.outcome, VerifyOutcome::Violated { .. })),
+                "{set_by:?}: no search ran, and the verdicts stand"
+            );
+        }
+    }
+
+    /// A cancelled run is not a limit: the note says so and names no setting to raise.
+    #[test]
+    fn a_violated_row_of_a_cancelled_run_names_no_setting_to_raise() {
+        use crate::adapter::run_budget::{Budget, SetBy, enter};
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(violated_weak_until_row("first"));
+        let run = Budget::child(&Budget::unbounded(), None, SetBy::RunBudgetEnv);
+        run.cancel();
+        let _guard = enter(&run);
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        assert_eq!(
+            path_miss_stages(&report, "first"),
+            vec![vec!["budget".to_string()]]
+        );
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.kind == "witness-unavailable")
+            .unwrap();
+        for set_by in SetBy::ALL {
+            assert!(
+                !note.detail.contains(&set_by.remedy()),
+                "no setting undoes a cancellation ({set_by:?}): {}",
+                note.detail
+            );
+        }
+    }
+
+    /// The `budget` note is a net like the `no-path` one: a row a verdict pass already explained
+    /// keeps that one note. And a non-safety row needs no search, so a spent run does not cost
+    /// it its `no-path` note (the `break` used to take that one too).
+    #[test]
+    fn a_spent_run_notes_each_row_once_and_keeps_the_notes_that_need_no_search() {
+        use crate::adapter::run_budget::{Budget, SetBy, enter};
+        let mut report = AutoVerifyReport::default();
+        let explained = violated_weak_until_row("explained");
+        report.notes.push(witness_miss_note(
+            &explained.name,
+            explained.decided_by.as_deref(),
+            &crate::adapter::reach_rescue::WitnessMiss {
+                stage: "search",
+                reason: "the rescue lane's own search missed".to_string(),
+                contradicted_by: Vec::new(),
+            },
+        ));
+        report.properties.push(explained);
+        report.properties.push(violated_ag_ef_row_without_a_path());
+        report.properties.push(violated_weak_until_row("last"));
+        let spent = Budget::child(&Budget::unbounded(), Some(0), SetBy::RunBudgetEnv);
+        let _guard = enter(&spent);
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        assert_eq!(
+            path_miss_stages(&report, "explained"),
+            vec![vec!["search".to_string()]]
+        );
+        assert_eq!(
+            path_miss_stages(&report, "ann_guarantee_0"),
+            vec![vec!["no-path".to_string()]]
+        );
+        assert_eq!(
+            path_miss_stages(&report, "last"),
+            vec![vec!["budget".to_string()]]
+        );
+    }
+
+    /// A violated row whose formula text does not parse back was a bare `continue`: it now says
+    /// so, as a defect of mununu's with the place to report it.
+    #[test]
+    fn a_violated_row_whose_formula_does_not_parse_back_says_so() {
+        let mut report = AutoVerifyReport::default();
+        let mut row = violated_weak_until_row("first");
+        row.formula = "(nu G. (".into();
+        assert!(mu_parser::parse(&row.formula).is_err());
+        report.properties.push(row);
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        assert_eq!(
+            path_miss_stages(&report, "first"),
+            vec![vec!["parse".to_string()]]
+        );
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.kind == "witness-unavailable")
+            .unwrap();
+        assert!(
+            note.detail.contains(crate::adapter::owner::REPORT_URL),
+            "{}",
+            note.detail
+        );
+    }
+
+    /// A row whose search the re-plan already ran under the slice, and missed, is not searched
+    /// a second time: the design has a path a search would find, and the row keeps its one note.
+    #[test]
+    fn a_row_whose_search_already_missed_is_not_searched_again() {
+        let mut report = AutoVerifyReport::default();
+        let missed = violated_weak_until_row("missed");
+        report.notes.push(witness_miss_note(
+            &missed.name,
+            missed.decided_by.as_deref(),
+            &crate::adapter::reach_rescue::WitnessMiss {
+                stage: "search",
+                reason: "the rescue lane's own search missed".to_string(),
+                contradicted_by: Vec::new(),
+            },
+        ));
+        report.properties.push(missed);
+        report.properties.push(violated_weak_until_row("fresh"));
+        attach_safety_witnesses_under(&mut report, TWO_BIT_PULSES, false, Some(60_000));
+        assert!(report.properties[0].counterexample.is_none());
+        assert_eq!(
+            path_miss_stages(&report, "missed"),
+            vec![vec!["search".to_string()]]
+        );
+        assert!(
+            report.properties[1].counterexample.is_some(),
+            "the control: a row with no earlier search is searched, and this design has a path"
+        );
+    }
+
+    /// The positive half: with time left, every violated row of the run is searched (each under
+    /// a slice of its own) and ships its path, with no note saying it has none.
+    #[test]
+    fn each_violated_row_is_searched_under_its_own_slice() {
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(violated_weak_until_row("first"));
+        report.properties.push(violated_weak_until_row("second"));
+        attach_safety_witnesses_under(&mut report, TWO_BIT_PULSES, false, Some(60_000));
+        assert!(
+            report.properties.iter().all(|p| p.counterexample.is_some()),
+            "both rows carry a path; notes: {:?}",
+            report.notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+        );
+        assert!(
+            path_miss_stages(&report, "first").is_empty()
+                && path_miss_stages(&report, "second").is_empty()
+        );
+    }
+
+    /// A search that misses with its slice spent closes with the slice's own remedy: the
+    /// setting to raise is the one that bound this search, not the run's.
+    #[test]
+    fn a_search_that_stops_at_its_slice_closes_with_the_slice_remedy() {
+        use crate::adapter::run_budget::SetBy;
+        let row = violated_weak_until_row("first");
+        let formula = mu_parser::parse(&row.formula).unwrap();
+        let miss = safety_path_under_slice(TWO_BIT_PULSES, &formula, false, Some(0))
+            .expect_err("a slice of no time finds no path");
+        assert_eq!(miss.stage, "search", "{miss}");
+        assert!(
+            miss.reason.ends_with(&SetBy::RescueSliceEnv.remedy()),
+            "{miss}"
+        );
+        // With time, the same call finds the path.
+        let path = safety_path_under_slice(TWO_BIT_PULSES, &formula, false, Some(60_000))
+            .unwrap_or_else(|miss| panic!("the monitor compiles this shape: {miss}"));
+        assert!(path.trace.states.len() >= 3, "{:?}", path.trace);
+    }
+
+    /// The note for a path that is a counterexample and not established the first one: its own
+    /// kind (a reader of `witness-unavailable` must not take it for a missing path), the row,
+    /// the member whose path it is, and the reason as given.
+    #[test]
+    fn a_path_not_established_shortest_has_a_note_of_its_own_kind() {
+        let why = "native BMC stopped at depth 12; raise the limit";
+        let note = witness_not_shortest_note("first", "ric3-bmc", 40, why);
+        assert_eq!(note.kind, "witness-not-shortest");
+        assert_eq!(note.level, NoteLevel::Info);
+        assert_eq!(note.property.as_deref(), Some("first"));
+        assert_eq!(note.items, vec!["ric3-bmc".to_string()]);
+        assert!(note.summary.contains(why), "{}", note.summary);
+        assert!(note.detail.contains(why), "{}", note.detail);
+    }
+
+    /// The sibling stop in `--localize` (mununu#1257): a violated row with a finite path whose
+    /// formula does not parse back had no localisation entry at all. It now has one that says
+    /// whose defect it is, and the next row is still worked on.
+    #[test]
+    fn a_localisation_whose_row_formula_does_not_parse_back_says_so() {
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(violated_weak_until_row("first"));
+        report.properties.push(violated_weak_until_row("second"));
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        assert!(
+            report.properties.iter().all(|p| p.counterexample.is_some()),
+            "both rows carry a path to localise"
+        );
+        report.properties[0].formula = "(nu G. (".to_string();
+        let no_index: crate::adapter::slang::extract::Declarations =
+            Err("this test has no source index".to_string());
+        attach_repair_candidates(&mut report, TWO_BIT_PULSES, &no_index, false);
+        let status = report
+            .repair("first")
+            .and_then(|r| r.status.as_ref())
+            .expect("the row the pass could not work on has a status");
+        assert_eq!(status.status, "unavailable");
+        assert!(
+            status
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains(crate::adapter::owner::REPORT_URL)),
+            "{status:?}"
+        );
+        assert!(
+            report.repair("second").is_some_and(|r| r.status.is_some()),
+            "the row after it is still localised"
+        );
     }
 
     /// The second site of mununu#821: `build_notes` regenerates the model-level notes, and before

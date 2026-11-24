@@ -919,6 +919,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 trace_unavailable_within_k: None,
                 trace_by: None,
                 trace_shortest: None,
+                trace_not_shortest_reason: None,
                 trace_unavailable_reason: None,
                 trace_replay_failed: Vec::new(),
             }));
@@ -987,7 +988,8 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 .then(|| Trace::attack(o.depth, &o.attack)),
             trace_unavailable_within_k: None,
             trace_by: o.trace_by.map(str::to_string),
-            trace_shortest: None,
+            trace_shortest: o.trace_shortest,
+            trace_not_shortest_reason: o.trace_not_shortest_reason,
             trace_unavailable_reason: o.trace_unavailable_reason,
             trace_replay_failed: o.trace_replay_failed.iter().map(Into::into).collect(),
         }));
@@ -1084,6 +1086,8 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         trace,
         trace_by,
         trace_shortest,
+        // This path ships the member's own counterexample and does not re-derive the first one.
+        trace_not_shortest_reason: None,
         trace_unavailable_within_k,
         trace_unavailable_reason,
         trace_replay_failed,

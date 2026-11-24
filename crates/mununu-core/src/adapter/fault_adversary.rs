@@ -41,6 +41,16 @@ pub struct FaultReachOutcome {
     pub depth: Option<usize>,
     /// N5.4 — the member whose counterexample the attack is (`None` without one).
     pub trace_by: Option<&'static str>,
+    /// mununu#1257 — with a witness: whether it is the shallowest attack. `Some(true)`: no
+    /// shallower one exists (the member established it, or native BMC re-derived the first
+    /// one). `Some(false)`: it is an attack, not established the first one; with a target,
+    /// `trace_not_shortest_reason` says why. `None`: the member does not say, and without a
+    /// witness.
+    pub trace_shortest: Option<bool>,
+    /// mununu#1257 — with a target and a witness that is not established the shallowest: why
+    /// native BMC did not re-derive the first one (its stop, and the setting of the limit when
+    /// there is one). `None` otherwise.
+    pub trace_not_shortest_reason: Option<String>,
     /// mununu#1045 — on `violated` without a witness: why (each member's miss, the bound, the
     /// budget). `None` otherwise.
     pub trace_unavailable_reason: Option<String>,
@@ -48,6 +58,18 @@ pub struct FaultReachOutcome {
     /// confirm (the reach portfolio's `trace_replay_failed`); the verdict is unchanged. Empty
     /// when every path found was confirmed.
     pub trace_replay_failed: Vec<crate::adapter::reach_portfolio::UnconfirmedPath>,
+}
+
+/// What the path search of one `violated` answer gave: the fields of [`FaultReachOutcome`] it
+/// fills, all empty when there was no search.
+#[derive(Default)]
+struct AttackPath {
+    injections: Vec<FaultEvent>,
+    depth: Option<usize>,
+    by: Option<&'static str>,
+    shortest: Option<bool>,
+    not_shortest_reason: Option<String>,
+    unavailable_reason: Option<String>,
 }
 
 /// Decide whether an attacker with the posture `spec` reaches `target` (a boolean atom such as
@@ -91,18 +113,18 @@ pub fn verify_fault_reach(
                 RescueVerdict::Violated => ("violated", outcome.reachable_by.clone()),
                 _ => ("unknown", Vec::new()),
             };
-            let (attack, depth, trace_by, trace_unavailable_reason) = if verdict == "violated" {
+            let mut attack = AttackPath::default();
+            if verdict == "violated" {
                 // N5.4 seam: the trace-carrying members, then native BMC, under this thread's
-                // budget; a miss reaches the report (it was a log line).
+                // budget; a miss reaches the report (it was a log line). mununu#1257 — so does a
+                // path that is not established the first one.
                 match safety_witness_by(&model, &formula, false, witness_max_k) {
-                    Ok((trace, by)) => {
-                        let d = trace.states.len().saturating_sub(1);
-                        (
-                            faults_in_trace(&trace, &injected, spec),
-                            Some(d),
-                            Some(by),
-                            None,
-                        )
+                    Ok(path) => {
+                        attack.injections = faults_in_trace(&path.trace, &injected, spec);
+                        attack.depth = Some(path.trace.states.len().saturating_sub(1));
+                        attack.by = Some(path.by);
+                        attack.shortest = Some(path.not_shortest.is_none());
+                        attack.not_shortest_reason = path.not_shortest;
                     }
                     // mununu#1076 — a carrier of the path search proved `bad` unreachable:
                     // the verdict is the contradiction (`unknown`, both sides named), not
@@ -110,22 +132,22 @@ pub fn verify_fault_reach(
                     Err(miss) if miss.proved_unreachable() => {
                         verdict = "unknown";
                         decided_by.extend(miss.contradicted_by.iter().copied());
-                        (Vec::new(), None, None, Some(miss.to_string()))
+                        attack.unavailable_reason = Some(miss.to_string());
                     }
-                    Err(miss) => (Vec::new(), None, None, Some(miss.to_string())),
+                    Err(miss) => attack.unavailable_reason = Some(miss.to_string()),
                 }
-            } else {
-                (Vec::new(), None, None, None)
-            };
+            }
             Ok(FaultReachOutcome {
                 verdict,
                 decided_by: decided_by.iter().map(|s| s.to_string()).collect(),
                 fault: label,
                 target: Some(atom.to_string()),
-                attack,
-                depth,
-                trace_by,
-                trace_unavailable_reason,
+                attack: attack.injections,
+                depth: attack.depth,
+                trace_by: attack.by,
+                trace_shortest: attack.shortest,
+                trace_not_shortest_reason: attack.not_shortest_reason,
+                trace_unavailable_reason: attack.unavailable_reason,
                 trace_replay_failed: outcome.unconfirmed(),
             })
         }
@@ -147,7 +169,8 @@ pub fn verify_fault_reach(
                 ReachVerdict::Unreachable => ("holds", outcome.unreachable_by.clone()),
                 _ => ("unknown", Vec::new()),
             };
-            let (attack, depth, trace_by, trace_unavailable_reason) = if verdict == "violated" {
+            let mut attack = AttackPath::default();
+            if verdict == "violated" {
                 let w = witness_for_violation(
                     &injected_file,
                     witness_max_k,
@@ -167,33 +190,31 @@ pub fn verify_fault_reach(
                          — a soundness alarm (one of the two engines is wrong)",
                         w.contradicted_by.join(", ")
                     );
-                    (Vec::new(), None, None, Some(reason))
+                    attack.unavailable_reason = Some(reason);
                 } else {
                     match w.trace {
                         Some(trace) => {
-                            let d = trace.states.len().saturating_sub(1);
-                            (
-                                faults_in_trace(&trace, &injected, spec),
-                                Some(d),
-                                w.by,
-                                None,
-                            )
+                            attack.injections = faults_in_trace(&trace, &injected, spec);
+                            attack.depth = Some(trace.states.len().saturating_sub(1));
+                            attack.by = w.by;
+                            // What the member established: this branch does not re-derive.
+                            attack.shortest = w.shortest;
                         }
-                        None => (Vec::new(), None, None, w.unavailable_reason),
+                        None => attack.unavailable_reason = w.unavailable_reason,
                     }
                 }
-            } else {
-                (Vec::new(), None, None, None)
-            };
+            }
             Ok(FaultReachOutcome {
                 verdict,
                 decided_by: decided_by.iter().map(|s| s.to_string()).collect(),
                 fault: label,
                 target: None,
-                attack,
-                depth,
-                trace_by,
-                trace_unavailable_reason,
+                attack: attack.injections,
+                depth: attack.depth,
+                trace_by: attack.by,
+                trace_shortest: attack.shortest,
+                trace_not_shortest_reason: None,
+                trace_unavailable_reason: attack.unavailable_reason,
                 trace_replay_failed: outcome.unconfirmed(),
             })
         }
@@ -263,6 +284,11 @@ mod tests {
         // N5.4 — the attack names the member whose counterexample it is; no miss to report.
         assert!(o.trace_by.is_some(), "{o:?}");
         assert_eq!(o.trace_unavailable_reason, None);
+        // mununu#1257 — the response calls this the shallowest attack: the outcome says whether
+        // it is (established by the member, or re-derived by native BMC), and has no reason to
+        // give when it is.
+        assert_eq!(o.trace_shortest, Some(true), "{o:?}");
+        assert_eq!(o.trace_not_shortest_reason, None, "{o:?}");
     }
 
     /// The plain `--fault` arm (the design's own `bad`): the members carry the attack out of the
@@ -276,6 +302,9 @@ mod tests {
         assert_eq!(o.attack[0].site, "st");
         assert!(o.trace_by.is_some() && o.depth.is_some(), "{o:?}");
         assert_eq!(o.trace_unavailable_reason, None);
+        // mununu#1257 — this arm does not re-derive: it reports what the member established
+        // (which member wins differs between hosts) and never a reason.
+        assert_eq!(o.trace_not_shortest_reason, None, "{o:?}");
     }
 
     #[test]

@@ -658,7 +658,9 @@ pub fn reach_portfolio_rescue_diagnosed(
 /// Why [`safety_witness`] shipped no path: the stage that declined and its reason (mununu#803).
 /// `shape` is an honest "no witness for this formula shape" (the monitor compiles one reading;
 /// a formula outside it has no one-path witness), never an error; the other stages — `monitor`,
-/// `parse`, `search`, `bound` — name a failure or a miss the row's reader should see.
+/// `parse`, `search`, `bound` — name a failure or a miss the row's reader should see. A caller
+/// adds its own stages for a search it did not start: `sv verify-auto` writes `no-path` (a
+/// non-safety row) and `budget` (the run could not start the search, mununu#1257).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitnessMiss {
     pub stage: &'static str,
@@ -766,17 +768,31 @@ pub fn safety_witness(
     reset_pinned: bool,
     max_k: u32,
 ) -> Result<crate::adapter::btor2::native_bmc::BmcTrace, WitnessMiss> {
-    safety_witness_by(design_btor2, formula, reset_pinned, max_k).map(|(trace, _)| trace)
+    safety_witness_by(design_btor2, formula, reset_pinned, max_k).map(|path| path.trace)
 }
 
-/// [`safety_witness`] with the member whose counterexample the trace is (`sat-bmc`, `ic3`,
-/// `btormc`, `ric3`, `ric3-bmc`, or `native-bmc`; N5.4).
+/// What [`safety_witness_by`] found: the path, whose it is, and whether it is the first one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyPath {
+    pub trace: crate::adapter::btor2::native_bmc::BmcTrace,
+    /// The member whose counterexample the trace is (`sat-bmc`, `ic3`, `btormc`, `ric3`,
+    /// `ric3-bmc`, or `native-bmc`; N5.4).
+    pub by: &'static str,
+    /// mununu#1257 — `None`: no shorter path to the violation exists (the member established
+    /// it, or native BMC re-derived the path). `Some(why)`: the member did not establish it and
+    /// the re-derivation did not finish — `trace` is a path, not the first path, and a reader
+    /// that takes it cycle by cycle (a slice, a localisation, an attack) says so in its report.
+    pub not_shortest: Option<String>,
+}
+
+/// [`safety_witness`] with the member whose counterexample the trace is and whether the path
+/// is the first one ([`SafetyPath`]).
 pub fn safety_witness_by(
     design_btor2: &str,
     formula: &Formula,
     reset_pinned: bool,
     max_k: u32,
-) -> Result<(crate::adapter::btor2::native_bmc::BmcTrace, &'static str), WitnessMiss> {
+) -> Result<SafetyPath, WitnessMiss> {
     let (monitored, depth) = safety_bad_model(design_btor2, formula, reset_pinned)?;
     let file = parser::parse(&monitored).map_err(|e| WitnessMiss {
         stage: "parse",
@@ -824,9 +840,15 @@ pub fn safety_witness_by(
     }
     // mununu#1057 — the slice and `--localize` read this trace cycle by cycle, so a path the
     // carrier did not establish as the shortest is re-derived bounded by its own depth.
-    let shipped = crate::adapter::btor2::witness::shortest_path_for(&file, shipped);
+    // mununu#1257 — when the re-derivation does not finish, the carried path ships with the
+    // reason, for the caller's report.
+    let (shipped, not_shortest) = crate::adapter::btor2::witness::shortest_path_for(&file, shipped);
     match (shipped.trace, shipped.unavailable_reason) {
-        (Some(trace), _) => Ok((trace, shipped.by.unwrap_or("native-bmc"))),
+        (Some(trace), _) => Ok(SafetyPath {
+            trace,
+            by: shipped.by.unwrap_or("native-bmc"),
+            not_shortest,
+        }),
         (None, reason) => Err(WitnessMiss {
             stage: if shipped.unavailable_within_k.is_some() {
                 "bound"

@@ -713,6 +713,13 @@
         "null"
       ]
     },
+    "trace_not_shortest_reason": {
+      "description": "mununu#1257 — with a `target` and `trace_shortest: false`: why the first attack was not re-derived (the search's stop, and the setting of the limit when there is one). Absent otherwise.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "trace_replay_failed": {
       "description": "N5.4 — the members that found `bad` reachable but whose OWN witness did not replay on the design (evidence against that member's verdict — an encode or emit defect, a tool's witness for a different model — or a design the simulator cannot carry; the reason says which). The verdict is unchanged; `sole_decider` marks the member whose verdict is the whole `violated`. Absent when none failed. The subprocess members replay only with `witness`; the owned `ic3` replays inside the engine and is listed either way (mununu#1143).",
       "items": {
@@ -721,7 +728,7 @@
       "type": "array"
     },
     "trace_shortest": {
-      "description": "mununu#1057 — with `trace`: whether `trace_by` established that no shorter counterexample exists. `true`: it refuted every depth below the trace's (`native-bmc`; `sat-bmc`'s plain search, or its dynamic step when the hit is at its window's base). `false`: it did not (`sat-bmc`'s dynamic step answered a window with a deeper path — a shorter one may exist inside the window). Absent when the member does not say (`ic3`, `btormc`, `ric3`, `ric3-bmc`: their own paths, never claimed shortest) and without a trace. A consumer that reads the trace cycle by cycle (a slice, a localisation) treats anything but `true` as a path, not the first path.",
+      "description": "mununu#1057 — with `trace`: whether `trace_by` established that no shorter counterexample exists. `true`: it refuted every depth below the trace's (`native-bmc`; `sat-bmc`'s plain search, or its dynamic step when the hit is at its window's base). `false`: it did not (`sat-bmc`'s dynamic step answered a window with a deeper path — a shorter one may exist inside the window). Absent when the member does not say (`ic3`, `btormc`, `ric3`, `ric3-bmc`: their own paths, never claimed shortest) and without a trace. A consumer that reads the trace cycle by cycle (a slice, a localisation) treats anything but `true` as a path, not the first path. With a `target` (mununu#1257): `true` when the attack is the shallowest one (the member established it, or `native-bmc` re-derived the first one), `false` when it is not established the shallowest — `trace_not_shortest_reason` says why.",
       "type": [
         "boolean",
         "null"
