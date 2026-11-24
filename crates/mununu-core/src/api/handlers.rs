@@ -1872,14 +1872,25 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
     use crate::adapter::sv_verify::sv_check_fsm;
 
     let lift = sv_lift_of(&request.lift)?;
-    // One lift's notes speak for both: the `liveness` scan below lifts the same request again.
-    let crate::adapter::sv_verify::Lifted {
-        lift_notes,
-        result: findings,
-    } = sv_check_fsm(&lift, request.max_width).map_err(|message| ApiError::BadRequest {
+    let bad_request = |message| ApiError::BadRequest {
         message,
         details: None,
-    })?;
+    };
+    let terminal = if request.liveness {
+        Some(crate::api::models::parse_terminal_states(&request.terminal).map_err(bad_request)?)
+    } else {
+        None
+    };
+    // mununu#1189 — one lift for the whole response: with `liveness` its notes say what a free
+    // net means for the inventory as well as for the encoding scan.
+    let crate::adapter::sv_verify::Lifted {
+        lift_notes,
+        result:
+            crate::adapter::sv_verify::FsmCheck {
+                registers: findings,
+                liveness,
+            },
+    } = sv_check_fsm(&lift, request.max_width, terminal.as_deref()).map_err(bad_request)?;
 
     let illegal_encodings_found = findings.iter().filter(|f| f.is_finding()).count();
     let registers = findings
@@ -1894,26 +1905,11 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
         })
         .collect();
 
-    let liveness = if request.liveness {
-        let terminal =
-            crate::api::models::parse_terminal_states(&request.terminal).map_err(|message| {
-                ApiError::BadRequest {
-                    message,
-                    details: None,
-                }
-            })?;
-        crate::adapter::sv_verify::sv_check_fsm_liveness(&lift, request.max_width, &terminal)
-            .map_err(|message| ApiError::BadRequest {
-                message,
-                details: None,
-            })?
-            .result
-            .iter()
-            .map(crate::api::models::FsmLivenessView::from)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let liveness = liveness
+        .iter()
+        .flatten()
+        .map(crate::api::models::FsmLivenessView::from)
+        .collect();
 
     Ok(Json(Btor2CheckFsmResponse {
         lift_notes: crate::api::models::lift_note_views(&lift_notes),

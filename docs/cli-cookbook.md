@@ -110,7 +110,7 @@ When `--predicate-source craig` is selected and MathSAT is not found, the run sa
 
 ## Preflight a SystemVerilog design for unfaithful partial-write registers
 
-> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L550) — surface: (CLI+API+UI)
+> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L575) — surface: (CLI+API+UI)
 
 `mununu sv lint` lifts a SystemVerilog design and runs purely structural checks — at CI time (~lift cost, **no** model checking, ~0.1 s). Each finding carries a `rule` tag:
 

@@ -70,8 +70,9 @@ pub enum LiftReader {
     Recoverability,
     /// `sv check-fsm`: no illegal encoding of an FSM register is reachable.
     FsmEncoding,
-    /// `sv check-fsm --liveness`: encodings never reached, encodings never left, the return to
-    /// the reset value.
+    /// `sv check-fsm --liveness`: the encoding scan above (`registers`) beside the liveness
+    /// inventory (`liveness`: encodings never reached, encodings never left, the return to the
+    /// reset value). One report carries both, so its notes owe the rule of each.
     FsmLiveness,
     /// `sv lint`: structural checks on the lifted registers.
     Lint,
@@ -131,11 +132,14 @@ impl LiftReader {
                  logic was left out may be scanned against fewer encodings or not at all."
             }
             LiftReader::FsmLiveness => {
-                "An encoding listed as never reached is never reached on the design either. \
-                 Every other entry may rest on a free value: an encoding the register cannot \
-                 leave, the return to its reset value, and the absence of either. A register \
-                 whose own logic was left out may be scanned against fewer encodings or not at \
-                 all."
+                "In `registers`, a register reported as staying within the encodings read off \
+                 the logic that is in the model does so on the design too, and a reachable \
+                 illegal encoding may be reached only through a free value. In `liveness`, an \
+                 encoding listed as never reached is never reached on the design either, and \
+                 every other entry may rest on a free value: an encoding the register cannot \
+                 leave, the return to its reset value, and the absence of either. In both, a \
+                 register whose own logic was left out may be scanned against fewer encodings \
+                 or not at all."
             }
             LiftReader::Lint => {
                 "The lint reads the registers of the lifted model. A finding on a signal that \
@@ -193,10 +197,12 @@ impl LiftReader {
                  all."
             }
             LiftReader::FsmLiveness => {
-                "No entry transfers to the design on its own: an encoding listed as never \
-                 reached may be reached on a run the model lacks, and every other entry may rest \
-                 on a free value. A register whose own logic was left out may be scanned against \
-                 fewer encodings or not at all."
+                "Nothing in `registers` or in `liveness` transfers to the design on its own: a \
+                 register reported as staying within its encodings may leave them, and an \
+                 encoding listed as never reached may be reached, on a run the model lacks; a \
+                 reachable illegal encoding and every other entry of `liveness` may rest on a \
+                 free value. In both, a register whose own logic was left out may be scanned \
+                 against fewer encodings or not at all."
             }
             LiftReader::Cegar => {
                 "No verdict of any formula transfers to the design on its own: one that speaks \

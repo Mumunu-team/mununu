@@ -435,25 +435,50 @@ pub fn sv_verify_recoverability_refined_explained(
         })
 }
 
+/// What `sv check-fsm` computed on one lift.
+#[derive(Debug, Clone)]
+pub struct FsmCheck {
+    /// The encoding scan: one finding per FSM-like register (the report's `registers`).
+    pub registers: Vec<crate::adapter::fsm_scan::FsmFinding>,
+    /// The liveness inventory (the report's `liveness`), when the request asked for it.
+    pub liveness: Option<Vec<crate::adapter::fsm_scan::FsmLivenessFinding>>,
+}
+
+/// What reads the model of an `sv check-fsm` request: the encoding scan alone, or the scan
+/// beside the liveness inventory. The report's cut notes state the rule of this reader, so a
+/// report with an inventory says what a free net means for the inventory too (mununu#1189).
+pub(crate) fn fsm_check_reader(liveness: bool) -> LiftReader {
+    if liveness {
+        LiftReader::FsmLiveness
+    } else {
+        LiftReader::FsmEncoding
+    }
+}
+
 /// `sv check-fsm` — lift SV and auto-scan every FSM-like state register for a reachable
-/// illegal encoding (no user input). The SV-direct peer of `btor2 check-fsm`.
+/// illegal encoding (no user input); with `liveness` (`--liveness`, the terminal states it
+/// names) also run the FSM liveness inventory
+/// ([`crate::adapter::fsm_scan::fsm_liveness_scan`]). The SV-direct peer of `btor2 check-fsm`.
+///
+/// One lift serves both scans, and its notes are those of [`fsm_check_reader`]: CLI and API
+/// take the report and its notes from this one call, so neither can pair the inventory with
+/// the notes of a lift that was read for the encoding scan alone.
 pub fn sv_check_fsm(
     lift: &SvLift,
     max_width: u32,
-) -> Result<Lifted<Vec<crate::adapter::fsm_scan::FsmFinding>>, String> {
-    lift.lift_with_notes(LiftReader::FsmEncoding)?
-        .try_map(|btor2| crate::adapter::fsm_scan::fsm_encoding_scan(&btor2, max_width))
-}
-
-/// `sv check-fsm --liveness` — lift SV and run the FSM liveness inventory
-/// ([`crate::adapter::fsm_scan::fsm_liveness_scan`]).
-pub fn sv_check_fsm_liveness(
-    lift: &SvLift,
-    max_width: u32,
-    terminal: &[(String, u64)],
-) -> Result<Lifted<Vec<crate::adapter::fsm_scan::FsmLivenessFinding>>, String> {
-    lift.lift_with_notes(LiftReader::FsmLiveness)?
-        .try_map(|btor2| crate::adapter::fsm_scan::fsm_liveness_scan(&btor2, max_width, terminal))
+    liveness: Option<&[(String, u64)]>,
+) -> Result<Lifted<FsmCheck>, String> {
+    lift.lift_with_notes(fsm_check_reader(liveness.is_some()))?
+        .try_map(|btor2| {
+            Ok::<_, String>(FsmCheck {
+                registers: crate::adapter::fsm_scan::fsm_encoding_scan(&btor2, max_width)?,
+                liveness: liveness
+                    .map(|terminal| {
+                        crate::adapter::fsm_scan::fsm_liveness_scan(&btor2, max_width, terminal)
+                    })
+                    .transpose()?,
+            })
+        })
 }
 
 /// Whether a lint finding names a state register (or its alias) or a
@@ -1917,9 +1942,10 @@ endmodule
             merge_clock_domains: false,
             ..Default::default()
         };
-        let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH)
+        let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH, None)
             .expect("sv check-fsm runs")
-            .result;
+            .result
+            .registers;
         for f in &findings {
             eprintln!(
                 "  {} [{}] legal={:?} {:?}",

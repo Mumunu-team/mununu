@@ -492,7 +492,7 @@ hand-written sidecar and no supplied formula**. End to end:
 The HTTP request is just the source plus options — there is no `sidecar` or `formula`
 field:
 
-> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2360) — surface: API
+> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2356) — surface: API
 
 ```bash
 mununu sv verify-auto my_module.sv
@@ -1234,7 +1234,7 @@ what the verb computes, so the `detail` of the two cut notes is written per verb
 | `sv verify-liveness`, `sv verify-liveness-all` | a HOLDS (a response property speaks of every run). A VIOLATED may follow a run only a free value allows: read its trace against the nets listed. |
 | `sv verify-recoverability` | neither verdict on its own. `AG EF target` needs every reachable state *and* some run back from each: a HOLDS may get back through a value the left-out logic never produces, a VIOLATED may start from a state only such a value reaches. |
 | `sv check-fsm` | a register reported as staying within its encodings. A reachable illegal encoding may be reached only through a free value; a register whose own logic was left out may be scanned against fewer encodings, or not at all. |
-| `sv check-fsm --liveness` | an encoding listed as never reached. Every other entry (an encoding the register cannot leave, the return to its reset value, the absence of either) may rest on a free value. |
+| `sv check-fsm --liveness` | the report holds the scan (`registers`) and the inventory (`liveness`), read off one lift, and its notes state the rule of each by field name. In `registers`, the row above. In `liveness`, an encoding listed as never reached; every other entry (an encoding the register cannot leave, the return to its reset value, the absence of either) may rest on a free value. |
 | `sv lint` | a finding on a signal that reads a free net describes the model with that net free; a register that is not in the model is not checked. |
 | `POST /api/v1/sv/cegar` | a HOLDS of a formula whose modalities are all universal (`[…]`, negation only on the atoms), a VIOLATED of one whose modalities are all existential (`<…>`). With both kinds nested, neither verdict on its own. |
 | `sv mutate --list` | the targets listed are those of the lifted model: a register that is not in it is not among them. |
@@ -2686,7 +2686,7 @@ portfolio engines) — an agent can trust a definite verdict and treat `unknown`
 
 ## Preflight: `sv lint` — structural faults refused at write time
 
-> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L550) — surface: (CLI+API+UI)
+> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L575) — surface: (CLI+API+UI)
 
 `sv lint` runs a set of **purely structural** checks over the lifted netlist — no
 bit-blast, no properties, no environment, ~lift cost. Each finding carries a
