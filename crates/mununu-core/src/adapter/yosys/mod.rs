@@ -1304,9 +1304,8 @@ fn merge_opt_in_remedy(opt_in: MergeOptIn, accepts: &str, report: &str) -> Strin
     };
     format!(
         "{here}`--merge-clock-domains` on `sv verify-auto` / `sv verify-liveness` / \
-         `sv verify-liveness-all` / `sv verify-recoverability` / `sv check-fsm` / `sv lint` / \
-         `sv mutate` (API `lift.merge_clock_domains`) accepts {accepts} explicitly, and the \
-         report then {report}."
+         `sv verify-recoverability` / `sv check-fsm` / `sv lint` / `sv mutate` (API \
+         `lift.merge_clock_domains`) accepts {accepts} explicitly, and the report then {report}."
     )
 }
 
@@ -1443,7 +1442,7 @@ fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) 
         ),
         ClockRoot::Cut => (
             "a cut net (the output of a declared or empty black box, or a cut point: \
-             `--cutpoint` on the `sv` verbs)"
+             `--cutpoint` on the `sv` verbs that take it)"
                 .to_string(),
             FREE,
             "provide the black box's source, or remove the cut point from the clock net",
@@ -3714,7 +3713,8 @@ fn absolute_include_dir(p: &Path) -> Result<PathBuf, AdapterError> {
         kind: AdapterErrorKind::ParseError,
         message: format!(
             "adapter/yosys: the include directory `{}` is relative and the working directory \
-             cannot be read ({e}); give `--include-dir` an absolute path on the `sv` verbs",
+             cannot be read ({e}); give `--include-dir` an absolute path on the `sv` verbs \
+             that take it",
             p.display()
         ),
         location: None,
@@ -4156,7 +4156,7 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
                 "the include directory",
                 "",
                 "a directory path",
-                "check the path given to `--include-dir` on the `sv` verbs",
+                "check the path given to `--include-dir` on the `sv` verbs that take it",
             ));
         }
         let abs = absolute_include_dir(dir)?;
@@ -4171,7 +4171,8 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
                 &text,
                 "a path without whitespace, quotes or `;` on this platform (slang takes it as \
                  one unquoted token and the lift stages no link here)",
-                "move or rename the directory given to `--include-dir` on the `sv` verbs",
+                "move or rename the directory given to `--include-dir` on the `sv` verbs that \
+                 take it",
             ));
         }
     }
