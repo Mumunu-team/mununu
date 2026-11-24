@@ -1,6 +1,6 @@
 # Consumer briefing: a model with no `bad` line is no longer `holds` (2026-11)
 
-> Source of truth: [`no_obligation`](../../crates/mununu-core/src/adapter/reach_portfolio.rs) and [`require_bad_line`](../../crates/mununu-core/src/adapter/sv_verify.rs) — surface: CLI+API — `mununu sv verify-bad` / `POST /api/v1/sv/verify-bad`, `mununu btor2 verify` / `POST /api/v1/btor2/verify`
+> Source of truth: [`no_obligation`](../../crates/mununu-core/src/adapter/reach_portfolio.rs) — surface: CLI+API — `mununu btor2 verify` / `POST /api/v1/btor2/verify`. The `sv verify-bad` half (`require_bad_line` in `adapter/sv_verify.rs`) was removed with the verb in 4b447181 (mununu#1136): see [the removal briefing](2026-11-sv-verify-bad-removed.md).
 
 **Audience:** anyone who reads the `outcome` of `sv verify-bad` or `btor2 verify`.
 
