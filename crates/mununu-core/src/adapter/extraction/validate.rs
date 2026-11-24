@@ -335,13 +335,12 @@ fn check_commit_match(spec: &super::ast::ExtractionSpec, source_path: &Path) -> 
         dir = dir.parent()?;
     }
 
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
+    let mut git = std::process::Command::new("git");
+    git.args(["rev-parse", "HEAD"]).current_dir(dir);
+    // mununu#1196 — through the adapter's one waiting helper, so a cancelled run ends it.
+    let (_status, stdout, _stderr) = crate::adapter::run_to_end(&mut git).ok()?;
 
-    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let actual = stdout.trim().to_string();
     Some(actual.starts_with(expected) || expected.starts_with(&actual))
 }
 

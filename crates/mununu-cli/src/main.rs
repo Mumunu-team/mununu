@@ -4084,6 +4084,7 @@ fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
         &JusticeOptions {
             rung,
             budget_ms: args.timeout_ms,
+            budget_set_by: mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
             parallel_rungs: args.parallel_rungs,
         },
     )?;
@@ -4418,7 +4419,11 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
         // `--timeout-ms` bounds the attack's trace search too (it polls this thread's budget,
         // mununu#1045); without it, the members' own defaults.
-        let budget = mununu_core::adapter::run_budget::Budget::with_ms_opt(args.timeout_ms);
+        let budget = mununu_core::adapter::run_budget::Budget::child(
+            &mununu_core::adapter::run_budget::current(),
+            args.timeout_ms,
+            mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
+        );
         let _budget = mununu_core::adapter::run_budget::enter(&budget);
         let o = mununu_core::adapter::fault_adversary::verify_fault_reach(
             &content,
@@ -4577,6 +4582,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         mununu_core::adapter::reach_portfolio::decide_reach_owned_only_with_witness(
             &file,
             u32::try_from(ms).unwrap_or(u32::MAX),
+            mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
             args.witness,
         )
     } else {
@@ -4589,7 +4595,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             wall,
             None,
             mununu_core::adapter::reach_portfolio::ReachMembers::shipped()
-                .with_witness(args.witness),
+                .with_witness(args.witness)
+                .with_wall_set_by(mununu_core::adapter::run_budget::SetBy::TimeoutFlag),
         )
     };
 
@@ -4610,6 +4617,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                 &file,
                 args.witness_max_k,
                 deadline,
+                mununu_core::adapter::run_budget::SetBy::TimeoutFlag,
                 &outcome,
                 args.owned_only,
             )
@@ -7699,11 +7707,27 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
     use mununu_core::verdict::PropertyVerdict;
 
     let file = args.lift.primary_display();
-    // One lift's notes speak for both: `--liveness` below lifts the same sources again.
+    let terminal = if args.liveness {
+        Some(mununu_core::api::models::parse_terminal_states(
+            &args.terminal,
+        )?)
+    } else {
+        None
+    };
+    // mununu#1189 — one lift for the whole report: with `--liveness` its notes say what a free
+    // net means for the inventory as well as for the encoding scan.
     let mununu_core::adapter::sv_verify::Lifted {
         lift_notes,
-        result: findings,
-    } = core_sv_check_fsm(&read_sv_lift(&args.lift)?, args.max_width)?;
+        result:
+            mununu_core::adapter::sv_verify::FsmCheck {
+                registers: findings,
+                liveness,
+            },
+    } = core_sv_check_fsm(
+        &read_sv_lift(&args.lift)?,
+        args.max_width,
+        terminal.as_deref(),
+    )?;
 
     let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
@@ -7712,15 +7736,8 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
         "illegal_encodings_found": findings.iter().filter(|f| f.is_finding()).count(),
         "registers": registers,
     });
-    if args.liveness {
-        let terminal = mununu_core::api::models::parse_terminal_states(&args.terminal)?;
-        let inv = mununu_core::adapter::sv_verify::sv_check_fsm_liveness(
-            &read_sv_lift(&args.lift)?,
-            args.max_width,
-            &terminal,
-        )?
-        .result;
-        summary["liveness"] = liveness_json(&inv);
+    if let Some(inv) = &liveness {
+        summary["liveness"] = liveness_json(inv);
     }
     attach_lift_notes(&mut summary, &lift_notes)?;
     print_json_summary(&summary)?;
@@ -7836,7 +7853,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
             lift_notes,
             result: btor2,
         } = lift
-            .lift_with_notes()
+            .lift_with_notes(mununu_core::adapter::sv_verify::LiftReader::MutationTargets)
             .map_err(|e| format!("sv mutate --list: {e}"))?;
         let t = list_targets(&btor2)?;
         let mut summary = serde_json::json!({

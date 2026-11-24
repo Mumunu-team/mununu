@@ -40,6 +40,14 @@
 //!   not. Documented here because a silently thinner result is worse than a stated one.
 //! * **Opt-in.** Isolation costs a process and a BTOR2 write per property. Turn it on when a lane
 //!   cannot absorb a lost run.
+//!
+//! # What ends the child (mununu#1196)
+//!
+//! The child is spawned and waited on by the adapters' one subprocess helper, so it has the stops
+//! the in-process engine has: the time the property has left is its wall, and a cancelled run (an
+//! HTTP request past its timeout) kills it. Either is [`Isolated::Stopped`] — a budget stop, not
+//! a death. The first slice waited with a bare `output()`: a child on a hard design ran until it
+//! finished, whatever the budget said and whether or not anyone was still waiting for the answer.
 
 use std::io::Write;
 
@@ -60,6 +68,20 @@ pub(crate) enum Isolated {
     /// from `Died` on purpose: a consumer must be able to tell "the engine crashed" from "we could
     /// not run the engine", because the first is a finding and the second is our problem.
     Unavailable(String),
+    /// mununu#1196 — the PARENT ended the child before it answered. Distinct from `Died` on
+    /// purpose: the engine did not crash, it ran out of the time it was given, and the two need
+    /// opposite responses (report a defect / give it more budget).
+    Stopped(IsolatedStop),
+}
+
+/// Why the parent ended an isolated child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IsolatedStop {
+    /// The time the property had left ran out. `given_ms` is what the child was given when it
+    /// started; `0` means the budget was already spent and no child was started.
+    BudgetSpent { given_ms: u64 },
+    /// The run that asked for the verdict was cancelled (the request that started it is gone).
+    RunCancelled,
 }
 
 /// The env var that turns isolation on, and the guard that stops a child isolating again.
@@ -100,6 +122,18 @@ pub(crate) fn exact_symbolic_with_exe(
     btor2: &str,
     formula_src: &str,
 ) -> Isolated {
+    // mununu#1196 — the child's stops are read off the thread's run budget, which at the one
+    // call site is the property's own (a child of the run's). A budget that is already spent or
+    // cancelled starts no child: the in-process engine is not started on one either.
+    let budget = crate::adapter::run_budget::current();
+    if crate::adapter::run_budget::cancelled() {
+        return Isolated::Stopped(IsolatedStop::RunCancelled);
+    }
+    let left_ms = budget.remaining_ms();
+    if left_ms == Some(0) {
+        return Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms: 0 });
+    }
+
     // The BTOR2 goes through a file rather than argv or stdin: it can be megabytes, and a file is
     // also what a consumer can keep for a reproducer if the child dies.
     let dir = std::env::temp_dir().join(format!("mununu-isolate-{}", std::process::id()));
@@ -119,13 +153,27 @@ pub(crate) fn exact_symbolic_with_exe(
         .arg("--formula")
         .arg(formula_src)
         .env(CHILD_GUARD_ENV, "1");
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => return Isolated::Unavailable(format!("cannot spawn the engine child: {e}")),
+    // The wall is the time the property has left; with no budget there is none, as in process.
+    // No caller's flag: nothing races this engine at its call site. The helper adds the third
+    // stop itself, the kill on a cancelled run.
+    let waited = match left_ms {
+        Some(ms) => {
+            crate::adapter::run_with_timeout(&mut cmd, None, std::time::Duration::from_millis(ms))
+                .map(|done| done.ok_or(ms))
+        }
+        None => crate::adapter::run_to_end(&mut cmd).map(Ok),
     };
+    // Best effort: a model file left behind costs disk in the temporary directory, nothing else.
     let _ = std::fs::remove_file(&model);
+    let (status, stdout, stderr) = match waited {
+        Ok(Ok(done)) => done,
+        Ok(Err(given_ms)) => return Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms }),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+            return Isolated::Stopped(IsolatedStop::RunCancelled);
+        }
+        Err(e) => return Isolated::Unavailable(format!("cannot run the engine child: {e}")),
+    };
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout.lines().rev().find(|l| l.starts_with("VERDICT "));
     match line.map(|l| l.trim_start_matches("VERDICT ").trim()) {
         Some("holds") => Isolated::Holds,
@@ -137,11 +185,10 @@ pub(crate) fn exact_symbolic_with_exe(
         // for a reason it did report on stderr — keep the last stderr lines so the difference is
         // visible rather than guessed at.
         _ => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
             let mut last: Vec<&str> = stderr.lines().rev().take(3).collect();
             last.reverse();
             let tail = last.join(" | ");
-            Isolated::Died(format!("{} — stderr: {tail}", describe_status(&out.status)))
+            Isolated::Died(format!("{} — stderr: {tail}", describe_status(&status)))
         }
     }
 }
@@ -254,6 +301,225 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).ok()?;
         }
         Some(p)
+    }
+
+    /// What a stand-in for the engine child does.
+    #[derive(Debug, Clone, Copy)]
+    enum StandIn {
+        /// Never answers: sleeps 30 s.
+        Hangs,
+        /// Writes this line on stdout and exits 0.
+        Says(&'static str),
+        /// Writes one line on stderr and exits with this code.
+        Exits { code: i32, stderr: &'static str },
+    }
+
+    /// The bound a test puts on a stop: far from both the 300 ms a stop takes and the 30 s the
+    /// hanging stand-in sleeps (what the wait took before), so a loaded host does not blur them.
+    const STOPPED_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// A stand-in for the engine child, written into `dir`. It exists on every OS (the OS
+    /// matrix's same-tests rule): a `/bin/sh` script on Unix, a `.bat` + PowerShell pair on
+    /// Windows, as the solver stand-ins of `native_interp`'s tests are.
+    #[cfg(unix)]
+    fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let body = match what {
+            StandIn::Hangs => "exec sleep 30".to_string(),
+            StandIn::Says(line) => format!("echo '{line}'"),
+            StandIn::Exits { code, stderr } => format!("echo '{stderr}' >&2\nexit {code}"),
+        };
+        let fake = dir.join("engine-child");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\nif [ \"$1\" = --probe ]; then\n  exit 0\nfi\n{body}\n"),
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // A fork on another test's thread can hold this file open for writing for an instant,
+        // and an exec in that instant fails with ETXTBSY (errno 26). Wait it out here, where
+        // the retry is the test's to make and not the runner's.
+        for _ in 0..100 {
+            match std::process::Command::new(&fake).arg("--probe").output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                _ => break,
+            }
+        }
+        fake
+    }
+
+    #[cfg(windows)]
+    fn stand_in(dir: &std::path::Path, what: StandIn) -> std::path::PathBuf {
+        let body = match what {
+            StandIn::Hangs => "Start-Sleep 30\r\n".to_string(),
+            StandIn::Says(line) => format!("[Console]::Out.WriteLine('{line}')\r\nexit 0\r\n"),
+            StandIn::Exits { code, stderr } => {
+                format!("[Console]::Error.WriteLine('{stderr}')\r\nexit {code}\r\n")
+            }
+        };
+        let ps = dir.join("engine-child.ps1");
+        std::fs::write(&ps, body).expect("write the stand-in");
+        let bat = dir.join("engine-child.bat");
+        std::fs::write(
+            &bat,
+            format!(
+                "@powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
+                ps.display()
+            ),
+        )
+        .expect("write the stand-in's launcher");
+        bat
+    }
+
+    const MODEL: &str = "1 sort bitvec 1\n";
+
+    /// The four tests below run one at a time. The parent hands the child its model through one
+    /// file per PROCESS (mununu#1221, open), so two of them at once write and remove the same
+    /// path — and on Windows a file whose removal is pending refuses the next write, which
+    /// would read here as "could not run the child". The guard goes with that issue's fix.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        // A test that failed while holding the lock has said so itself; the next still runs.
+        ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// REPRODUCER (mununu#1196) — an isolated child that is still running when the property's
+    /// budget ends is ended there, and the result says it was stopped, not that it died. Fails
+    /// on the parent, where the wait was a bare `output()`: the call returned when the stand-in
+    /// did, 30 s later, whatever the budget.
+    #[test]
+    fn x1196_an_isolated_child_past_the_property_s_budget_is_ended_and_reported_as_a_stop() {
+        let _one = one_at_a_time();
+        use crate::adapter::run_budget::{Budget, enter};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = stand_in(dir.path(), StandIn::Hangs);
+        let budget = Budget::with_ms(300);
+        let _g = enter(&budget);
+        let t0 = std::time::Instant::now();
+        let got = exact_symbolic_with_exe(&child, MODEL, "true");
+        assert!(
+            t0.elapsed() < STOPPED_WITHIN,
+            "ended at the budget, not when the child chose to: {:?}",
+            t0.elapsed()
+        );
+        match got {
+            Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms }) => assert!(
+                (1..=300).contains(&given_ms),
+                "the child was given what the budget had left: {given_ms} ms"
+            ),
+            other => panic!("a child ended at the budget is a stop, got {other:?}"),
+        }
+    }
+
+    /// The second stop: the run is cancelled while the child runs (an HTTP request past its
+    /// timeout cancels its budget). The child is killed then, with no deadline involved.
+    #[test]
+    fn x1196_a_cancelled_run_ends_the_isolated_child() {
+        let _one = one_at_a_time();
+        use crate::adapter::run_budget::{Budget, enter};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = stand_in(dir.path(), StandIn::Hangs);
+        let budget = Budget::unbounded();
+        let _g = enter(&budget);
+        let flag = budget.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            flag.cancel();
+        });
+        let t0 = std::time::Instant::now();
+        let got = exact_symbolic_with_exe(&child, MODEL, "true");
+        assert!(
+            t0.elapsed() < STOPPED_WITHIN,
+            "killed on the cancel: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(got, Isolated::Stopped(IsolatedStop::RunCancelled));
+    }
+
+    /// A budget that is already spent, or a run already cancelled, starts no child: the path
+    /// handed in does not exist, and the answer is still the stop, not "could not run".
+    #[test]
+    fn x1196_a_spent_budget_or_a_cancelled_run_starts_no_child() {
+        let _one = one_at_a_time();
+        use crate::adapter::run_budget::{Budget, enter};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nothing = dir.path().join("no-such-engine-child");
+        {
+            let budget = Budget::with_ms(0);
+            let _g = enter(&budget);
+            assert_eq!(
+                exact_symbolic_with_exe(&nothing, MODEL, "true"),
+                Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms: 0 })
+            );
+        }
+        {
+            let budget = Budget::unbounded();
+            budget.cancel();
+            let _g = enter(&budget);
+            assert_eq!(
+                exact_symbolic_with_exe(&nothing, MODEL, "true"),
+                Isolated::Stopped(IsolatedStop::RunCancelled)
+            );
+        }
+        // The control: with a budget to spend, the missing child is what is reported.
+        let budget = Budget::with_ms(60_000);
+        let _g = enter(&budget);
+        assert!(matches!(
+            exact_symbolic_with_exe(&nothing, MODEL, "true"),
+            Isolated::Unavailable(_)
+        ));
+    }
+
+    /// The control for the three tests above, and the table of what a child can say: with time
+    /// left (and with no budget at all) every reply is read as it was before the wait moved onto
+    /// the shared helper — on every OS, which the shell stubs above this block do not reach.
+    #[test]
+    fn x1196_a_child_that_answers_inside_its_budget_is_read_as_it_answered() {
+        let _one = one_at_a_time();
+        use crate::adapter::run_budget::{Budget, enter};
+        /// Whether a reply was read as the stand-in's row says.
+        type Reading = fn(&Isolated) -> bool;
+        let replies: [(StandIn, Reading); 5] = [
+            (StandIn::Says("VERDICT holds"), |r| *r == Isolated::Holds),
+            (StandIn::Says("VERDICT violated"), |r| {
+                *r == Isolated::Violated
+            }),
+            (StandIn::Says("VERDICT abstained bit cap"), |r| {
+                *r == Isolated::Abstained("bit cap".into())
+            }),
+            (StandIn::Says("no verdict here"), |r| {
+                matches!(r, Isolated::Died(_))
+            }),
+            (
+                StandIn::Exits {
+                    code: 3,
+                    stderr: "oops",
+                },
+                |r| matches!(r, Isolated::Died(why) if why.contains('3') && why.contains("oops")),
+            ),
+        ];
+        for bounded in [true, false] {
+            let budget = if bounded {
+                Budget::with_ms(120_000)
+            } else {
+                Budget::unbounded()
+            };
+            let _g = enter(&budget);
+            for (what, expected) in replies {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let child = stand_in(dir.path(), what);
+                let got = exact_symbolic_with_exe(&child, MODEL, "true");
+                assert!(
+                    expected(&got),
+                    "{what:?} (budget: {bounded}) was read as {got:?}"
+                );
+            }
+        }
     }
 
     /// `Died` and `Unavailable` must stay distinguishable — the first is a finding about the

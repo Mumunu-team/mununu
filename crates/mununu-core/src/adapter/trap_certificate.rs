@@ -462,7 +462,11 @@ fn check_candidate(
 }
 
 fn under_check_budget<T>(step: impl FnOnce() -> T) -> T {
-    let check = run_budget::Budget::child(&run_budget::current(), Some(TRAP_CHECK_MS));
+    let check = run_budget::Budget::child(
+        &run_budget::current(),
+        Some(TRAP_CHECK_MS),
+        run_budget::SetBy::Mununu,
+    );
     let _guard = run_budget::enter(&check);
     step()
 }

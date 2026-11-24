@@ -1,6 +1,6 @@
 # External Tools
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3630), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3683), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L74) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3626), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3679), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L74) — surface: CLI+API
 
 Mununu's verification engine, model checker, and synthesiser are pure Rust + the linked [Z3](https://github.com/Z3Prover/z3) library. Several pipelines also invoke external command-line tools via subprocess. Those tools are **optional** — mununu functions without them, and individual pipelines emit a structured `AdapterWarning` or `AdapterError` when invoked while a required tool is missing, never silently fail.
 
@@ -102,7 +102,7 @@ Missing-tool behaviour: an oracle test's lift errors with an `UnsupportedConstru
 
 ## Yosys
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3630) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3683) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3626) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3679) — surface: CLI+API
 
 Yosys is the open-source synthesis suite mununu uses to lower SystemVerilog into BTOR2 — the word-level intermediate representation the KMTS lifter consumes. The RTL front end is yosys-slang's `read_slang` (N1, 2026-11-04: the only one), **built into yosys ≥ 0.67**; on an older yosys set `MUNUNU_YOSYS_SLANG_PLUGIN` to a yosys-slang plugin (loaded with `-m`). A yosys with neither (Homebrew's 0.59, Debian's 0.23) lifts **no** SystemVerilog: the error names the fix.
 
@@ -249,7 +249,7 @@ CVC5 is **not** installed by `docker/Dockerfile.dev`. Contributors install it lo
 
 ## MathSAT
 
-> Source of truth: [`locate_mathsat`](../crates/mununu-core/src/adapter/btor2/native_interp.rs#L1046) — surface: CLI+API
+> Source of truth: [`locate_mathsat`](../crates/mununu-core/src/adapter/btor2/native_interp.rs#L1055) — surface: CLI+API
 
 [MathSAT 5](https://mathsat.fbk.eu/) is an SMT solver with interpolation over bit-vectors. Mununu runs it as a subprocess for one thing: the `craig` predicate source of the predicate-cube CEGAR loop (CLI: `mununu btor2 cegar --predicate-source craig`; API: `predicate_source: "craig"`; sidecar: `cegar.predicate_source = "craig"`), which asks it for the interpolant of a may-but-not-must transition.
 

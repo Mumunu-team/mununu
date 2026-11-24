@@ -268,18 +268,20 @@ pub fn extract_c_via_llvm(
     cmd.arg(source_path);
 
     let invocation = format!("{cmd:?}");
-    let output = cmd.output().map_err(|e| LlvmExtractError::ClangNotFound {
-        tried: clang.display().to_string(),
-        message: e.to_string(),
-    })?;
-    if !output.status.success() {
+    // mununu#1196 — through the adapter's one waiting helper: no wall (mununu#1223), and a
+    // cancelled run ends the compiler.
+    let (status, ir_text, stderr) =
+        crate::adapter::run_to_end(&mut cmd).map_err(|e| LlvmExtractError::ClangNotFound {
+            tried: clang.display().to_string(),
+            message: e.to_string(),
+        })?;
+    if !status.success() {
         return Err(LlvmExtractError::ClangFailed {
-            status: format!("{}", output.status),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: format!("{status}"),
+            stderr,
             invocation,
         });
     }
-    let ir_text = String::from_utf8_lossy(&output.stdout).into_owned();
     // Phase L6: read the source file too, so we can lift `@mununu_*`
     // annotations from comments and tag functions accordingly.
     let source_text = std::fs::read_to_string(source_path).unwrap_or_default();

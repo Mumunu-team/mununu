@@ -1,6 +1,6 @@
 # Consumer briefing: the per-module and multi-module SV lift sees submodules again (2026-11)
 
-> Source of truth: [`collapse_slang_instance_modules`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3116) — surface: CLI+API — `sv emit-btor2-per-module`, and `mununu verify` / `POST /api/v1/verify` with an `sv-yosys` source set to `multi_module = true`.
+> Source of truth: [`collapse_slang_instance_modules`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3112) — surface: CLI+API — `sv emit-btor2-per-module`, and `mununu verify` / `POST /api/v1/verify` with an `sv-yosys` source set to `multi_module = true`.
 
 **Audience:** rosf, monono, mununu-ui, and anyone who lifts a multi-module SystemVerilog design one module at a time or composes it from its instances.
 

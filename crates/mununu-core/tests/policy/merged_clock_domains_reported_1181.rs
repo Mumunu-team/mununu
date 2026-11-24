@@ -3,7 +3,7 @@
 //! transfer on its own, so the report says what was merged. Seven of the nine `sv` verbs dropped
 //! the domains: only `sv verify-auto` and `sv cdc-lint` read them.
 //!
-//! The rule is structural, in two halves this test reads from the source:
+//! The rule is structural, in three parts this test reads from the source:
 //! 1. **In the lift** (`adapter/yosys/mod.rs`): a function that runs the flattened lift either
 //!    returns the clock domains with the model (`sv_to_btor2_with_blackboxes`) or refuses the
 //!    opt-in before it lifts (`refuse_merge_without_domains`). A new entry that returns the model
@@ -15,6 +15,12 @@
 //!    [`CALLERS`] with the calls that carry the domains into its report, and how many times its
 //!    product code makes each. A new caller fails here until it is listed with them; so does
 //!    one of two identical calls going away.
+//! 3. **At the surfaces** (mununu#1189): a `Lifted` holds a result beside the notes its lift
+//!    owes the report, and product code takes neither without the other. Every read of a field
+//!    named `result` is listed in [`RESULT_READS`] with what it is read off, and every
+//!    `Lifted { … }` pattern names `lift_notes`. `sv check-fsm --liveness` lifted twice and
+//!    reported the inventory of the second lift under the notes of the first, which were worded
+//!    for the encoding scan alone; the second lift's notes were lost at a `.result`.
 //!
 //! It replaces `clock_roots_reported_1148`, which listed the setters of the retired
 //! `YosysOptions::report_clock_roots`. As there, a reporter is looked for as a CALL, never as a
@@ -27,7 +33,7 @@
 use std::path::Path;
 
 use crate::remedies_name_real_flags_1106::{repo_root, rust_files_under};
-use crate::source_scan::without_test_modules;
+use crate::source_scan::{blank_test_modules_keeping_lines, matching_brace, without_test_modules};
 
 /// The file that holds the lift, as path components under the repository root.
 const LIFT_FILE: &[&str] = &["crates", "mununu-core", "src", "adapter", "yosys", "mod.rs"];
@@ -81,14 +87,21 @@ const CALLERS: &[(&str, &[ReportingCall])] = &[
                 ".extend(clock_root_notes(&clock_domains))",
                 1,
             ),
+            // `sv mutate` and `sv plan` read the lift's decisions off that report
+            // (mununu#1189); the clock notes are among them.
             (
                 "crates/mununu-core/src/planner/entry.rs",
-                "clock_notes_of_report(&baseline)",
+                "LiftDecisions::of_report(&baseline, yosys_opts)",
                 1,
             ),
             (
                 "crates/mununu-core/src/planner/entry.rs",
-                "clock_notes_of_report(&m.report)",
+                "LiftDecisions::of_report(&m.report, yosys_opts)",
+                1,
+            ),
+            (
+                "crates/mununu-core/src/adapter/lift_decisions.rs",
+                "clock_notes: clock_notes_of_report(report)",
                 1,
             ),
         ],
@@ -99,9 +112,15 @@ const CALLERS: &[(&str, &[ReportingCall])] = &[
         &[
             (
                 "crates/mununu-core/src/adapter/sv_verify.rs",
-                // `lift_named` and `lift_with_notes_under`.
-                "lift_notes: lift_clock_notes(&lifted.clock_domains)",
+                // `lift_domains` (the notes of every verb's lift) and `sv_cdc_lint` (its lines
+                // for the lift's other decisions; its domains go by the two calls below).
+                "LiftDecisions::of_lift(",
                 2,
+            ),
+            (
+                "crates/mununu-core/src/adapter/lift_decisions.rs",
+                "clock_notes: lift_clock_notes(&lifted.clock_domains)",
+                1,
             ),
             (
                 "crates/mununu-core/src/adapter/sv_verify.rs",
@@ -316,6 +335,201 @@ fn every_lift_that_can_merge_clock_domains_reports_them() {
                  lift stopped reporting, or a new one reports and is not counted"
             );
         }
+    }
+}
+
+/// `src` with its test modules and its comment-only lines blanked, the line numbers kept.
+fn product_lines(src: &str) -> String {
+    blank_test_modules_keeping_lines(src)
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("//") {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The 1-based lines of `src` where product code reads a field named `result`, off anything: a
+/// call (`…)?.result`), a bound name (`l.result`), a closure argument, across a line break too.
+/// A method named `result`, a longer field name and a struct's `..result` are not this.
+fn result_field_reads(src: &str) -> Vec<usize> {
+    let code = product_lines(src);
+    const FIELD: &str = ".result";
+    code.match_indices(FIELD)
+        .filter(|(at, _)| {
+            let after = &code[at + FIELD.len()..];
+            !code[..*at].ends_with('.')
+                && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                && !after.trim_start().starts_with('(')
+        })
+        .map(|(at, _)| code[..at].matches('\n').count() + 1)
+        .collect()
+}
+
+/// The 1-based lines of `src` where product code writes `Lifted { … }`, as a pattern or as a
+/// value, without naming `lift_notes`: `let Lifted { result, .. } = …` drops the notes the way
+/// `.result` does.
+fn lifted_sites_without_notes(src: &str) -> Vec<usize> {
+    let code = product_lines(src);
+    const NAME: &str = "Lifted";
+    code.match_indices(NAME)
+        .filter(|(at, _)| {
+            let own_word = !code[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
+            let body = code[at + NAME.len()..].trim_start();
+            own_word
+                && body.starts_with('{')
+                && !body[..matching_brace(body)].contains("lift_notes")
+        })
+        .map(|(at, _)| code[..at].matches('\n').count() + 1)
+        .collect()
+}
+
+/// Every read of a field named `result` in product code: `(file, how many, what they are read
+/// off)`. A `Lifted` has two fields, so the only ways to take its result are this field and a
+/// `Lifted { … }` pattern; the scan cannot tell a `Lifted` from another type with a field of
+/// that name, so every read is listed and a new one fails until someone says what it is read
+/// off. Only the last row reads a `Lifted`.
+const RESULT_READS: &[(&str, usize, &str)] = &[
+    (
+        "crates/mununu-cli/src/main.rs",
+        2,
+        "a written replay row: the outcome of the Verilator run, absent when it did not run",
+    ),
+    (
+        "crates/mununu-core/src/adapter/btor2/kmts_lift.rs",
+        5,
+        "`self.result`, the predicate-cube lift an eager lazy lift wraps",
+    ),
+    (
+        "crates/mununu-core/src/adapter/justice.rs",
+        1,
+        "the outcome of the exact engine's ladder (`LadderOutcome`)",
+    ),
+    (
+        "crates/mununu-core/src/adapter/recoverability.rs",
+        1,
+        "the outcome of the exact engine's ladder (`LadderOutcome`)",
+    ),
+    (
+        "crates/mununu-core/src/adapter/slang/verify_auto.rs",
+        2,
+        "the outcome of the exact engine's ladder (`LadderOutcome`)",
+    ),
+    (
+        "crates/mununu-core/src/adapter/sv_verify.rs",
+        2,
+        "`Lifted::map` and `Lifted::try_map`, which build the new `Lifted` with the same notes",
+    ),
+];
+
+/// mununu#1189 — the notes of a lift reach the report that holds its result. A caller that
+/// takes the result of a `Lifted` and not its notes has dropped them, and nothing downstream
+/// can tell: the report reads as one on a lift that decided nothing.
+///
+/// What the scan cannot see: a pattern that names the notes and then ignores them
+/// (`lift_notes: _`). A bound and unused `lift_notes` is the compiler's warning, which the
+/// gate refuses.
+#[test]
+fn no_product_code_reads_a_lifts_result_and_drops_its_notes() {
+    let root = repo_root();
+    let sources: Vec<(String, String)> = SCANNED
+        .iter()
+        .flat_map(|dir| rust_files_under(&under(&root, dir)))
+        .map(|path| {
+            let src = std::fs::read_to_string(&path).expect("readable source");
+            (rel(&path, &root), src)
+        })
+        .collect();
+
+    let mut reads: Vec<(&str, Vec<usize>)> = sources
+        .iter()
+        .map(|(file, src)| (file.as_str(), result_field_reads(src)))
+        .filter(|(_, lines)| !lines.is_empty())
+        .collect();
+    reads.sort();
+    let counted: Vec<(&str, usize)> = reads.iter().map(|(f, lines)| (*f, lines.len())).collect();
+    let mut listed: Vec<(&str, usize)> = RESULT_READS.iter().map(|(f, n, _)| (*f, *n)).collect();
+    listed.sort();
+    assert_eq!(
+        counted, listed,
+        "product code reads a field named `result` and RESULT_READS does not list the read \
+         (found, by line: {reads:?}; listed: {RESULT_READS:?}). If the value is a `Lifted`, its \
+         `lift_notes` are dropped there and the report says nothing about what the lift \
+         decided: take both (`let Lifted {{ lift_notes, result }} = …`) and put the notes in \
+         the report that holds the result. If it is another type, count the read in \
+         RESULT_READS with what it is read off"
+    );
+
+    let dropped: Vec<String> = sources
+        .iter()
+        .flat_map(|(file, src)| {
+            lifted_sites_without_notes(src)
+                .into_iter()
+                .map(move |line| format!("{file}:{line}"))
+        })
+        .collect();
+    assert_eq!(
+        dropped,
+        Vec::<String>::new(),
+        "product code takes a `Lifted` apart without naming `lift_notes`: the notes of that \
+         lift are dropped there. Bind them and put them in the report that holds the result"
+    );
+}
+
+/// The scans above fail on what they exist to catch (negative control), and only on that.
+#[test]
+fn a_result_read_off_a_call_is_seen() {
+    let chained = "fn f() -> R {\n    let inv = scan(&lift)?\n        .result;\n    inv\n}\n";
+    assert_eq!(result_field_reads(chained), vec![3]);
+    let same_line = "fn f() -> R { scan(&lift).result }\n";
+    assert_eq!(result_field_reads(same_line), vec![1]);
+    let of_a_name = "fn f() {\n    let l = scan(&lift)?;\n    let r = l.result;\n}\n";
+    assert_eq!(result_field_reads(of_a_name), vec![3]);
+    let in_a_closure = "fn f() { scan(&lift).map(|l| l.result) }\n";
+    assert_eq!(result_field_reads(in_a_closure), vec![1]);
+
+    let destructured = "fn f() { let Lifted { lift_notes, result } = scan(&lift)?; }\n";
+    let a_method = "fn f() { let r = scan(&lift).result(); }\n";
+    let a_longer_field = "fn f() { let r = scan(&lift).result_count; }\n";
+    let the_rest_of_a_struct = "fn f() { let r = R { a, ..result }; }\n";
+    let in_a_comment = "fn f() {\n    // scan(&lift)?.result\n}\n";
+    let in_a_test = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() { scan(&l).result; }\n}\n";
+    for clean in [
+        destructured,
+        a_method,
+        a_longer_field,
+        the_rest_of_a_struct,
+        in_a_comment,
+        in_a_test,
+    ] {
+        assert_eq!(result_field_reads(clean), Vec::<usize>::new(), "{clean}");
+    }
+
+    let notes_left_out = "fn f() {\n    let Lifted { result, .. } = scan(&lift)?;\n}\n";
+    assert_eq!(lifted_sites_without_notes(notes_left_out), vec![2]);
+    let by_its_path = "fn f() {\n    let sv_verify::Lifted {\n        result,\n        ..\n    } = scan(&lift)?;\n}\n";
+    assert_eq!(lifted_sites_without_notes(by_its_path), vec![2]);
+
+    let built = "fn f() -> Lifted<u8> { Lifted { lift_notes: Vec::new(), result: 0 } }\n";
+    let another_type = "fn f() { let NotLifted { result, .. } = g(); }\n";
+    let its_own_impl = "impl<T> Lifted<T> { fn get(self) -> T { self.0 } }\n";
+    let a_test_pattern = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() { let Lifted { result, .. } = g(); }\n}\n";
+    for clean in [
+        destructured,
+        built,
+        another_type,
+        its_own_impl,
+        a_test_pattern,
+    ] {
+        assert_eq!(
+            lifted_sites_without_notes(clean),
+            Vec::<usize>::new(),
+            "{clean}"
+        );
     }
 }
 

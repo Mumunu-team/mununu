@@ -1,6 +1,6 @@
 # Consumer briefing — 0.5 verb merges, part (a): `btor2 verify --engine`, `sv verify-bad` (2026-10)
 
-> Source of truth: [`verify_safety_with_engine`](../../crates/mununu-core/src/adapter/recoverability.rs) and the `btor2 verify` / `sv verify-bad` verbs in [`crates/mununu-cli/src/main.rs`](../../crates/mununu-cli/src/main.rs) — surface: (CLI+API)
+> Source of truth: [`verify_safety_with_engine`](../../crates/mununu-core/src/adapter/recoverability.rs) and the `btor2 verify` verb in [`crates/mununu-cli/src/main.rs`](../../crates/mununu-cli/src/main.rs) — surface: (CLI+API). The `sv verify-bad` verb this page also describes was removed in 4b447181 (mununu#1136): see [the removal briefing](2026-11-sv-verify-bad-removed.md).
 
 **Audience:** rosf, monono, mununu-ui and every script that calls `btor2 verify-safety`, `sv verify` or `POST /api/v1/sv/verify`. Ninth cluster of the 0.5 clean break ([`docs/design/surface-cohesion-0.5.md`](../design/surface-cohesion-0.5.md) §2.2, finding V1).
 

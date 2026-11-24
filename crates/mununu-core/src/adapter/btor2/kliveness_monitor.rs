@@ -652,7 +652,11 @@ mod tests {
     #[test]
     fn the_ladder_never_proves_a_never_granted_request() {
         use crate::adapter::run_budget;
-        let b = run_budget::Budget::child(&run_budget::current(), Some(10_000));
+        let b = run_budget::Budget::child(
+            &run_budget::current(),
+            Some(10_000),
+            run_budget::SetBy::Mununu,
+        );
         let _g = run_budget::enter(&b);
         let r = kliveness_ladder(
             &|w| emit_response_kliveness_monitor(STALLER, REQ, DONE, &[], false, w),

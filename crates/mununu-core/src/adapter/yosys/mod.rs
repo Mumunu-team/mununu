@@ -1065,13 +1065,9 @@ fn run_lift_script(
     // same helper for the per-module path all along.
     let outcome = match crate::adapter::lift_timeout() {
         Some(t) => crate::adapter::run_with_timeout(&mut yosys_cmd, None, t),
-        None => yosys_cmd.output().map(|o| {
-            Some((
-                o.status,
-                String::from_utf8_lossy(&o.stdout).into_owned(),
-                String::from_utf8_lossy(&o.stderr).into_owned(),
-            ))
-        }),
+        // mununu#1196 — with the wall turned off the tool is still waited on through the
+        // helper: no deadline, and a cancelled run ends it.
+        None => crate::adapter::run_to_end(&mut yosys_cmd).map(Some),
     }
     .map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
@@ -3877,13 +3873,9 @@ fn run_sv2v(
     // mununu#504 — bounded; see the note on the main yosys lift.
     let outcome = match crate::adapter::lift_timeout() {
         Some(t) => crate::adapter::run_with_timeout(&mut cmd, None, t),
-        None => cmd.output().map(|o| {
-            Some((
-                o.status,
-                String::from_utf8_lossy(&o.stdout).into_owned(),
-                String::from_utf8_lossy(&o.stderr).into_owned(),
-            ))
-        }),
+        // mununu#1196 — with the wall turned off the tool is still waited on through the
+        // helper: no deadline, and a cancelled run ends it.
+        None => crate::adapter::run_to_end(&mut cmd).map(Some),
     }
     .map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,

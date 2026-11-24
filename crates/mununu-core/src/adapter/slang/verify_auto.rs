@@ -72,7 +72,8 @@ use crate::mu_calculus::{Formula, Node};
 use super::verify_auto_text::{
     IMMEDIATE_ASSUME_REASON, annotation_note, bottom_reason_note, build_notes,
     coverage_summary_note, dropped_immediate_notes, escalation_stopped_note, exact_abandoned_note,
-    exact_skip_rescue_note, fair_cycle_rescue_note, liveness_rescue_note, reachability_rescue_note,
+    exact_skip_rescue_note, fair_cycle_rescue_note, isolated_engine_died_note,
+    isolated_engine_stopped_note, liveness_rescue_note, reachability_rescue_note,
     recoverability_bot_reason_note, recoverability_rescue_note, rescue_note, strong_reading_notes,
     trap_certificate_search_note, trap_certificate_withheld_note, two_state_fold_notes,
     unseedable_skip_reason, witness_miss_note,
@@ -4215,7 +4216,7 @@ fn cube_outcome(
                     let on_run_budget = doubts.iter().any(|(_, d)| {
                         matches!(
                             d,
-                            crate::adapter::btor2::kmts_lift::InitialCubeDoubt::BudgetExpired
+                            crate::adapter::btor2::kmts_lift::InitialCubeDoubt::BudgetExpired(_)
                         )
                     });
                     return (
@@ -6496,6 +6497,128 @@ fn dump_prepared_model(btor2: &str, properties: &[(String, String)], fault_model
     }
 }
 
+/// mununu#1196 — what a row becomes when the isolated `exact-symbolic` child came back with
+/// `iso`: its outcome, the reason on the row, and the note. `None` = isolation could not be
+/// attempted, and the row runs in process. One exhaustive `match`, so a new way for the child
+/// to end cannot be added without saying what the row reports.
+fn isolated_row(
+    name: &str,
+    iso: &crate::adapter::engine_isolate::Isolated,
+) -> Option<(
+    VerifyOutcome,
+    Option<BottomReason>,
+    Option<VerificationNote>,
+)> {
+    use crate::adapter::engine_isolate::Isolated;
+    Some(match iso {
+        Isolated::Unavailable(_) => return None,
+        Isolated::Holds => (VerifyOutcome::Holds, None, None),
+        // No witness under isolation — the child returns a verdict, not a counterexample.
+        // Recorded in `engine_isolate`'s docs; a consumer gating on `properties[].outcome` is
+        // unaffected, one reading traces is not.
+        Isolated::Violated => (VerifyOutcome::Violated { false_cells: 1 }, None, None),
+        Isolated::Abstained(why) => (
+            VerifyOutcome::Skipped {
+                reason: format!("exact symbolic MC (isolated): {why}"),
+            },
+            None,
+            None,
+        ),
+        // THE CASE ISOLATION EXISTS FOR. `unknown`, never `skipped`: the engine was attempted
+        // and reached no answer, and `ci_exit_code` does not fail on `skipped` — so `skipped`
+        // here would let a strict gate pass green on a property whose engine crashed.
+        Isolated::Died(why) => (
+            VerifyOutcome::Unknown { unknown_cells: 0 },
+            Some(BottomReason::EngineCrashed {
+                detail: why.to_string(),
+            }),
+            Some(isolated_engine_died_note(name, why)),
+        ),
+        // The parent ended the child on the property's budget or on a cancelled run: the row
+        // the in-process engine reports when the driver stops waiting for it (mununu#1063) —
+        // `unknown` with the budget's reason, so `--fail-on unknown` sees it.
+        Isolated::Stopped(stop) => (
+            VerifyOutcome::Unknown { unknown_cells: 0 },
+            Some(BottomReason::BudgetExpired),
+            Some(isolated_engine_stopped_note(name, *stop)),
+        ),
+    })
+}
+
+#[cfg(test)]
+mod isolated_row_tests {
+    use super::*;
+    use crate::adapter::engine_isolate::{Isolated, IsolatedStop};
+
+    /// mununu#1196 — the seam between the isolation layer and the report: every way the child
+    /// can end, and what the row says. A stop and a death are both `unknown`, and are told
+    /// apart by the reason on the row and by the note's kind.
+    #[test]
+    fn x1196_every_way_an_isolated_child_ends_has_a_row() {
+        type Row = (&'static str, Option<&'static str>, Option<&'static str>);
+        let stopped: Row = (
+            "unknown",
+            Some("budget-expired"),
+            Some("time-budget-exceeded"),
+        );
+        let cases: Vec<(Isolated, Option<Row>)> = vec![
+            (Isolated::Holds, Some(("holds", None, None))),
+            (Isolated::Violated, Some(("violated", None, None))),
+            (
+                Isolated::Abstained("bit cap".into()),
+                Some(("skipped", None, None)),
+            ),
+            (
+                Isolated::Died("signal 11".into()),
+                Some(("unknown", Some("engine-crashed"), Some("engine-isolation"))),
+            ),
+            (
+                Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms: 250 }),
+                Some(stopped),
+            ),
+            (
+                Isolated::Stopped(IsolatedStop::BudgetSpent { given_ms: 0 }),
+                Some(stopped),
+            ),
+            (Isolated::Stopped(IsolatedStop::RunCancelled), Some(stopped)),
+            (Isolated::Unavailable("no self path".into()), None),
+        ];
+        for (iso, expected) in &cases {
+            // Exhaustive on purpose: a new outcome, or a new stop, does not compile here until
+            // it has a case above.
+            match iso {
+                Isolated::Holds
+                | Isolated::Violated
+                | Isolated::Abstained(_)
+                | Isolated::Died(_)
+                | Isolated::Unavailable(_)
+                | Isolated::Stopped(IsolatedStop::BudgetSpent { .. })
+                | Isolated::Stopped(IsolatedStop::RunCancelled) => {}
+            }
+            let got = isolated_row("p_live", iso);
+            let shape: Option<Row> = got.as_ref().map(|(outcome, bottom, note)| {
+                (
+                    outcome.label(),
+                    bottom.as_ref().map(BottomReason::tag),
+                    note.as_ref().map(|n| match n.kind.as_str() {
+                        "engine-isolation" => "engine-isolation",
+                        "time-budget-exceeded" => "time-budget-exceeded",
+                        _ => "another kind",
+                    }),
+                )
+            });
+            assert_eq!(&shape, expected, "{iso:?}");
+            if let Some((_, _, Some(note))) = &got {
+                assert_eq!(
+                    note.property.as_deref(),
+                    Some("p_live"),
+                    "the note joins to its row: {iso:?}"
+                );
+            }
+        }
+    }
+}
+
 /// The single-engine verify body: extraction → lift → reset/pin → per-property engine →
 /// replan / rescue / notes. `prelift` is `Some` when the planner supplies a shared SV → BTOR2
 /// lift (the portfolio path lifts once), `None` to lift inline (the single-engine path).
@@ -6760,6 +6883,7 @@ pub(crate) fn verify_auto_impl(
     let run_budget = crate::adapter::run_budget::Budget::child(
         &crate::adapter::run_budget::current(),
         crate::adapter::run_budget::run_budget_ms(),
+        crate::adapter::run_budget::SetBy::RunBudgetEnv,
     );
     let _run_guard = crate::adapter::run_budget::enter(&run_budget);
     let per_property_ms = crate::adapter::run_budget::property_budget_ms();
@@ -6864,9 +6988,12 @@ pub(crate) fn verify_auto_impl(
         // earlier of (now + per-property) and the run deadline, so a generous per-property value
         // cannot extend the run. RAII: the guard restores the previous budget on EVERY exit from
         // this loop body, of which there are many `continue`s.
-        let _budget_guard = crate::adapter::run_budget::enter(
-            &crate::adapter::run_budget::Budget::child(&run_budget, per_property_ms),
-        );
+        let _budget_guard =
+            crate::adapter::run_budget::enter(&crate::adapter::run_budget::Budget::child(
+                &run_budget,
+                per_property_ms,
+                crate::adapter::run_budget::SetBy::PropertyBudgetEnv,
+            ));
         // H.J.b — substitute the concretized config inputs (`cfg_* → const`) so a
         // relational-with-wide-input atom becomes a decidable state-vs-constant
         // comparison. The substituted string is BOTH parsed and reported (the
@@ -7075,70 +7202,22 @@ pub(crate) fn verify_auto_impl(
             // every OTHER property in the run still reports. A consumer measured losing 5 of 8 full
             // lane runs (62%) to that abort.
             if crate::adapter::engine_isolate::enabled() {
-                use crate::adapter::engine_isolate::Isolated;
                 let iso = crate::adapter::engine_isolate::exact_symbolic(&btor2, &formula_str);
-                // `Unavailable` falls THROUGH to the in-process path: isolation could not be
-                // attempted, which is our problem and not a reason to abstain on the property.
-                if !matches!(iso, Isolated::Unavailable(_)) {
-                    let outcome = match &iso {
-                        Isolated::Holds => VerifyOutcome::Holds,
-                        // No witness under isolation — the child returns a verdict, not a
-                        // counterexample. Recorded in `engine_isolate`'s docs; a consumer gating on
-                        // `properties[].outcome` is unaffected, one reading traces is not.
-                        Isolated::Violated => VerifyOutcome::Violated { false_cells: 1 },
-                        Isolated::Abstained(why) => VerifyOutcome::Skipped {
-                            reason: format!("exact symbolic MC (isolated): {why}"),
-                        },
-                        // THE CASE THIS EXISTS FOR. `unknown`, never `skipped`: the engine was
-                        // attempted and reached no answer, and `ci_exit_code` does not fail on
-                        // `skipped` — so `skipped` here would let a strict gate pass green on a
-                        // property whose engine crashed.
-                        Isolated::Died(_) => VerifyOutcome::Unknown { unknown_cells: 0 },
-                        Isolated::Unavailable(_) => unreachable!("filtered above"),
-                    };
-                    if let Isolated::Died(why) = &iso {
-                        report.notes.push(VerificationNote {
-                            kind: "engine-isolation".to_string(),
-                            level: NoteLevel::ScopeCaveat,
-                            summary: format!(
-                                "`{}`: the exact-symbolic engine DIED in its isolated child — {why}. \
-                                 The property is `unknown`; every other property in this run is \
-                                 unaffected, which is what isolation buys (mununu#543).",
-                                t.name
-                            ),
-                            detail: "The engine ran in a child process because \
-                                     MUNUNU_ISOLATE_ENGINES is set. Without isolation this death \
-                                     would have ended the whole run with no report at all. The \
-                                     underlying defect is an unbounded recursion in OxiDD's \
-                                     `apply_bin` on a malformed diagram; it is not a defect in the \
-                                     design under verification, and this property's verdict is \
-                                     absent rather than negative."
-                                .to_string(),
-                            items: vec![format!("property:{}", t.name)],
-                            // mununu#548 O-2 — the property is a FIELD now. `items` keeps its
-                            // `property:<name>` entry for one release so a consumer already
-                            // reading it does not break on the same commit that gives them the
-                            // better route.
-                            property: Some(t.name.clone()),
-                        });
-                    }
+                // `None` (isolation could not be attempted) falls THROUGH to the in-process
+                // path: that is our problem and not a reason to abstain on the property.
+                if let Some((outcome, bottom_reason, note)) = isolated_row(&t.name, &iso) {
+                    report.notes.extend(note);
                     report.properties.push(PropertyVerdict {
                         name: t.name.clone(),
                         label: t.label.clone(),
                         kind: t.kind,
                         formula: formula_str.clone(),
-                        // ask 26 — the death reason was already captured for the
-                        // `engine-isolation` NOTE above. Carry it on the FIELD as well: a crash
+                        // ask 26 — the reason is on the FIELD as well as in the note: a crash
                         // and a budget abstention were previously byte-identical here
                         // (`unknown`, `unknown_cells: 0`), so a consumer could not tell "your
                         // engine died" from "this needed more budget" — and the note that said
                         // so was filterable.
-                        bottom_reason: match &iso {
-                            Isolated::Died(why) => Some(BottomReason::EngineCrashed {
-                                detail: why.to_string(),
-                            }),
-                            _ => None,
-                        },
+                        bottom_reason,
                         outcome,
                         seeded_predicates: Vec::new(),
                         counterexample: None,
@@ -8082,7 +8161,7 @@ pub(crate) fn escalate_bottom_with_slice(
             notes.push(escalation_stopped_note(
                 &prop.name,
                 "⊥ escalation",
-                EscalationStop::Time,
+                EscalationStop::Time(crate::adapter::run_budget::current().set_by()),
             ));
             break;
         }
@@ -8097,6 +8176,7 @@ pub(crate) fn escalate_bottom_with_slice(
         let row_budget = crate::adapter::run_budget::Budget::child(
             &crate::adapter::run_budget::current(),
             crate::adapter::run_budget::property_budget_ms(),
+            crate::adapter::run_budget::SetBy::PropertyBudgetEnv,
         );
         let _row_guard = crate::adapter::run_budget::enter(&row_budget);
         // `MUNUNU_RESCUE_MONITOR_DUMP` names this row's monitor files after the row.
@@ -8995,7 +9075,7 @@ pub(crate) fn rescue_skipped_via_exact(
             notes.push(escalation_stopped_note(
                 &prop.name,
                 "exact rescue of skipped rows",
-                EscalationStop::Time,
+                EscalationStop::Time(crate::adapter::run_budget::current().set_by()),
             ));
             break;
         }
@@ -9012,6 +9092,7 @@ pub(crate) fn rescue_skipped_via_exact(
             let row_budget = crate::adapter::run_budget::Budget::child(
                 &crate::adapter::run_budget::current(),
                 crate::adapter::run_budget::property_budget_ms(),
+                crate::adapter::run_budget::SetBy::PropertyBudgetEnv,
             );
             let _row_guard = crate::adapter::run_budget::enter(&row_budget);
             crate::adapter::btor2::symbolic_bitblast::exact_ladder_within_run_budget(
@@ -9227,8 +9308,11 @@ fn under_rescue_slice<T>(
     slice_expired: &mut bool,
     step: impl FnOnce() -> T,
 ) -> T {
-    let slice =
-        crate::adapter::run_budget::Budget::child(&crate::adapter::run_budget::current(), slice_ms);
+    let slice = crate::adapter::run_budget::Budget::child(
+        &crate::adapter::run_budget::current(),
+        slice_ms,
+        crate::adapter::run_budget::SetBy::RescueSliceEnv,
+    );
     let _guard = crate::adapter::run_budget::enter(&slice);
     let out = step();
     *slice_expired |= slice.expired();
@@ -9300,7 +9384,8 @@ fn trap_certificate_note(
 /// Why a later pass over the property list stopped early (mununu#871).
 pub(super) enum EscalationStop {
     Memory(crate::adapter::memory_budget::MemoryBudgetExceeded),
-    Time,
+    /// The budget in effect expired; the setter is who set it (mununu#1197).
+    Time(crate::adapter::run_budget::SetBy),
 }
 
 #[cfg(test)]
@@ -10656,6 +10741,7 @@ mod tests {
     #[test]
     fn a_violation_read_only_at_doubt_kept_initial_cubes_is_withheld_and_named() {
         use crate::adapter::btor2::kmts_lift::{InitialCubeDoubt, InitialCubes};
+        use crate::adapter::run_budget::SetBy;
         use crate::mu_calculus::trit::TritSet;
         use bitvec::prelude::*;
         // four cells over two predicates: cells 0 and 2 False, cells 1 and 3 True, none ⊥
@@ -10697,7 +10783,7 @@ mod tests {
         // The run budget's own expiry stops the run from here too, as from the ⊥ arm.
         let on_budget = InitialCubes {
             cubes: vec![1, 2],
-            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired)],
+            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired(SetBy::RunBudgetEnv))],
         };
         let (_, _, stop_b) = cube_outcome(Ok((set.clone(), false)), &on_budget, &names, true, true);
         assert!(
@@ -10721,7 +10807,7 @@ mod tests {
         // A False at an established initial cube (0) beside the doubted one: violated.
         let mixed = InitialCubes {
             cubes: vec![0, 2],
-            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired)],
+            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired(SetBy::RunBudgetEnv))],
         };
         let (o2, r2, _) = cube_outcome(Ok((set.clone(), false)), &mixed, &names, false, false);
         assert_eq!(o2.label(), "violated", "{o2:?}");
@@ -15873,6 +15959,68 @@ module uart_tx(); endmodule"#;
         }
     }
     impl<T> Pipe for T {}
+
+    /// mununu#1189 — `sv verify-auto` is one row of the decision × verb table: its notes name the
+    /// lift's five decisions under the kinds every other `sv` verb puts in its `lift_notes`
+    /// (the other rows are `x1189_every_reader_reports_every_lift_decision`), each once.
+    #[test]
+    fn x1189_verify_auto_reports_the_lift_decisions_under_the_shared_kinds() {
+        use crate::adapter::lift_decisions::LIFT_DECISION_KINDS;
+        let report = AutoVerifyReport {
+            diagnostics: ModelDiagnostics {
+                blackboxed_modules: vec!["vendor_ram".into()],
+                auto_provided_stubs: vec!["prim_flop".into()],
+                lift_retry: Some("the backend refused the first script".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let notes = build_notes(
+            &report,
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[("WIDTH".to_string(), "8".to_string())],
+            &[],
+            &["busy".to_string()],
+            &NotePosture::Cube,
+        );
+        let items_of = |kind: &str| -> Vec<Vec<String>> {
+            notes
+                .iter()
+                .filter(|n| n.kind == kind)
+                .map(|n| n.items.clone())
+                .collect()
+        };
+        let want: [Vec<String>; 5] = [
+            Vec::new(),
+            vec!["WIDTH=8".to_string()],
+            vec!["busy".to_string()],
+            vec!["prim_flop".to_string()],
+            vec!["vendor_ram".to_string()],
+        ];
+        for (kind, items) in LIFT_DECISION_KINDS.iter().zip(want) {
+            assert_eq!(
+                items_of(kind),
+                vec![items],
+                "`sv verify-auto` reports the lift decision `{kind}` once, with what it applies to"
+            );
+        }
+        let none = build_notes(
+            &AutoVerifyReport::default(),
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[],
+            &[],
+            &[],
+            &NotePosture::Cube,
+        );
+        assert!(
+            !none
+                .iter()
+                .any(|n| LIFT_DECISION_KINDS.contains(&n.kind.as_str())),
+            "a lift that decided nothing is not reported as one that did"
+        );
+    }
 
     #[test]
     fn lift_retry_note_is_info_and_names_the_backend_loop() {
@@ -23895,11 +24043,16 @@ mod clock_root_note_tests {
         );
     }
 
-    /// mununu#1180 — a cut on a clock net: the control-slice note's "a definite HOLDS
-    /// transfers" stops at the storage cells on a clock with no driver, and says so naming the
-    /// clock and its note. With no such clock the note reads as it did.
+    /// mununu#1180, mununu#1189 — the control-slice note claims a transfer only when the lift
+    /// has no clock note. Under merged domains (an under-approximation of the interleavings) or
+    /// a clock with no driver the model can follow, a cut does not leave an over-approximation:
+    /// the note drops the claim and names each clock note. The rows are what a lift returns for
+    /// its domains (the merged list in the diagnostics, the root notes in the report), and one
+    /// row has a root note alone. With one domain on an input clock the note reads as it did.
     #[test]
-    fn x1180_the_control_slice_claim_stops_at_a_clock_with_no_driver() {
+    fn x1180_the_control_slice_claim_is_made_only_without_a_clock_note() {
+        use crate::adapter::lift_decisions::{CLOCK_DOMAINS_MERGED, clock_note_names};
+        use crate::adapter::slang::verify_auto_text::CUT_HOLDS_TRANSFERS;
         let cut = ["gclk".to_string()];
         let slice = |report: &AutoVerifyReport| -> String {
             build_notes(report, "", &[], &[], &[], &cut, &NotePosture::Exact)
@@ -23908,9 +24061,36 @@ mod clock_root_note_tests {
                 .expect("a cut net gives the control-slice note")
                 .detail
         };
+        // The report of a lift with these domains, as `sv verify-auto` fills it.
+        let lifted = |domains: &[ClockDomain]| -> AutoVerifyReport {
+            let mut report = AutoVerifyReport::default();
+            report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(domains);
+            report.notes.extend(clock_root_notes(domains));
+            report
+        };
         let plain = slice(&AutoVerifyReport::default());
-        assert!(plain.contains("a definite HOLDS transfers"), "{plain}");
-        assert!(!plain.contains("does NOT extend"), "{plain}");
+        assert!(plain.contains(CUT_HOLDS_TRANSFERS), "{plain}");
+        assert_eq!(
+            slice(&lifted(&[domain("clk", ClockRoot::Input)])),
+            plain,
+            "one domain on an input clock: no clock note, the claim is unqualified"
+        );
+
+        let merged_only = [
+            vec![
+                domain("clk_a", ClockRoot::Input),
+                domain("clk_b", ClockRoot::Input),
+            ],
+            vec![domain("gated", ClockRoot::Derived("$and".into()))],
+        ];
+        for domains in merged_only {
+            let detail = slice(&lifted(&domains));
+            assert!(!detail.contains(CUT_HOLDS_TRANSFERS), "{detail}");
+            assert!(
+                detail.contains(&format!("note `{CLOCK_DOMAINS_MERGED}`")),
+                "{detail}"
+            );
+        }
         for root in [
             ClockRoot::Cut,
             ClockRoot::BlackBox("pll".into()),
@@ -23922,25 +24102,32 @@ mod clock_root_note_tests {
             },
             ClockRoot::Undriven,
         ] {
-            let mut report = AutoVerifyReport::default();
-            let notes = clock_root_notes(&[domain("gclk", root.clone())]);
-            let kind = notes[0].kind.clone();
-            report.notes.extend(notes);
-            let detail = slice(&report);
+            let domains = [domain("gclk", root.clone())];
+            let report = lifted(&domains);
             assert!(
-                detail.contains(&format!(
-                    "This does NOT extend to the storage cells clocked on `gclk` (note `{kind}`)"
-                )),
-                "{root:?}: {detail}"
+                !report.diagnostics.merged_clock_domains.is_empty(),
+                "{root:?}: a clock with no driver is lifted only merged"
+            );
+            let kind = report.notes[0].kind.clone();
+            let detail = slice(&report);
+            assert!(!detail.contains(CUT_HOLDS_TRANSFERS), "{root:?}: {detail}");
+            for name in [
+                format!("note `{CLOCK_DOMAINS_MERGED}`"),
+                format!("`gclk` (note `{kind}`)"),
+            ] {
+                assert!(detail.contains(&name), "{root:?}: {name} in {detail}");
+            }
+            // The root note alone (a report built by hand) withdraws the claim too.
+            let mut alone = AutoVerifyReport::default();
+            alone.notes.extend(clock_root_notes(&domains));
+            let detail = slice(&alone);
+            assert!(!detail.contains(CUT_HOLDS_TRANSFERS), "{root:?}: {detail}");
+            assert_eq!(
+                clock_note_names(&alone.notes),
+                vec![format!("`gclk` (note `{kind}`)")],
+                "{root:?}"
             );
         }
-        // An input or a derived clock has no such note, and the claim is unqualified.
-        let mut report = AutoVerifyReport::default();
-        report.notes.extend(clock_root_notes(&[
-            domain("clk", ClockRoot::Input),
-            domain("gated", ClockRoot::Derived("$and".into())),
-        ]));
-        assert_eq!(slice(&report), plain);
     }
 
     /// The report's notes rebuild keeps the note (a kind it does not regenerate), so a note

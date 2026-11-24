@@ -6,6 +6,7 @@
 //! The issue-numbered reproducers stay separate binaries: `make verify-repro` builds a parent
 //! commit by target name, and a parent has no `policy` target.
 
+mod child_waits_go_through_one_helper_1196;
 mod consumer_neutral_output_g5;
 mod docs_references_resolve_d2;
 mod env_reads_go_through_env_var_974;
@@ -23,5 +24,6 @@ mod server_paths_resolve_through_one_function;
 mod source_built_tools_are_pinned_1242;
 mod source_scan;
 mod third_party_inventory_g1;
+mod timeout_setter_named_on_its_surface_1197;
 mod unconfirmed_paths_reach_every_report_1175;
 mod verilator_build_directories_1176;
