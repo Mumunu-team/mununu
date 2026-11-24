@@ -6,6 +6,11 @@
 //
 // Property of interest: the buffer never overflows (count < 3).
 //
+// NOTE: `mununu verify` refuses `multi_module = true` until mununu#1248 and
+//   mununu#1249 are fixed (the per-module composition lifts each module at its
+//   default parameters and leaves the top's own logic out). Until then set
+//   `multi_module = false`: the design is lifted flattened, as one module.
+//
 // Usage (sv-yosys multi-module path; requires yosys + sv2v):
 //   A verify.toml source lists this top module + its submodules and sets
 //   [sources.options] multi_module = true (+ optional top). The driver

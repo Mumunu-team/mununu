@@ -1,14 +1,16 @@
 # sv_multi_module — verify framework end-to-end transcript
 # Regenerated via examples/verify/sv_multi_module/validate.sh
 #
+# AT PRESENT THE RUN IS REFUSED: `multi_module = true` is refused until
+# mununu#1248 and mununu#1249 are fixed, so what follows is the refusal,
+# not a report. What the option asks for, for when it is back:
+#
 # Producer + consumer SV modules composed via the sv-yosys
 # multi-module path: a top module instantiates both submodules,
 # each is lifted to a KMTS, and the shared `valid` net rendezvouses
 # across the synchronous composition (composed automaton = Circuit).
 
 === mununu verify (human-readable) ===
-verify report — project `SvMultiModule`:
-  composition: synchronous ProducerConsumerSystem { members = [Circuit] }
-    - system (adapter = sv-yosys, automaton = Circuit)
-    system_alive: SATISFIED (4/4 states, 1/1 initial) [inline, over = Circuit]
-    consumer_reacts: SATISFIED (4/4 states, 1/1 initial) [inline, over = Circuit]
+verify config has 1 validation issue(s):
+  - [[sources]] `system`: options.multi_module = true is refused — the per-module composition builds each module with its default parameter values, not the values the design instantiates it with (mununu#1248), and leaves the top module's own logic out of the model (mununu#1249), so a verdict on that model is not a verdict on the design; both are mununu defects, not something to change in the design, and the option comes back when they are fixed. Remove the key or set `multi_module = false`: the design is then lifted flattened, as one module, and a property names the signals of that model instead of `<instance>__<signal>`
+

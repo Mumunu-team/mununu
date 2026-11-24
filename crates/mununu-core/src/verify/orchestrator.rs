@@ -830,8 +830,9 @@ pub fn inspect_project(
 ///   (sv2v→Yosys→BTOR2→bit-blast, carrying the MIG-1/MIG-2 soundness
 ///   fixes). The SV adapter has its own per-source sidecar conventions
 ///   (`.mununu.json` next to the `.sv` file). Requires `yosys` on PATH.
-///   Multi-module composition opts in via `multi_module = true`
-///   (+ optional `top`).
+///   `multi_module = true` (+ optional `top`) asks for the per-module
+///   composition; the config validation refuses it until mununu#1248
+///   and mununu#1249 are fixed, so this dispatcher is not reached with it.
 /// - `"crewai"` — uses [`crate::adapter::crewai::CrewaiAdapter`].
 ///   Per-agent automata + sequential supervisor + asynchronous
 ///   composition. Options currently ignored.
@@ -919,11 +920,15 @@ fn dispatch_adapter(
         // parser path). Runs the sv2v→Yosys-per-module→BTOR2→bit-blast
         // chain (`yosys::translate_sv`), carrying the MIG-1 (Ignored /
         // auto-COI) + MIG-2 (OOB-sink) soundness fixes. Single-module by
-        // default; multi-module composition opts in via the source option
-        // `multi_module = true` (+ optional `top`), driven from the top
-        // netlist. Requires `yosys` on PATH; absence surfaces as an
+        // default. The source option `multi_module = true` (+ optional
+        // `top`) asks for the per-module composition driven from the top
+        // netlist; the config validation refuses it (mununu#1248,
+        // mununu#1249). Requires `yosys` on PATH; absence surfaces as an
         // `AdapterTranslationFailed` (locate_yosys error), not silently.
-        "sv-yosys" => dispatch_sv_yosys(
+        // `"sv-yosys"`, by the constant the validation tests the adapter with when it refuses
+        // `multi_module = true`: the arm that reaches the option's reader and the refusal
+        // name the same adapter.
+        crate::verify::config::PER_MODULE_COMPOSITION_ADAPTER => dispatch_sv_yosys(
             source_id,
             content,
             additional_files,
@@ -1046,9 +1051,14 @@ fn is_sv_adapter(adapter: &str) -> bool {
 /// Yosys additional sources (by basename) so multi-file designs
 /// elaborate. Requires `yosys` on PATH.
 ///
-/// R-MM-5b — multi-module composition route. Opt in with the source
-/// option `multi_module = true` (optional `top = "<module>"`; the top is
-/// auto-detected from the netlist when omitted). The driver lifts each
+/// R-MM-5b — multi-module composition route, behind the source option
+/// `multi_module = true` (optional `top = "<module>"`; the top is
+/// auto-detected from the netlist when omitted). NOT REACHED from
+/// `verify_project` / `inspect_project` at present: the config validation
+/// they both start with refuses the option, because this route lifts each
+/// module at its default parameters (mununu#1248) and leaves the top's own
+/// logic out (mununu#1249). The branch stays for the fix of those two,
+/// which lifts the refusal. The driver lifts each
 /// submodule to a KMTS, renames each instance's ports to the connected
 /// nets, and synchronously fold-composes the instances
 /// ([`crate::adapter::yosys::multi_module::compose_sv_multi_module`]); the
@@ -1148,10 +1158,10 @@ fn dispatch_sv_yosys(
         ..AdapterOptions::default()
     };
 
-    let is_multi_module = options
-        .get("multi_module")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // Read by the one function the validation's refusal reads it with (mununu#1248,
+    // mununu#1249): while that refusal stands, this is `false` on every call that came
+    // through `verify_project` or `inspect_project`.
+    let is_multi_module = crate::verify::config::asks_for_per_module_composition(options);
 
     // IR-track P3.3 — predicate-cube verify path. When the (widened)
     // sidecar declares `predicates`, route a single-module SV source
