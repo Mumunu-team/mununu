@@ -31,13 +31,19 @@ strip_logs() {
     printf '# sv_multi_module — verify framework end-to-end transcript\n'
     printf '# Regenerated via examples/verify/sv_multi_module/validate.sh\n'
     printf '#\n'
+    printf '# AT PRESENT THE RUN IS REFUSED: `multi_module = true` is refused until\n'
+    printf '# mununu#1248 and mununu#1249 are fixed, so what follows is the refusal,\n'
+    printf '# not a report. What the option asks for, for when it is back:\n'
+    printf '#\n'
     printf '# Producer + consumer SV modules composed via the sv-yosys\n'
     printf '# multi-module path: a top module instantiates both submodules,\n'
     printf '# each is lifted to a KMTS, and the shared `valid` net rendezvouses\n'
     printf '# across the synchronous composition (composed automaton = Circuit).\n\n'
 
     printf '=== mununu verify (human-readable) ===\n'
-    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" 2>&1 | strip_logs
+    # The refusal is a non-zero exit; the transcript records it, so it does not
+    # stop the script. Drop the `|| true` with the refusal.
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" 2>&1 | strip_logs || true
 } > "$TRANSCRIPT"
 
 printf 'wrote transcript to %s (%d lines)\n' \

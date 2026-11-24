@@ -127,7 +127,9 @@ Derived from port directions: `input` ports → **uncontrollable** (environment)
 
 ### Multi-module composition
 
-A top module that instantiates submodules composes structurally: each instance is lifted to a KMTS, its ports renamed to the connected nets (from the Yosys netlist), and the instances synchronously composed. Opt in with `[sources.options] multi_module = true` (+ optional `top`) on a `verify.toml` source. The composed automaton is named `Circuit`.
+By default a top module and the submodules it instantiates are lifted flattened, as one module: the model is the whole design, and a property names its signals.
+
+The per-module composition is **refused until mununu#1248 and mununu#1249 are fixed**. It is asked for with `[sources.options] multi_module = true` (+ optional `top`) on a `verify.toml` source: each instance is lifted to a KMTS, its ports renamed to the connected nets (from the Yosys netlist), and the instances synchronously composed into an automaton named `Circuit`. That composition builds each module with its default parameter values, not the values the design instantiates it with, and leaves the top module's own logic out of the model, so its verdicts were not about the design. `mununu verify` (and `--print-alphabet`) and `POST /api/v1/verify` now answer such a project with a validation error that says this, before anything is lifted. Remove the key or set `multi_module = false`.
 
 ---
 

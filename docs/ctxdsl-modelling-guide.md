@@ -244,7 +244,7 @@ from both members bind in formulas over the product.
 
 > Source of truth: [`validate_param_value`](../crates/mununu-core/src/adapter/templates/mod.rs#L541)
 > (`ParamType::Predicate | ParamType::State` must be alphanumeric + `_`) and
-> [`PropertySpec::formula`](../crates/mununu-core/src/verify/config.rs#L331).
+> [`PropertySpec::formula`](../crates/mununu-core/src/verify/config.rs#L332).
 > Surface: CLI+API.
 
 ```toml
