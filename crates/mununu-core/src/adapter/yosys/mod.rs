@@ -1151,21 +1151,12 @@ fn run_sv_flatten_btor2_concrete(
     // empty, it switched off the multi-clock refusal and the black-box scan silently, and the
     // lift cache stored that (mununu#957). So did one that was there and was not a netlist —
     // truncated, or JSON of another shape (mununu#1198). A lift error instead — never cached.
-    let hier_json = read_lift_snapshot(&plan.hier_json_path, "hierarchy")?;
-
+    //
     // The BTOR2 model has ONE implicit clock: every `next` fires on it. A design whose flops sit
     // in two domains was lifted as if they ticked together — silently, because the old refusal
     // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
-    let flat_netlist_json =
-        read_lift_snapshot(&clock_json_path(&plan.btor_path), "flattened netlist")?;
-    let clock_domains =
-        clock_domains_with_hierarchy(&flat_netlist_json, &hier_json).map_err(|damage| {
-            lift_snapshot_error(
-                &clock_json_path(&plan.btor_path),
-                "flattened netlist",
-                &damage.to_string(),
-            )
-        })?;
+    let (hier_json, flat_netlist_json, clock_domains) =
+        scan_lifted_clocks(&plan.hier_json_path, &clock_json_path(&plan.btor_path))?;
     refuse_merged_clock_domains(&clock_domains, yopts, opt_in)?;
 
     Ok(SvFlattenArtifacts {
@@ -1183,6 +1174,24 @@ fn run_sv_flatten_btor2_concrete(
         flat_netlist_json,
         cache: LiftCacheOutcome::Off,
     })
+}
+
+/// The two snapshots a lift script wrote, read back, and the clock domains of the lifted design:
+/// `(hierarchy snapshot, flattened netlist, domains)`. The one reader behind every lift that
+/// returns a model — the flattened lift, each module of the per-module lift and the per-module
+/// lift's scan of the composed design (mununu#1191) — so the three judge a snapshot, and name a
+/// damaged one, the same way.
+fn scan_lifted_clocks(
+    hier_json_path: &Path,
+    clocks_json_path: &Path,
+) -> Result<(String, String, Vec<ClockDomain>), AdapterError> {
+    let hier_json = read_lift_snapshot(hier_json_path, "hierarchy")?;
+    let flat_netlist_json = read_lift_snapshot(clocks_json_path, "flattened netlist")?;
+    let clock_domains =
+        clock_domains_with_hierarchy(&flat_netlist_json, &hier_json).map_err(|damage| {
+            lift_snapshot_error(clocks_json_path, "flattened netlist", &damage.to_string())
+        })?;
+    Ok((hier_json, flat_netlist_json, clock_domains))
 }
 
 /// A JSON snapshot the lift's script writes, read back; missing or empty is a lift error that
@@ -1280,9 +1289,11 @@ pub(crate) enum MergeOptIn {
     /// flag (API `lift.merge_clock_domains`) and reports the domains.
     Offered,
     /// The entries that return the model alone ([`sv_to_btor2`], [`sv_discover_state_cells`],
-    /// [`translate_sv`]): `sv discover`, `sv cegar` on the command line, `POST /translate`
-    /// with `sv-yosys`, `verify project`, `context import`. None of them takes the flag, and
-    /// the entries refuse it ([`refuse_merge_without_domains`]).
+    /// [`translate_sv`], and the per-module lift's two, [`translate_sv_per_module`] and
+    /// [`translate_sv_per_module_with_connectivity`]): `sv discover`, `sv cegar` and
+    /// `sv emit-btor2-per-module` on the command line, `POST /translate` with `sv-yosys`,
+    /// `verify project` (with `multi_module` or without), `context import`. None of them takes
+    /// the flag, and the entries refuse it ([`refuse_merge_without_domains`]).
     NotOffered,
 }
 
@@ -1682,9 +1693,10 @@ pub fn sv_to_btor2(content: &str, yopts: &YosysOptions) -> Result<String, Adapte
 }
 
 /// mununu#1181 — the refusal of every lift entry that returns a model and not its clock domains
-/// ([`sv_to_btor2`], [`sv_discover_state_cells`], [`translate_sv`]): asked to merge clock
-/// domains, it would lift an under-approximation nobody downstream can report, so it refuses
-/// before any tool runs. No surface passes the opt-in to one of them today; a caller that starts
+/// ([`sv_to_btor2`], [`sv_discover_state_cells`], [`translate_sv`], and since mununu#1191 the
+/// per-module lift's [`translate_sv_per_module`] and
+/// [`translate_sv_per_module_with_connectivity`]): asked to merge clock domains, it would lift
+/// an under-approximation nobody downstream can report, so it refuses before any tool runs. No surface passes the opt-in to one of them today; a caller that starts
 /// to is a defect of mununu, and this is where it stops.
 fn refuse_merge_without_domains(yopts: &YosysOptions) -> Result<(), AdapterError> {
     if !yopts.merge_clock_domains {
@@ -2595,12 +2607,19 @@ pub struct PerModuleOutput {
 /// with an actionable error rather than hanging indefinitely. A single-invocation
 /// variant using Yosys `select` is feasible in principle but introduces
 /// select-scope subtleties that the two-pass shape avoids.
+///
+/// mununu#1191 — each model is one module lifted as a design of its own, so each module's
+/// clocks are scanned as the flattened lift scans a design's, and a module the flattened lift
+/// would refuse as a top is refused here in the same words ([`refuse_module_clocks`],
+/// [`PerModuleUse::Standalone`]). Like every entry that returns models alone, it refuses
+/// [`YosysOptions::merge_clock_domains`]. A persisted model reaches the caller's directory only
+/// once every module has lifted and passed its clock scan ([`persist_per_module_models`]).
 pub fn translate_sv_per_module(
     content: &str,
     options: &AdapterOptions,
     yopts: &YosysOptions,
 ) -> Result<Vec<PerModuleOutput>, AdapterError> {
-    translate_sv_per_module_impl(content, options, yopts, /*surface_net_driving=*/ false)
+    translate_sv_per_module_impl(content, options, yopts, PerModuleUse::Standalone)
         .map(|(outputs, _hier)| outputs)
 }
 
@@ -2624,6 +2643,11 @@ pub type PortDirectionsPerModule =
 /// surface set is computed from the connectivity + directions (output ports
 /// that drive a connected net), so single-module designs / parse misses
 /// surface nothing.
+///
+/// mununu#1191 — the models are composed into ONE design, so the clocks of that design are
+/// scanned first, as the flattened lift scans them, and refused in its words
+/// ([`scan_composed_design_clocks`]); each module as lifted is then scanned too
+/// ([`refuse_module_clocks`], [`PerModuleUse::Composed`]).
 pub fn translate_sv_per_module_with_connectivity(
     content: &str,
     options: &AdapterOptions,
@@ -2637,7 +2661,7 @@ pub fn translate_sv_per_module_with_connectivity(
     AdapterError,
 > {
     let (outputs, hier_body) =
-        translate_sv_per_module_impl(content, options, yopts, /*surface_net_driving=*/ true)?;
+        translate_sv_per_module_impl(content, options, yopts, PerModuleUse::Composed)?;
     let connectivity = parse_instance_connections(&hier_body, yopts.top.as_deref());
     let directions = parse_port_directions_per_module(&hier_body, yopts.top.as_deref());
     Ok((outputs, connectivity, directions))
@@ -2671,15 +2695,17 @@ fn net_driving_output_ports(
 /// [`translate_sv_per_module_with_connectivity`]: runs the two-pass Yosys
 /// flow and returns the per-module outputs alongside the raw discovery-pass
 /// hierarchy JSON (so the connectivity wrapper can parse it without a
-/// second Yosys run). When `surface_net_driving` is set, net-driving output
+/// second Yosys run). Under [`PerModuleUse::Composed`], net-driving output
 /// ports (computed from the connectivity + directions in the same hier.json)
 /// are surfaced as per-state valuations in every per-module lift.
 fn translate_sv_per_module_impl(
     content: &str,
     options: &AdapterOptions,
     yopts: &YosysOptions,
-    surface_net_driving: bool,
+    usage: PerModuleUse,
 ) -> Result<(Vec<PerModuleOutput>, String), AdapterError> {
+    // mununu#1181 / mununu#1191 — both entries return models and nothing about the lift.
+    refuse_merge_without_domains(yopts)?;
     let yosys = locate_yosys()?;
     let plugin = slang_plugin_arg();
     let tmp = TempDir::new("mununu-yosys-per-module")?;
@@ -2764,31 +2790,39 @@ fn translate_sv_per_module_impl(
     // output ports from the connectivity + directions (same hier.json) so
     // each per-module lift surfaces them (R-MM-4b) for the driver's
     // rendezvous-label synthesis.
-    let surface_outputs: Vec<String> = if surface_net_driving {
+    let surface_outputs: Vec<String> = if usage == PerModuleUse::Composed {
         let connectivity = parse_instance_connections(&hier_body, yopts.top.as_deref());
         net_driving_output_ports(&connectivity, &top_directions_per_module)
     } else {
         Vec::new()
     };
 
-    // Choose output directory for the per-submodule BTOR2 files. mununu#1138 — yosys runs
-    // inside the staging directory, so a caller's directory is made absolute first (a relative
-    // `--output-dir build/`, or the CLI's default — the source's parent, empty for a bare file
-    // name — used to resolve against mununu's working directory because yosys ran there).
-    let out_dir = match &yopts.per_module_output_dir {
+    // mununu#1191 — the models are composed into one design: scan that design's clocks before
+    // any module is lifted, so a design the flattened lift refuses is refused here first, in
+    // the flattened lift's words.
+    if usage == PerModuleUse::Composed {
+        scan_composed_design_clocks(&yosys, plugin.as_deref(), &sources, yopts, tmp.path())?;
+    }
+
+    // The caller's directory for the per-submodule BTOR2 files, checked before any module is
+    // lifted. mununu#1138 — it is made absolute first (a relative `--output-dir build/`, or the
+    // CLI's default — the source's parent, empty for a bare file name — would otherwise depend
+    // on a working directory). mununu#1191 — yosys never writes there: every module is lifted
+    // into the staging directory, and the models are copied out once the last one has lifted
+    // and passed its clock scan.
+    let persist_dir = match &yopts.per_module_output_dir {
         Some(dir) => {
             let abs = per_module_output_dir(dir)?;
             std::fs::create_dir_all(&abs).map_err(io_err)?;
-            abs
+            Some(abs)
         }
-        None => tmp.path().to_path_buf(),
+        None => None,
     };
-    let persist = yopts.per_module_output_dir.is_some();
 
     // Pass 2 — per-submodule emission. For each module, run Yosys with
-    // `hierarchy -top <m>` (no flatten) and emit `<m>.btor2`. Feed each
-    // BTOR2 through the existing BTOR2 adapter.
-    let mut outputs = Vec::with_capacity(submodules.len());
+    // `hierarchy -top <m>` (no flatten), emit `<m>.btor2` into the staging directory and scan
+    // the module's clocks. Every module is lifted before any model is kept or read.
+    let mut staged = Vec::with_capacity(submodules.len());
     for module_name in &submodules {
         // The name comes from yosys's hierarchy of the user's design; an escaped identifier
         // would reach `hierarchy -top` unquoted (the same gate as `validate_lift_inputs`).
@@ -2801,19 +2835,14 @@ fn translate_sv_per_module_impl(
                  lift script today (a mununu limitation)",
             ));
         }
-        let btor_path = out_dir.join(format!("{module_name}.btor2"));
-        // mununu#1138 — a persisted output goes to the caller's directory by its absolute path
-        // (quoted by `write_btor` when it carries a space); a transient one is a name inside
-        // the staging directory yosys runs in.
-        let script_btor: PathBuf = if persist {
-            btor_path.clone()
-        } else {
-            PathBuf::from(format!("{module_name}.btor2"))
-        };
+        // mununu#1138 — the script names its outputs relative to the staging directory yosys
+        // runs in: the model and the two snapshots of the clock scan.
+        let btor_name = module_btor_name(module_name);
+        let btor_path = tmp.path().join(&btor_name);
         let script = build_per_module_script(
             &sources,
             module_name,
-            &script_btor,
+            Path::new(&btor_name),
             yopts.setundef_anyseq,
             yopts.setundef_anyconst,
             &yopts.init_policy_overrides,
@@ -2828,6 +2857,14 @@ fn translate_sv_per_module_impl(
             tmp.path(),
         )?;
 
+        // mununu#1191 — the module's clocks, read from the snapshots its script wrote, before
+        // its model is read: the BTOR2 has ONE implicit clock, whoever lifted it.
+        let (_hier, _flat, clock_domains) = scan_lifted_clocks(
+            &tmp.path().join(module_hier_json_name(module_name)),
+            &tmp.path().join(module_clocks_json_name(module_name)),
+        )?;
+        refuse_module_clocks(module_name, &clock_domains, yopts, usage)?;
+
         let btor = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
@@ -2836,7 +2873,25 @@ fn translate_sv_per_module_impl(
             ),
             location: None,
         })?;
+        staged.push((module_name, btor));
+    }
 
+    // mununu#1191 — the models the caller asked to keep are copied out here: after every module
+    // has lifted and passed its clock scan, so a refusal or a failed yosys run leaves nothing
+    // in the caller's directory, and before mununu's own reader builds its model of each, so a
+    // design that reader cannot take still leaves the BTOR2 files the caller asked for (as it
+    // did when yosys wrote them there itself).
+    let kept: Vec<Option<PathBuf>> = match &persist_dir {
+        Some(dir) => persist_per_module_models(tmp.path(), dir, &submodules)?
+            .into_iter()
+            .map(Some)
+            .collect(),
+        None => vec![None; submodules.len()],
+    };
+
+    // Pass 3 — feed each staged BTOR2 through the existing BTOR2 adapter.
+    let mut outputs = Vec::with_capacity(staged.len());
+    for ((module_name, btor), btor2_path) in staged.into_iter().zip(kept) {
         // Per-module port-direction context (Document B task B1 — same
         // mechanism as `translate_sv`, scoped to each submodule's
         // boundary).
@@ -2868,12 +2923,183 @@ fn translate_sv_per_module_impl(
 
         outputs.push(PerModuleOutput {
             module_name: module_name.clone(),
-            btor2_path: if persist { Some(btor_path) } else { None },
+            btor2_path,
             output: out,
         });
     }
 
     Ok((outputs, hier_body))
+}
+
+/// How the per-module lift's models are used by the entry that asked for them. It decides what
+/// the clock scan of one module refuses ([`refuse_module_clocks`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PerModuleUse {
+    /// [`translate_sv_per_module`]: each model is returned as a design of its own.
+    Standalone,
+    /// [`translate_sv_per_module_with_connectivity`]: the models are composed along the top's
+    /// connectivity, and the clocks of the design they are composed into are scanned once,
+    /// before any module is lifted ([`scan_composed_design_clocks`]).
+    Composed,
+}
+
+/// The staged file names of one module's lift, relative to the staging directory yosys runs in.
+/// A module name is a plain identifier ([`is_valid_module_name`]), so none of them can be the
+/// discovery snapshot ([`STAGED_HIER_JSON`]) or a file of the design scan (`design-scan.…`).
+fn module_btor_name(module: &str) -> String {
+    format!("{module}.btor2")
+}
+
+fn module_hier_json_name(module: &str) -> String {
+    format!("{module}.hier.json")
+}
+
+fn module_clocks_json_name(module: &str) -> String {
+    format!("{module}.clocks.json")
+}
+
+/// The two snapshots of [`scan_composed_design_clocks`], relative to the staging directory. The
+/// `-` keeps them apart from every module's files.
+const DESIGN_SCAN_HIER_JSON: &str = "design-scan.hier.json";
+const DESIGN_SCAN_CLOCKS_JSON: &str = "design-scan.clocks.json";
+
+/// mununu#1191 — the clock scan of the design the per-module models are composed into: one
+/// yosys run of the flattened lift's script up to its clock snapshot
+/// ([`build_clock_scan_script`]; no BTOR2 is written), then the flattened lift's reader and its
+/// refusal, word for word ([`MergeOptIn::NotOffered`]: the surface that composes modules has no
+/// opt-in to merge domains). The read is the discovery pass's read without `--keep-hierarchy`;
+/// no cut points, because the per-module lift takes none.
+fn scan_composed_design_clocks(
+    yosys: &Path,
+    plugin: Option<&str>,
+    sources: &[PathBuf],
+    yopts: &YosysOptions,
+    staging: &Path,
+) -> Result<(), AdapterError> {
+    let script = build_clock_scan_script(
+        &[read_slang_cmd(
+            sources,
+            yopts.top.as_deref(),
+            &yopts.params,
+            &[],
+        )],
+        "",
+        yopts.top.as_deref(),
+        Path::new(DESIGN_SCAN_HIER_JSON),
+        Path::new(DESIGN_SCAN_CLOCKS_JSON),
+        &yopts.init_policy_overrides,
+        &[],
+    );
+    run_yosys(
+        yosys,
+        &script,
+        PER_MODULE_YOSYS_TIMEOUT,
+        plugin,
+        &staging.join("design-scan.yosys.log"),
+        staging,
+    )?;
+    let (_hier, _flat, clock_domains) = scan_lifted_clocks(
+        &staging.join(DESIGN_SCAN_HIER_JSON),
+        &staging.join(DESIGN_SCAN_CLOCKS_JSON),
+    )?;
+    refuse_merged_clock_domains(&clock_domains, yopts, MergeOptIn::NotOffered)
+}
+
+/// mununu#1191 — the clock refusal of ONE module of the per-module lift, from the domains of
+/// the module as it was lifted (a design of its own, at its default parameters). The words are
+/// the flattened lift's ([`refuse_merged_clock_domains`]) with the module named
+/// ([`module_clock_refusal`]).
+///
+/// SOUNDNESS: under [`PerModuleUse::Standalone`] the model returned IS the module as a design
+/// of its own, so everything the flattened lift refuses of a top is refused: two domains, a
+/// derived clock, a free-source root. Under [`PerModuleUse::Composed`] a module whose every
+/// domain is rooted at one of its own inputs passes, however many such domains it has: whether
+/// two clock ports are two clocks is decided by the design that instantiates the module (the
+/// parent may tie both to one clock), and [`scan_composed_design_clocks`] has already refused
+/// the design if they are. A root that is NOT an input of the module (derived, constant,
+/// undriven, cut, a black box, several drivers) is refused in both uses: the design scan
+/// accepted the design, so the module as lifted here is not the module the design instantiates
+/// — the per-module lift elaborates each module type at its default parameters — and the model
+/// would tick a clock on every step that the lifted netlist gates, divides or never runs.
+fn refuse_module_clocks(
+    module: &str,
+    domains: &[ClockDomain],
+    yopts: &YosysOptions,
+    usage: PerModuleUse,
+) -> Result<(), AdapterError> {
+    let every_root_is_an_input = domains.iter().all(|d| matches!(d.root, ClockRoot::Input));
+    if usage == PerModuleUse::Composed && every_root_is_an_input {
+        return Ok(());
+    }
+    refuse_merged_clock_domains(domains, yopts, MergeOptIn::NotOffered).map_err(|mut e| {
+        e.message = module_clock_refusal(module, usage, &e.message);
+        e
+    })
+}
+
+/// What [`module_clock_refusal`] says after the flattened lift's words when the module is one
+/// of a composed design: why the module was refused although the design's clocks were accepted,
+/// whose limit that is, and the fix that exists on the surface that composes modules
+/// (`verify project`: the source option `multi_module`).
+const COMPOSED_MODULE_REMEDY: &str = "The per-module lift lifts each module on its own with its \
+    default parameters, and the clocks of the design as a whole were accepted, so this is not \
+    the module as the design instantiates it (a mununu limitation). `multi_module = false` on \
+    the source lifts the flattened design instead.";
+
+/// The flattened lift's clock refusal (`flattened`, as [`refuse_merged_clock_domains`] words
+/// it), re-addressed to one module of the per-module lift: the module is named first, and a
+/// composed use says after it what to do there ([`COMPOSED_MODULE_REMEDY`]).
+fn module_clock_refusal(module: &str, usage: PerModuleUse, flattened: &str) -> String {
+    let rest = flattened
+        .strip_prefix("adapter/yosys: ")
+        .unwrap_or(flattened);
+    match usage {
+        PerModuleUse::Standalone => {
+            format!("adapter/yosys: module `{module}`, lifted as a design of its own: {rest}")
+        }
+        PerModuleUse::Composed => format!(
+            "adapter/yosys: module `{module}`, lifted on its own with its default parameters: \
+             {rest} {COMPOSED_MODULE_REMEDY}"
+        ),
+    }
+}
+
+/// mununu#1191 — the models a caller asked to keep, copied from the staging directory to
+/// `out_dir`; the path of each, in the order of `modules`. Called once EVERY module has lifted
+/// and passed its clock scan, so a clock refusal or a failed yosys run leaves no model (and no
+/// empty file) in the caller's directory for a later step to pick up. It is called BEFORE
+/// mununu's own BTOR2 reader builds its model of each: a module that reader cannot take (too
+/// many input combinations per step, say) fails the lift and leaves the BTOR2 files, which is
+/// what a caller that asked for the files gets from yosys.
+fn persist_per_module_models(
+    staging: &Path,
+    out_dir: &Path,
+    modules: &[String],
+) -> Result<Vec<PathBuf>, AdapterError> {
+    modules
+        .iter()
+        .map(|module| persist_module_model(staging, out_dir, module))
+        .collect()
+}
+
+/// One module's staged model copied into `out_dir` under the same name; the path it now has.
+/// A copy that fails is an error naming the destination, never a model left unnamed.
+fn persist_module_model(
+    staging: &Path,
+    out_dir: &Path,
+    module: &str,
+) -> Result<PathBuf, AdapterError> {
+    let name = module_btor_name(module);
+    let dest = out_dir.join(&name);
+    std::fs::copy(staging.join(&name), &dest).map_err(|e| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!(
+            "adapter/yosys: could not write the per-module model {} ({e})",
+            dest.display()
+        ),
+        location: None,
+    })?;
+    Ok(dest)
 }
 
 /// Build the `chparam -set <name> <value> <module>` passes for the requested
@@ -2957,6 +3183,11 @@ fn build_discovery_script(
 /// boundaries) and at *cross-submodule composition* (driven by the
 /// top-level netlist, not by Yosys). Within a single submodule's BTOR2,
 /// flatten is the correct call.
+///
+/// mununu#1191 — the script also writes the two snapshots the clock scan reads, as
+/// [`build_script`] does: the module's hierarchy after `proc` ([`module_hier_json_name`]) and
+/// its flattened, cleaned netlist ([`clock_snapshot_passes`], [`module_clocks_json_name`]).
+/// Both are names relative to yosys's working directory, the staging directory.
 fn build_per_module_script(
     sources: &[PathBuf],
     module: &str,
@@ -2978,7 +3209,9 @@ fn build_per_module_script(
         // explosion). Unlike `memory`/`memory -nomap`, it runs NO internal `opt_clean`,
         // so it does not drop dead registers (which would change memory-free lifts).
         // No-op when the design has no memories.
-        "{read}; hierarchy -check -top {module}; {per_signal}proc; memory_collect; flatten; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        "{read}; hierarchy -check -top {module}; {per_signal}proc; write_json {}; memory_collect; flatten; {}; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        yosys_path_arg(Path::new(&module_hier_json_name(module))),
+        clock_snapshot_passes(Path::new(&module_clocks_json_name(module))),
         yosys_path_arg(btor_out)
     )
 }
@@ -4186,29 +4419,24 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
     Ok(())
 }
 
-/// mununu#1138 — the per-module output directory as yosys must see it from inside the staging
-/// directory: absolute (a relative one resolves against mununu's working directory, an empty
-/// one — the CLI's default for a bare file name — is that directory), and refused for a `"` or
-/// a line break, which the quoted `write_btor` argument cannot carry. Pure: the caller creates it.
+/// mununu#1138 — the per-module output directory, absolute: a relative one resolves against
+/// mununu's working directory, an empty one — the CLI's default for a bare file name — is that
+/// directory. Pure: the caller creates it.
+///
+/// mununu#1191 — no yosys script names this directory any more (every module is lifted into the
+/// staging directory under a relative name and the models are copied here once all of them
+/// lifted and passed the clock scan, [`persist_per_module_models`]), so a `"` or a line break
+/// in it is no longer refused:
+/// the refusal protected the quoted `write_btor` argument, and that argument is gone.
 fn per_module_output_dir(dir: &Path) -> Result<PathBuf, AdapterError> {
     let cwd = || std::env::current_dir().map_err(io_err);
-    let abs = if dir.as_os_str().is_empty() {
+    Ok(if dir.as_os_str().is_empty() {
         cwd()?
     } else if dir.is_absolute() {
         dir.to_path_buf()
     } else {
         cwd()?.join(dir)
-    };
-    let text = abs.display().to_string();
-    if text.chars().any(|c| matches!(c, '"' | '\n' | '\r')) {
-        return Err(refuse_lift_input(
-            "the per-module output directory",
-            &text,
-            "a path without a `\"` or a line break",
-            "move or rename the directory (`--output-dir` on `sv emit-btor2-per-module`)",
-        ));
-    }
-    Ok(abs)
+    })
 }
 
 /// Emit the explicit control-slice cut-point pass: `cutpoint w:<sig> …; ` (empty
@@ -4296,6 +4524,74 @@ fn read_slang_cmd(
     )
 }
 
+/// The passes that write the clock scan's netlist to `clocks_json_out` and leave the design as
+/// it was before them. Every script that ends in `write_btor` holds them
+/// (`tests/policy/per_module_lift_scans_clocks_1191.rs` pins that), so a model is never written
+/// from a design whose clocks nobody read (mununu#1191).
+///
+/// SOUNDNESS (mununu#1229): the clock scan reads a cleaned COPY of the design (`design -save` /
+/// `-load` around it). The copy must hold every storage cell the BTOR2 holds, or a clock domain
+/// of the model goes uncounted and the multi-clock refusal is skipped with nothing said:
+/// [`KEEP_NAMED_NETS`] before the copy's `opt_clean` makes it so. The marks are on the copy
+/// only; the design `write_btor` reads is the saved one.
+fn clock_snapshot_passes(clocks_json_out: &Path) -> String {
+    format!(
+        "design -save mununu_pre_clocks; {KEEP_NAMED_NETS}; opt_clean; write_json {}; design -load mununu_pre_clocks",
+        yosys_path_arg(clocks_json_out)
+    )
+}
+
+/// The flattened lift up to and including its two snapshots: the hierarchy (`hier_json_out`,
+/// written right after `proc`) and the flattened, cleaned netlist the clock scan reads
+/// (`clocks_json_out`). [`build_script`] is this script followed by the passes that write the
+/// BTOR2; the per-module lift's composed entry runs it alone, to scan the clocks of the design
+/// the modules are composed into (mununu#1191).
+fn build_clock_scan_script(
+    read_cmds: &[String],
+    chparam: &str,
+    top: Option<&str>,
+    hier_json_out: &Path,
+    clocks_json_out: &Path,
+    init_policy_overrides: &InitPolicyOverrides,
+    cutpoint_signals: &[String],
+) -> String {
+    // The read command(s) come from the caller — [`read_slang_cmd`] for the product lift, the
+    // oracle's `read_verilog` lines (with its `chparam` prefix) under `test_support` — and
+    // everything after the read is identical, so the lift is front-end-agnostic downstream.
+    let hier = match top {
+        Some(t) => format!("{chparam}hierarchy -top {t}"),
+        None => format!("{chparam}hierarchy -auto-top"),
+    };
+    let per_signal = emit_init_policy_setattrs(init_policy_overrides);
+    // Explicit control-slice cut points, spliced after the discovery `write_json`
+    // snapshot (so state-cell discovery still sees the real signals) and before
+    // `flatten`/bit-blast: each named net is driven by a free `$anyseq`, and
+    // cone-of-influence drops its now-dead datapath fanin. Over-approximation —
+    // see `YosysOptions::cutpoint_signals`.
+    let cutpoints = emit_cutpoints(cutpoint_signals);
+    // `cutpoint -blackbox` between the hierarchy snapshot and `flatten`
+    // replaces every output of every `(* blackbox *)` cell with an
+    // `$anyseq` (free variable) cell. This is what makes the rest of
+    // the pipeline succeed even when the blackbox body is empty — the
+    // blackbox's outputs become uncontrollable free signals, exactly
+    // the chaotic-stub semantics Document A §2 prescribes.
+    //
+    // `memory_collect` (see the single-module lift above): normalize memory ports
+    // for BTOR2 array emission, no opt_clean / map-to-flops. No-op when memory-free.
+    // The explicit control-slice cut points splice in just before `cutpoint -blackbox`
+    // (both after `write_json`, before `memory_collect`/`flatten`).
+    format!(
+        // `delete =A:…` right after the snapshot: a stub marked [`MISSING_MODULE_ATTR`] has been
+        // named in the hierarchy JSON and is now removed, so its cell is undefined when the BTOR2 is
+        // written — the old reader's missing-module shape (anonymous inputs). The `=` includes
+        // black-box modules in the selection; with no such module the pass is a no-op.
+        "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; {}",
+        read_cmds.join("; "),
+        yosys_path_arg(hier_json_out),
+        clock_snapshot_passes(clocks_json_out)
+    )
+}
+
 // The lift-script builder threads each independent Yosys-pass knob (top, output
 // paths, the two setundef flags, per-signal init overrides, and now the cut points)
 // as its own argument; bundling them into a struct would not improve clarity here.
@@ -4311,19 +4607,17 @@ fn build_script(
     init_policy_overrides: &InitPolicyOverrides,
     cutpoint_signals: &[String],
 ) -> String {
-    // The read command(s) come from the caller — [`read_slang_cmd`] for the product lift, the
-    // oracle's `read_verilog` lines (with its `chparam` prefix) under `test_support` — and
-    // everything after the read is identical, so the lift is front-end-agnostic downstream.
-    let hier = match top {
-        Some(t) => format!("{chparam}hierarchy -top {t}"),
-        None => format!("{chparam}hierarchy -auto-top"),
-    };
-    // `cutpoint -blackbox` between the hierarchy snapshot and `flatten`
-    // replaces every output of every `(* blackbox *)` cell with an
-    // `$anyseq` (free variable) cell. This is what makes the rest of
-    // the pipeline succeed even when the blackbox body is empty — the
-    // blackbox's outputs become uncontrollable free signals, exactly
-    // the chaotic-stub semantics Document A §2 prescribes.
+    // Everything up to the clock scan's snapshot is [`build_clock_scan_script`]; what follows
+    // it here turns the same design into the BTOR2.
+    let scan = build_clock_scan_script(
+        read_cmds,
+        chparam,
+        top,
+        hier_json_out,
+        &clock_json_path(btor_out),
+        init_policy_overrides,
+        cutpoint_signals,
+    );
     // SOUNDNESS — `setundef` three-way trade-off (R-Y1, §Phase 8 §8.1):
     //
     // `setundef` decides how Yosys treats nets that have no assigned
@@ -4362,32 +4656,8 @@ fn build_script(
     // Per-signal granularity (anyconst only on selected registers)
     // is R-Y2 (§Phase 8 §8.1), shipping post-R-Y1.
     let setundef_pass = select_setundef_pass(setundef_anyseq, setundef_anyconst);
-    let per_signal = emit_init_policy_setattrs(init_policy_overrides);
-    // Explicit control-slice cut points, spliced after the discovery `write_json`
-    // snapshot (so state-cell discovery still sees the real signals) and before
-    // `flatten`/bit-blast: each named net is driven by a free `$anyseq`, and
-    // cone-of-influence drops its now-dead datapath fanin. Over-approximation —
-    // see `YosysOptions::cutpoint_signals`.
-    let cutpoints = emit_cutpoints(cutpoint_signals);
-    // `memory_collect` (see the single-module lift above): normalize memory ports
-    // for BTOR2 array emission, no opt_clean / map-to-flops. No-op when memory-free.
-    // The explicit control-slice cut points splice in just before `cutpoint -blackbox`
-    // (both after `write_json`, before `memory_collect`/`flatten`).
     format!(
-        // `delete =A:…` right after the snapshot: a stub marked [`MISSING_MODULE_ATTR`] has been
-        // named in the hierarchy JSON and is now removed, so its cell is undefined when the BTOR2 is
-        // written — the old reader's missing-module shape (anonymous inputs). The `=` includes
-        // black-box modules in the selection; with no such module the pass is a no-op.
-        //
-        // SOUNDNESS (mununu#1229): the clock scan reads a cleaned COPY of the design (`design
-        // -save` / `-load` around it). The copy must hold every storage cell the BTOR2 holds, or
-        // a clock domain of the model goes uncounted and the multi-clock refusal is skipped with
-        // nothing said: [`KEEP_NAMED_NETS`] before the copy's `opt_clean` makes it so. The marks
-        // are on the copy only; the design `write_btor` reads is the saved one.
-        "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; {KEEP_NAMED_NETS}; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
-        read_cmds.join("; "),
-        yosys_path_arg(hier_json_out),
-        yosys_path_arg(&clock_json_path(btor_out)),
+        "{scan}; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         yosys_path_arg(btor_out)
     )
 }
@@ -5608,6 +5878,7 @@ endmodule
         };
         // One row per entry that calls the flatten lift and returns no `clock_domains`; the
         // fourth caller, `sv_to_btor2_with_blackboxes`, returns them and is the one that merges.
+        // mununu#1191 — and the per-module lift's two entries, which return models alone too.
         let refusals = [
             ("sv_to_btor2", sv_to_btor2(SV, &merged).err()),
             (
@@ -5617,6 +5888,15 @@ endmodule
             (
                 "translate_sv",
                 translate_sv(SV, &AdapterOptions::default(), &merged).err(),
+            ),
+            (
+                "translate_sv_per_module",
+                translate_sv_per_module(SV, &AdapterOptions::default(), &merged).err(),
+            ),
+            (
+                "translate_sv_per_module_with_connectivity",
+                translate_sv_per_module_with_connectivity(SV, &AdapterOptions::default(), &merged)
+                    .err(),
             ),
         ];
         for (entry, err) in refusals {
@@ -7599,12 +7879,13 @@ endmodule
         assert_eq!(plan.staged[0].0, dir.join("work.sv"));
     }
 
-    /// mununu#1138 — the per-module output directory reaches `write_btor` absolute whatever the
-    /// caller gave (yosys runs inside the staging directory): a relative directory resolves
-    /// against mununu's working directory, the CLI's empty default is that directory, an
-    /// absolute one is kept, and a `"` is refused by name.
+    /// mununu#1138 — the per-module output directory is absolute whatever the caller gave: a
+    /// relative directory resolves against mununu's working directory, the CLI's empty default
+    /// is that directory, an absolute one is kept. mununu#1191 — no script names it any more
+    /// (the script's outputs are the module's three files, relative to the staging directory
+    /// yosys runs in), so a `"` in it is carried, not refused.
     #[test]
-    fn x1138_a_relative_per_module_output_directory_is_made_absolute_for_the_script() {
+    fn x1138_a_relative_per_module_output_directory_is_made_absolute() {
         let cwd = std::env::current_dir().expect("cwd");
         assert_eq!(
             per_module_output_dir(Path::new("build/sub")).expect("relative"),
@@ -7613,31 +7894,535 @@ endmodule
         assert_eq!(per_module_output_dir(Path::new("")).expect("empty"), cwd);
         let abs = cwd.join("out dir");
         assert_eq!(per_module_output_dir(&abs).expect("absolute"), abs);
+        assert_eq!(
+            per_module_output_dir(Path::new("a\"b")).expect("a quote"),
+            cwd.join("a\"b")
+        );
         let script = build_per_module_script(
             &[PathBuf::from("work.sv")],
             "m",
-            &per_module_output_dir(Path::new("build"))
-                .expect("relative")
-                .join("m.btor2"),
+            Path::new(&module_btor_name("m")),
             false,
             false,
             &Default::default(),
             &[],
         );
-        assert!(
-            script.contains(&format!(
-                "write_btor {}",
-                cwd.join("build").join("m.btor2").display()
-            )),
-            "{script}"
+        for needle in ["write_json m.hier.json; ", "write_json m.clocks.json; "] {
+            assert!(script.contains(needle), "{needle} not in {script}");
+        }
+        assert!(script.ends_with("; write_btor m.btor2"), "{script}");
+    }
+
+    /// mununu#1191 — the flattened lift's script is the clock-scan script and a tail, and it is
+    /// the text it was before the split (the lift cache keys on it). The scan script alone —
+    /// what the per-module lift runs on the design it composes — writes both snapshots and no
+    /// model; the per-module script takes the same clock snapshot, under the module's names.
+    #[test]
+    fn x1191_every_lift_script_takes_the_clock_snapshot_the_flattened_lift_takes() {
+        let read = [read_slang_cmd(
+            &[PathBuf::from("work.sv")],
+            Some("m"),
+            &[],
+            &[],
+        )];
+        let none: InitPolicyOverrides = Vec::new();
+        let flattened = build_script(
+            &read,
+            "",
+            Some("m"),
+            Path::new("design.btor"),
+            Path::new("hier.json"),
+            false,
+            false,
+            &none,
+            &[],
         );
-        let err = per_module_output_dir(Path::new("a\"b")).expect_err("a quote");
+        assert_eq!(
+            flattened,
+            format!(
+                "read_slang --ignore-assertions --ignore-timing --empty-blackboxes --top m -I. \
+                 work.sv; hierarchy -top m; proc; write_json hier.json; delete \
+                 =A:{MISSING_MODULE_ATTR}; cutpoint -blackbox; memory_collect; flatten; design \
+                 -save mununu_pre_clocks; {KEEP_NAMED_NETS}; opt_clean; write_json clocks.json; \
+                 design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; setundef \
+                 -zero; write_btor design.btor"
+            )
+        );
+        let scan = build_clock_scan_script(
+            &read,
+            "",
+            Some("m"),
+            Path::new("hier.json"),
+            Path::new("clocks.json"),
+            &none,
+            &[],
+        );
+        let snapshot = clock_snapshot_passes(Path::new("clocks.json"));
+        assert!(scan.ends_with(&snapshot), "{scan}");
+        assert!(!scan.contains("write_btor"), "the scan writes no model");
+        let tail = flattened
+            .strip_prefix(scan.as_str())
+            .expect("the flattened script starts with the scan script");
+        assert_eq!(
+            tail,
+            "; async2sync; chformal -lower; dffunmap; setundef -zero; write_btor design.btor"
+        );
+
+        let per_module = build_per_module_script(
+            &[PathBuf::from("work.sv")],
+            "m",
+            Path::new("m.btor2"),
+            false,
+            false,
+            &none,
+            &[],
+        );
+        let at = |needle: &str| {
+            per_module
+                .find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` not in {per_module}"))
+        };
+        let module_snapshot = clock_snapshot_passes(Path::new("m.clocks.json"));
+        // The hierarchy snapshot before `flatten`, the clock snapshot after it and before the
+        // passes that rewrite the storage cells: the order of the flattened script.
+        assert!(at("write_json m.hier.json; ") < at("; flatten; "));
+        assert!(at("; flatten; ") < at(&module_snapshot));
         assert!(
-            err.message.contains("per-module output directory"),
+            per_module.ends_with(&format!(
+                "{module_snapshot}{}",
+                tail.replace("design.btor", "m.btor2")
+            )),
+            "{per_module}"
+        );
+    }
+
+    /// mununu#1191 — one module of the per-module lift, over every shape the flattened lift
+    /// refuses of a top. Returned as a design of its own, the module is refused for each of
+    /// them, in the flattened lift's words with the module named. Composed into a design whose
+    /// clocks were scanned, two clock INPUTS pass (the design decides whether they are two
+    /// clocks) and every other root is refused the same way, with what to do on that surface.
+    #[test]
+    fn x1191_a_module_of_the_per_module_lift_is_refused_as_the_flattened_lift_refuses_a_top() {
+        let yopts = YosysOptions::default();
+        let shapes = every_refused_clock_shape();
+        assert_eq!(shapes.len(), 8, "two input clocks and seven refused roots");
+        for (shape, domains) in &shapes {
+            let flattened = refuse_merged_clock_domains(domains, &yopts, MergeOptIn::NotOffered)
+                .expect_err("a refused shape");
+            let rest = flattened
+                .message
+                .strip_prefix("adapter/yosys: ")
+                .expect("the adapter's prefix");
+            let only_inputs = domains.iter().all(|d| d.root == ClockRoot::Input);
+            for usage in [PerModuleUse::Standalone, PerModuleUse::Composed] {
+                let verdict = refuse_module_clocks("m", domains, &yopts, usage);
+                if usage == PerModuleUse::Composed && only_inputs {
+                    verdict.unwrap_or_else(|e| {
+                        panic!(
+                            "{shape}: two clock inputs of a composed module: {}",
+                            e.message
+                        )
+                    });
+                    continue;
+                }
+                let err = verdict
+                    .err()
+                    .unwrap_or_else(|| panic!("{shape} / {usage:?}: lifted"));
+                assert_eq!(err.kind, flattened.kind, "{shape} / {usage:?}");
+                assert_eq!(
+                    err.message,
+                    module_clock_refusal("m", usage, &flattened.message),
+                    "{shape} / {usage:?}"
+                );
+                // The module's name, then the flattened lift's words, whole; a surface with
+                // no merge opt-in is told so once.
+                let (named, words) = (err.message.find("`m`"), err.message.find(rest));
+                assert!(
+                    matches!((named, words), (Some(n), Some(w)) if n < w),
+                    "{shape} / {usage:?}: {}",
+                    err.message
+                );
+                assert_eq!(
+                    err.message.matches(MERGE_NOT_OFFERED_HERE).count(),
+                    1,
+                    "{shape} / {usage:?}: {}",
+                    err.message
+                );
+                assert_eq!(
+                    err.message.ends_with(COMPOSED_MODULE_REMEDY),
+                    usage == PerModuleUse::Composed,
+                    "{shape} / {usage:?}: {}",
+                    err.message
+                );
+            }
+        }
+        // What lifts in both uses: one input clock, and a module with no storage cell.
+        let one_input = vec![ClockDomain {
+            net: "clk".into(),
+            posedge: true,
+            cells: 1,
+            root: ClockRoot::Input,
+        }];
+        for usage in [PerModuleUse::Standalone, PerModuleUse::Composed] {
+            for domains in [&one_input[..], &[][..]] {
+                refuse_module_clocks("m", domains, &yopts, usage)
+                    .unwrap_or_else(|e| panic!("{usage:?}: {}", e.message));
+            }
+        }
+        // A clock input beside a clock that is not one: the composed relaxation asks that
+        // EVERY root is an input.
+        let mut mixed = one_input.clone();
+        mixed.push(ClockDomain {
+            net: "gclk".into(),
+            posedge: true,
+            cells: 1,
+            root: ClockRoot::Derived("$and".into()),
+        });
+        assert!(refuse_module_clocks("m", &mixed, &yopts, PerModuleUse::Composed).is_err());
+    }
+
+    /// mununu#1191 — the one reader of a lift's two snapshots, as each module of the
+    /// per-module lift and its design scan now call it: a pair of netlists is the domains, and
+    /// a missing or damaged file of either is a lift error naming THAT file.
+    #[test]
+    fn x1191_the_snapshot_reader_names_whichever_of_the_two_files_is_damaged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hier = dir.path().join(module_hier_json_name("m"));
+        let clocks = dir.path().join(module_clocks_json_name("m"));
+        assert_ne!(hier, clocks);
+        for (netlist, domains) in [(ONE_CLOCK_NETLIST, 1), (COMBINATIONAL_NETLIST, 0)] {
+            std::fs::write(&hier, netlist).expect("write");
+            std::fs::write(&clocks, netlist).expect("write");
+            let (hier_text, flat_text, found) =
+                scan_lifted_clocks(&hier, &clocks).unwrap_or_else(|e| panic!("{}", e.message));
+            assert_eq!((hier_text.as_str(), flat_text.as_str()), (netlist, netlist));
+            assert_eq!(found.len(), domains);
+        }
+        let names = |path: &Path| path.file_name().and_then(|n| n.to_str()).map(String::from);
+        let (hier_name, clocks_name) = (
+            names(&hier).expect("a name"),
+            names(&clocks).expect("a name"),
+        );
+        for (case, text, _) in damaged_snapshots() {
+            for (damaged, sound, damaged_name, sound_name) in [
+                (&hier, &clocks, &hier_name, &clocks_name),
+                (&clocks, &hier, &clocks_name, &hier_name),
+            ] {
+                std::fs::write(damaged, &text).expect("write");
+                std::fs::write(sound, ONE_CLOCK_NETLIST).expect("write");
+                let err = scan_lifted_clocks(&hier, &clocks)
+                    .expect_err(&format!("{case}: {damaged_name} is not a netlist"));
+                assert_eq!(err.kind, AdapterErrorKind::ParseError, "{case}");
+                assert!(
+                    err.message.contains(damaged_name.as_str())
+                        && !err.message.contains(sound_name.as_str()),
+                    "{case}: {}",
+                    err.message
+                );
+            }
+        }
+        std::fs::write(&hier, ONE_CLOCK_NETLIST).expect("write");
+        std::fs::remove_file(&clocks).expect("remove");
+        let err = scan_lifted_clocks(&hier, &clocks).expect_err("a missing clock snapshot");
+        assert!(
+            err.message.contains(clocks_name.as_str()),
             "{}",
             err.message
         );
-        assert!(err.message.contains("--output-dir"), "{}", err.message);
+    }
+
+    /// mununu#1191 — a model reaches the caller's directory by a copy from the staging
+    /// directory, under the same name; a model that was never staged is an error naming the
+    /// destination and leaves no file there.
+    #[test]
+    fn x1191_a_persisted_per_module_model_is_a_copy_of_the_staged_one() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let out = tempfile::tempdir().expect("tempdir");
+        let model = "1 sort bitvec 1\n";
+        std::fs::write(staging.path().join(module_btor_name("m")), model).expect("write");
+        let dest = persist_module_model(staging.path(), out.path(), "m")
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(dest, out.path().join("m.btor2"));
+        assert_eq!(std::fs::read_to_string(&dest).expect("read"), model);
+
+        let err = persist_module_model(staging.path(), out.path(), "absent")
+            .expect_err("no staged model");
+        assert!(err.message.contains("absent.btor2"), "{}", err.message);
+        assert!(!out.path().join("absent.btor2").exists());
+    }
+
+    /// mununu#1191 — the per-module lift through the real tools, beside the flattened lift of
+    /// the same sources (the entry that returns a model alone, so both word the refusal for a
+    /// surface with no merge opt-in). Every shape the flattened lift refuses of a top is
+    /// refused of a module lifted as a design of its own, in the flattened lift's words with
+    /// the module named, and of the design the modules are composed into, word for word. A
+    /// module whose two clock ports the design ties to one clock is refused on its own and
+    /// accepted composed. A module the design instantiates ungated, and whose default
+    /// parameters gate its clock, is refused in both uses, the composed one with what to do
+    /// about it. No model reaches the caller's directory unless every module lifted and passed
+    /// its clock scan; a module mununu's own BTOR2 reader then cannot take fails the lift and
+    /// leaves the models, the one that reader refused among them.
+    ///
+    /// Before, every lift below but the last returned models: the per-module script took no
+    /// clock snapshot.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_x1191_the_per_module_lift_refuses_what_the_flattened_lift_refuses() {
+        const WRAPPER: &str = "\
+module top(input logic clk, input logic en, input logic d, output logic o);
+  child u_c(.clk(clk), .en(en), .d(d), .q(o));
+endmodule
+";
+        let child = |body: &str| {
+            format!(
+                "module child(input logic clk, input logic en, input logic d, output logic q);\n\
+                 {body}endmodule\n{WRAPPER}"
+            )
+        };
+        let opts = AdapterOptions::default();
+        let top_is = |top: &str| YosysOptions {
+            top: Some(top.into()),
+            ..Default::default()
+        };
+        let flattened = |case: &str, src: &str, top: &str| {
+            sv_to_btor2(src, &top_is(top))
+                .err()
+                .unwrap_or_else(|| panic!("{case}: the flattened lift takes `{top}` as a top"))
+        };
+        let design_domains = |case: &str, src: &str, yopts: &YosysOptions| {
+            sv_to_btor2_with_blackboxes(src, yopts)
+                .unwrap_or_else(|e| panic!("{case}: {}", e.message))
+                .clock_domains
+        };
+        let standalone = |src: &str| translate_sv_per_module(src, &opts, &top_is("top"));
+        let composed = |src: &str| {
+            translate_sv_per_module_with_connectivity(src, &opts, &top_is("top"))
+                .map(|(outputs, _, _)| outputs)
+        };
+        let refused = |case: &str, lifted: Result<Vec<PerModuleOutput>, AdapterError>| {
+            lifted.err().unwrap_or_else(|| panic!("{case}: lifted"))
+        };
+        let modules = |case: &str, lifted: Result<Vec<PerModuleOutput>, AdapterError>| {
+            lifted
+                .unwrap_or_else(|e| panic!("{case}: {}", e.message))
+                .into_iter()
+                .map(|o| o.module_name)
+                .collect::<Vec<_>>()
+        };
+
+        // (shape, the child's body, what the clock scan finds in the child taken as a top)
+        type Found = fn(&[ClockDomain]) -> bool;
+        let shapes: [(&str, &str, Found); 4] = [
+            (
+                "two clocks",
+                "  logic a;\n  always_ff @(posedge clk) a <= d;\n  \
+                 always_ff @(posedge en) q <= a;\n",
+                |found| found.len() == 2 && found.iter().all(|d| d.root == ClockRoot::Input),
+            ),
+            (
+                "a gated clock",
+                "  logic gclk;\n  assign gclk = clk & en;\n  \
+                 always_ff @(posedge gclk) q <= d;\n",
+                |found| {
+                    found
+                        .iter()
+                        .any(|d| matches!(d.root, ClockRoot::Derived(_)))
+                },
+            ),
+            (
+                "a divided clock",
+                "  logic div;\n  always_ff @(posedge clk) div <= div ^ en;\n  \
+                 always_ff @(posedge div) q <= d;\n",
+                |found| {
+                    found
+                        .iter()
+                        .any(|d| matches!(d.root, ClockRoot::Derived(_)))
+                },
+            ),
+            (
+                "a constant clock",
+                "  logic a;\n  wire pclk = 1'b0;\n  always_ff @(posedge clk) a <= d ^ en;\n  \
+                 always_ff @(posedge pclk) q <= a;\n",
+                |found| {
+                    found
+                        .iter()
+                        .any(|d| matches!(d.root, ClockRoot::Constant { .. }))
+                },
+            ),
+        ];
+        for (shape, body, found) in shapes {
+            let src = child(body);
+            let domains = design_domains(
+                shape,
+                &src,
+                &YosysOptions {
+                    merge_clock_domains: true,
+                    ..top_is("child")
+                },
+            );
+            assert!(
+                found(&domains),
+                "{shape}: {}",
+                describe_clock_domains(&domains)
+            );
+            let of_child = flattened(shape, &src, "child");
+            let alone = refused(shape, standalone(&src));
+            assert_eq!(alone.kind, of_child.kind, "{shape}");
+            assert_eq!(
+                alone.message,
+                module_clock_refusal("child", PerModuleUse::Standalone, &of_child.message),
+                "{shape}"
+            );
+            // The wrapper passes the child's ports through, so the design has the child's
+            // clocks: it is refused before any module is lifted, as the flattened lift does.
+            let of_design = flattened(shape, &src, "top");
+            let design = refused(shape, composed(&src));
+            assert_eq!(design.kind, of_design.kind, "{shape}");
+            assert_eq!(design.message, of_design.message, "{shape}");
+        }
+
+        // Two clock ports on the module, one clock in the design.
+        const TIED_PORTS: &str = "\
+module pair(input logic clk_a, input logic clk_b, input logic d, output logic q);
+  logic a;
+  always_ff @(posedge clk_a) a <= d;
+  always_ff @(posedge clk_b) q <= a;
+endmodule
+module top(input logic clk, input logic d, output logic o);
+  pair u_p(.clk_a(clk), .clk_b(clk), .d(d), .q(o));
+endmodule
+";
+        let domains = design_domains("tied ports", TIED_PORTS, &top_is("top"));
+        assert_eq!(domains.len(), 1, "{}", describe_clock_domains(&domains));
+        let of_pair = flattened("tied ports", TIED_PORTS, "pair");
+        assert_eq!(
+            refused("tied ports, alone", standalone(TIED_PORTS)).message,
+            module_clock_refusal("pair", PerModuleUse::Standalone, &of_pair.message)
+        );
+        assert_eq!(
+            modules("tied ports, composed", composed(TIED_PORTS)),
+            ["pair"]
+        );
+
+        // The design instantiates the stage ungated; the stage's default parameter gates it.
+        const GATED_BY_DEFAULT: &str = "\
+module stage #(parameter int GATE = 1)
+              (input logic clk, input logic en, input logic d, output logic q);
+  logic gclk;
+  if (GATE) begin : g
+    assign gclk = clk & en;
+  end else begin : g
+    assign gclk = clk;
+  end
+  always_ff @(posedge gclk) q <= d;
+endmodule
+module top(input logic clk, input logic en, input logic d, output logic o);
+  stage #(.GATE(0)) u_s(.clk(clk), .en(en), .d(d), .q(o));
+endmodule
+";
+        let domains = design_domains("gated by default", GATED_BY_DEFAULT, &top_is("top"));
+        assert!(
+            domains.len() == 1 && domains[0].root == ClockRoot::Input,
+            "{}",
+            describe_clock_domains(&domains)
+        );
+        let of_stage = flattened("gated by default", GATED_BY_DEFAULT, "stage");
+        for (usage, lifted) in [
+            (PerModuleUse::Standalone, standalone(GATED_BY_DEFAULT)),
+            (PerModuleUse::Composed, composed(GATED_BY_DEFAULT)),
+        ] {
+            let err = refused("gated by default", lifted);
+            assert_eq!(err.kind, of_stage.kind);
+            assert_eq!(
+                err.message,
+                module_clock_refusal("stage", usage, &of_stage.message)
+            );
+        }
+
+        // The first module passes and the second is refused: nothing is left in the directory
+        // the caller asked the models to be kept in. Composed, both pass and both are kept.
+        const ONE_REFUSED: &str = "\
+module a_ok(input logic clk, input logic d, output logic q);
+  always_ff @(posedge clk) q <= d;
+endmodule
+module z_two(input logic clk_a, input logic clk_b, input logic d, output logic q);
+  logic a;
+  always_ff @(posedge clk_a) a <= d;
+  always_ff @(posedge clk_b) q <= a;
+endmodule
+module top(input logic clk, input logic d, output logic o);
+  logic m;
+  a_ok u_a(.clk(clk), .d(d), .q(m));
+  z_two u_z(.clk_a(clk), .clk_b(clk), .d(m), .q(o));
+endmodule
+";
+        let out = tempfile::tempdir().expect("tempdir");
+        let kept = || {
+            let mut names: Vec<String> = std::fs::read_dir(out.path())
+                .expect("read_dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let keep = YosysOptions {
+            per_module_output_dir: Some(out.path().to_path_buf()),
+            ..top_is("top")
+        };
+        let of_two = flattened("one refused", ONE_REFUSED, "z_two");
+        assert_eq!(
+            refused(
+                "one refused",
+                translate_sv_per_module(ONE_REFUSED, &opts, &keep)
+            )
+            .message,
+            module_clock_refusal("z_two", PerModuleUse::Standalone, &of_two.message)
+        );
+        assert_eq!(kept(), Vec::<String>::new(), "a refused lift kept files");
+        let (outputs, _, _) = translate_sv_per_module_with_connectivity(ONE_REFUSED, &opts, &keep)
+            .unwrap_or_else(|e| panic!("one clock in the design: {}", e.message));
+        for o in &outputs {
+            let path = o
+                .btor2_path
+                .as_deref()
+                .unwrap_or_else(|| panic!("`{}` was kept and is not named", o.module_name));
+            assert_eq!(path, out.path().join(module_btor_name(&o.module_name)));
+            let model = std::fs::read_to_string(path).expect("the kept model");
+            assert!(model.contains(" sort "), "`{}`: {model}", o.module_name);
+        }
+        assert_eq!(kept(), ["a_ok.btor2", "z_two.btor2"]);
+
+        // Every module lifts and passes its clock scan, and mununu's own reader cannot take one
+        // of them (more input combinations per step than it enumerates): the lift fails, and
+        // the models the caller asked for are there — the kept file is the one the reader
+        // refuses when it is read directly.
+        const READER_REFUSES: &str = "\
+module wide(input logic clk, input logic [11:0] d, output logic q);
+  always_ff @(posedge clk) q <= ^d;
+endmodule
+module top(input logic clk, input logic [11:0] d, output logic o);
+  wide u_w(.clk(clk), .d(d), .q(o));
+endmodule
+";
+        let out = tempfile::tempdir().expect("tempdir");
+        let keep = YosysOptions {
+            per_module_output_dir: Some(out.path().to_path_buf()),
+            ..top_is("top")
+        };
+        let err = refused(
+            "the reader refuses",
+            translate_sv_per_module(READER_REFUSES, &opts, &keep),
+        );
+        let model = std::fs::read_to_string(out.path().join(module_btor_name("wide")))
+            .expect("the model is kept although the reader refused it");
+        let Err(direct) = crate::adapter::btor2::Btor2Adapter::translate(&model, &opts) else {
+            panic!("the reader refuses the kept model read directly");
+        };
+        assert_eq!(
+            err.kind, direct.kind,
+            "{} / {}",
+            err.message, direct.message
+        );
     }
 
     /// mununu#1138 — a caller include directory with a space in its path is staged as a link

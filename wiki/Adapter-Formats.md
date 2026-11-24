@@ -129,6 +129,12 @@ Derived from port directions: `input` ports → **uncontrollable** (environment)
 
 A top module that instantiates submodules composes structurally: each instance is lifted to a KMTS, its ports renamed to the connected nets (from the Yosys netlist), and the instances synchronously composed. Opt in with `[sources.options] multi_module = true` (+ optional `top`) on a `verify.toml` source. The composed automaton is named `Circuit`.
 
+> Source of truth: [`mununu_core::adapter::yosys::translate_sv_per_module_with_connectivity`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/yosys/mod.rs) — surface: CLI+API (`mununu verify`, `POST /api/v1/verify`).
+
+The composed model has one implicit clock, like the flattened one. Before any module is lifted the clocks of the whole design are scanned, and a design the flattened lift refuses (more than one clock domain, a gated or divided clock, a clock no input drives) is refused in the same words. Each module is then scanned as it is lifted — on its own, with its default parameters — and a module whose clock is not one of its own inputs is refused by name; the message names `multi_module = false`, which lifts the flattened design instead. There is no opt-in to merge clock domains on this path.
+
+Two limits of the composition are open: an instance's parameter overrides are not applied (each module type is lifted once, at its defaults), and logic the top module holds itself is not part of the composed model. On a design with either, use `multi_module = false`.
+
 ---
 
 ## BTOR2 + Yosys (RTL Phase 1)

@@ -438,6 +438,18 @@ submodule reachable from the top — the per-submodule IR the KMTS lifter and
 multi-module composition consume. Requires `yosys` on `PATH`. Run
 `mununu sv emit-btor2-per-module --help` for flags.
 
+> Source of truth: [`mununu_core::adapter::yosys::translate_sv_per_module`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/yosys/mod.rs) — surface: CLI.
+
+Each BTOR2 file is one module lifted as a design of its own, and a BTOR2 model
+has one implicit clock. So each module's clocks are scanned as the flattened
+lift scans a design's: a module with more than one clock domain, or with a
+gated, divided, constant or undriven clock, is refused with the flattened
+lift's message, the module named first. The verb has no opt-in to merge clock
+domains; the message names the verbs that have one.
+
+The files reach `--output-dir` once every module has lifted and passed its
+clock scan. A clock refusal or a failed yosys run writes nothing there.
+
 See [RTL Verification Pipeline](RTL-Verification-Pipeline) for the full workflow.
 
 ## `mununu templates`

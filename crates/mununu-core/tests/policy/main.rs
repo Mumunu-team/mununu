@@ -17,6 +17,7 @@ mod merged_clock_domains_reported_1181;
 mod no_links_into_untracked_paths_g4;
 mod no_source_indentation_in_messages_1209;
 mod one_yosys_minimum_version_1121;
+mod per_module_lift_scans_clocks_1191;
 mod remedies_name_real_flags_1106;
 mod remedies_on_the_verb_1121;
 mod server_paths_resolve_through_one_function;

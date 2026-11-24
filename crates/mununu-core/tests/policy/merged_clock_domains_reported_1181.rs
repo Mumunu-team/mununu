@@ -145,7 +145,7 @@ pub(crate) fn rel(path: &Path, root: &Path) -> String {
 }
 
 /// `root` joined with `components`, one at a time.
-fn under(root: &Path, components: &[&str]) -> std::path::PathBuf {
+pub(crate) fn under(root: &Path, components: &[&str]) -> std::path::PathBuf {
     components.iter().fold(root.to_path_buf(), |p, c| p.join(c))
 }
 
@@ -161,7 +161,7 @@ pub(crate) fn product_code(src: &str) -> String {
 
 /// How many times `code` calls `name`: `name(` that is neither the definition (`fn name(`) nor
 /// the tail of a longer identifier.
-fn calls(code: &str, name: &str) -> usize {
+pub(crate) fn calls(code: &str, name: &str) -> usize {
     let needle = format!("{name}(");
     code.match_indices(&needle)
         .filter(|(at, _)| {
@@ -173,7 +173,7 @@ fn calls(code: &str, name: &str) -> usize {
 
 /// The name a top-level `fn` line declares: `fn` at column 0, after nothing but a visibility
 /// (`pub`, `pub(crate)`, …) and `const` / `async` / `unsafe`.
-fn top_level_fn_name(line: &str) -> Option<&str> {
+pub(crate) fn top_level_fn_name(line: &str) -> Option<&str> {
     let at = line.find("fn ")?;
     let head = &line[..at];
     let is_qualifier = |w: &str| w.starts_with("pub") || matches!(w, "const" | "async" | "unsafe");
@@ -188,7 +188,7 @@ fn top_level_fn_name(line: &str) -> Option<&str> {
 /// `code` cut at its top-level `fn` lines: `(name, the text up to the next top-level fn)`. What
 /// sits between two functions (a struct, an `impl` block) is read with the function above it, so
 /// a lift call there is still seen, under that function's name.
-fn top_level_fns(code: &str) -> Vec<(String, String)> {
+pub(crate) fn top_level_fns(code: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for line in code.lines() {
         if let Some(name) = top_level_fn_name(line) {
