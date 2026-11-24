@@ -1,6 +1,6 @@
 # Consumer briefing: every `sv` verb reports the clock domains it merged (2026-11)
 
-> Source of truth: `lift_clock_notes` in [`adapter/slang/verify_auto_text.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs) and `Lifted` in [`adapter/sv_verify.rs`](../../crates/mununu-core/src/adapter/sv_verify.rs) — surface: CLI+API — `sv verify-liveness`, `sv verify-liveness-all`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`, `sv verify-auto --plan-only` and their `POST /api/v1/sv/…` routes, `POST /api/v1/sv/plan`, `POST /api/v1/sv/cegar`
+> Source of truth: `lift_clock_notes` in [`adapter/slang/verify_auto_text.rs`](../../crates/mununu-core/src/adapter/slang/verify_auto_text.rs) and `Lifted` in [`adapter/sv_verify.rs`](../../crates/mununu-core/src/adapter/sv_verify.rs) — surface: CLI+API — `sv verify-liveness`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`, `sv verify-auto --plan-only` and their `POST /api/v1/sv/…` routes, `POST /api/v1/sv/plan`, `POST /api/v1/sv/cegar`
 
 **Audience:** anyone who passes `--merge-clock-domains` (API `lift.merge_clock_domains`) to an `sv` verb other than `sv verify-auto`, or who reads those verbs' reports. It follows the briefings of [mununu#1148](2026-11-clock-rooted-at-black-box-note.md) and [mununu#1180](2026-11-clock-roots-constant-port-several-drivers.md) and closes the case both left open.
 
@@ -24,7 +24,6 @@
   | where | the field |
   |---|---|
   | `sv verify-liveness` / `POST /api/v1/sv/verify-liveness` (plain, `--fairness`, `--response`) | `lift_notes` |
-  | `sv verify-liveness-all` | `lift_notes` |
   | `sv verify-recoverability` / `POST /api/v1/sv/verify-recoverability` (plain and `--refine`) | `lift_notes` |
   | `sv check-fsm` / `POST /api/v1/sv/check-fsm` (with and without `--liveness`) | `lift_notes` |
   | `sv lint` / `POST /api/v1/sv/lint` | `lift_notes` |
@@ -42,6 +41,8 @@
   |---|---|---|
   | more than one clock domain; a derived clock | `… accepts … explicitly — sv verify-auto then reports it (clock-domains-merged), the other verbs report nothing (a mununu limitation).` | `--merge-clock-domains on sv verify-auto / sv verify-liveness / sv verify-liveness-all / sv verify-recoverability / sv check-fsm / sv lint / sv mutate (API lift.merge_clock_domains) accepts … explicitly, and the report then says so in a clock-domains-merged note.` |
   | a clock with no driver | `--merge-clock-domains on sv verify-auto accepts the lockstep model explicitly and names the root in a note — on the other sv verbs the flag does not lift such a clock, since they drop the roots (a mununu limitation).` | the same list of verbs, then `… accepts the lockstep model explicitly, and the report then names the root in a note.` |
+
+  The list of verbs named `sv verify-liveness-all` until mununu#1203. The CLI has had no such verb since 0.5 (`sv verify-liveness --response` took its place, the first row of the table above); the sentence no longer names it — see [the briefing of that fix](2026-11-flag-scope-names-real-verbs.md).
 
   An operation that lifts SystemVerilog and does not take the flag — `sv discover`, `sv cegar` on the command line, `POST /translate` with `sv-yosys`, `verify project`, `context import` — refuses the same designs, and there the sentence starts `this operation has no opt-in to lift the design as it is (a mununu limitation); elsewhere, --merge-clock-domains on sv verify-auto / …`. Before, those operations ended with the sentence of the verbs that take the flag.
 

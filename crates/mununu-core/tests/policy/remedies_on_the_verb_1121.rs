@@ -20,6 +20,20 @@
 //!    how a message shared by several verbs names each verb's flag. A bare flag must be on every
 //!    verb that reaches the module. A `--engine <value>` is also checked against the values the
 //!    verb accepts ([`ENGINE_VALUES`], read from the CLI's runtime refusals).
+//!
+//! **A group in the scope** (mununu#1203). "On the `sv` verbs" says every `sv` verb the reader
+//! may be on, so the flag must be on every verb of the group that reaches the module; the finding
+//! lists the ones that lack it. A sentence that cannot say that says "on the `sv` verbs that
+//! take it", and then one verb of the group that reaches the module must take the flag. When no
+//! verb of the group reaches the module the sentence points at another surface ("on the `btor2`
+//! verbs, which `sv verify-auto` does not take"), and one verb of the group must take the flag.
+//! Until #1203 a group passed whenever any one of its verbs took the flag, reaching or not.
+//!
+//! **A verb the CLI does not have** (mununu#1203). A token after "on" that reads as a verb of a
+//! group (`sv verify-liveness-all`) and is none is a finding: the scope used to drop it, so a
+//! sentence went on naming a verb after the verb was merged into another. For the same reason
+//! every verb of [`REACH`] and of [`ENGINE_VALUES`] is a verb of the CLI: a row that names a
+//! retired verb is skipped without a word.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -32,7 +46,9 @@ use crate::source_scan::without_test_modules;
 /// The verbs that reach a message-producing module, by file suffix. Read from the CLI's dispatch
 /// on 2026-11-20: the SystemVerilog verbs that lift through yosys (they embed `SvLiftArgs`, or
 /// build `YosysOptions` themselves), the verbs that run the predicate-cube lift, the exact engine,
-/// the reach portfolio's members, and the single-verb modules.
+/// the reach portfolio's members, and the single-verb modules. Re-read on 2026-11-24 (#1203):
+/// `sv verify` left the rows (the CLI has had no such verb since 0.5) and `sv
+/// emit-btor2-per-module`, which lifts through yosys, joined the first.
 const REACH: &[(&str, &[&str])] = &[
     (
         "src/adapter/yosys/mod.rs",
@@ -40,7 +56,7 @@ const REACH: &[(&str, &[&str])] = &[
             "sv verify-auto",
             "sv cegar",
             "sv discover",
-            "sv verify",
+            "sv emit-btor2-per-module",
             "sv verify-liveness",
             "sv verify-recoverability",
             "sv check-fsm",
@@ -70,7 +86,6 @@ const REACH: &[(&str, &[&str])] = &[
             "btor2 check-fsm",
             "btor2 game",
             "btor2 inject-fault",
-            "sv verify",
             "sv verify-liveness",
             "sv verify-recoverability",
             "sv check-fsm",
@@ -84,7 +99,6 @@ const REACH: &[(&str, &[&str])] = &[
             "btor2 verify",
             "btor2 verify-liveness",
             "btor2 verify-recoverability",
-            "sv verify",
             "sv verify-liveness",
             "sv verify-recoverability",
             "sv verify-auto",
@@ -96,7 +110,6 @@ const REACH: &[(&str, &[&str])] = &[
             "btor2 verify",
             "btor2 verify-liveness",
             "btor2 verify-recoverability",
-            "sv verify",
             "sv verify-liveness",
             "sv verify-recoverability",
             "sv verify-auto",
@@ -324,6 +337,10 @@ fn verb_flags(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
 /// Each `--flag` a prose literal cites, with the text that follows it (to the clause end) and,
 /// for `--engine`, the value named.
 fn flag_mentions(lit: &str) -> Vec<(String, Option<String>, String)> {
+    // A sentence the source wraps is the same sentence: a `\` continuation leaves its newline
+    // and its indentation in the literal as the scan reads it, and a verb name or a phrase
+    // split there was not recognised (two include-directory messages were findings for it).
+    let lit = &lit.split_whitespace().collect::<Vec<_>>().join(" ");
     let bytes = lit.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -382,6 +399,36 @@ fn scope_of(tail: &str, verbs: &BTreeMap<String, BTreeSet<String>>) -> Vec<Strin
     out
 }
 
+/// The backticked tokens a clause names after "on" that read as a verb of a group — two words,
+/// the first a group of the CLI (`sv verify-liveness-all`) — and are no verb: retired, or
+/// misspelt. [`scope_of`] leaves them out, so nothing else would say they are there.
+fn verbs_named_that_the_cli_lacks(
+    tail: &str,
+    verbs: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    let Some(at) = tail.find(" on ") else {
+        return Vec::new();
+    };
+    tail[at + 4..]
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| !verbs.contains_key(*token))
+        .filter(|token| {
+            let mut words = token.split(' ');
+            let (group, leaf, more) = (words.next(), words.next(), words.next());
+            more.is_none()
+                && leaf.is_some_and(|l| l.starts_with(|c: char| c.is_ascii_lowercase()))
+                && group.is_some_and(|g| verbs.keys().any(|v| v.starts_with(&format!("{g} "))))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// What a clause writes after a group to keep it to the group's verbs that have the flag ("on
+/// the `sv` verbs that take it"). The sentence then says itself that not every verb does.
+const TO_ITS_TAKERS: &str = "verbs that take it";
+
 fn verbs_matching<'a>(
     token: &'a str,
     verbs: &'a BTreeMap<String, BTreeSet<String>>,
@@ -437,7 +484,7 @@ fn check_literal(
                     .as_deref()
                     .is_none_or(|v| accepts_value(verb, &flag, v))
         };
-        let mut not_on = Vec::new();
+        let mut not_on = verbs_named_that_the_cli_lacks(&tail, verbs);
         if scope.is_empty() {
             for verb in reach {
                 if verbs.contains_key(*verb) && !has(verb) {
@@ -445,10 +492,37 @@ fn check_literal(
                 }
             }
         } else {
+            let to_its_takers = tail.contains(TO_ITS_TAKERS);
             for token in scope {
-                let candidates = verbs_matching(&token, verbs);
-                if !candidates.iter().any(|v| has(v)) {
-                    not_on.push(token.clone());
+                if verbs.contains_key(&token) {
+                    if !has(&token) {
+                        not_on.push(token);
+                    }
+                    continue;
+                }
+                // A group (mununu#1203): held to its verbs that reach this module.
+                let prefix = format!("{token} ");
+                let reaching: Vec<&str> = reach
+                    .iter()
+                    .copied()
+                    .filter(|v| v.starts_with(&prefix) && verbs.contains_key(*v))
+                    .collect();
+                if reaching.is_empty() {
+                    // The sentence points at another surface: the flag exists there.
+                    if !verbs_matching(&token, verbs).iter().any(|v| has(v)) {
+                        not_on.push(token);
+                    }
+                } else if to_its_takers {
+                    if !reaching.iter().any(|v| has(v)) {
+                        not_on.push(token);
+                    }
+                } else {
+                    not_on.extend(
+                        reaching
+                            .iter()
+                            .filter(|v| !has(v))
+                            .map(|v| (*v).to_string()),
+                    );
                 }
             }
         }
@@ -486,9 +560,26 @@ fn every_flag_a_message_names_is_on_the_verb_that_produced_it() {
         );
     }
     assert!(
-        !verbs["sv cegar"].contains("merge-clock-domains"),
-        "sv cegar does not take --merge-clock-domains (the negative control's premise)"
+        !verbs["sv discover"].contains("merge-clock-domains"),
+        "sv discover does not take --merge-clock-domains (the negative control's premise)"
     );
+
+    for (suffix, reach) in REACH {
+        for verb in *reach {
+            assert!(
+                verbs.contains_key(*verb),
+                "REACH lists `{verb}` for {suffix} and the CLI has no such verb: the row is \
+                 skipped for it without a word. Remove it, or name the verb it became"
+            );
+        }
+    }
+    for (verb, _) in ENGINE_VALUES {
+        assert!(
+            verbs.contains_key(*verb),
+            "ENGINE_VALUES lists `{verb}` and the CLI has no such verb: its row is read for no \
+             message. Remove it, or name the verb it became"
+        );
+    }
 
     let mut report = String::new();
     let mut checked_files = 0usize;
@@ -512,7 +603,10 @@ fn every_flag_a_message_names_is_on_the_verb_that_produced_it() {
         "a message names a flag (or an --engine value) of another verb (failure-paths Rule 5, \
          \"on the surface that produced it\"):\n{report}\
          Name the verb after the flag (\"`--flag` on `sv verify-auto`\"), name each verb's own \
-         flag, or say the other verbs have no such switch."
+         flag, or say the other verbs have no such switch. A group (\"on the `sv` verbs\") \
+         says every verb of the group that reaches the module; \"on the `sv` verbs that take \
+         it\" says some do. A verb listed here that the CLI does not have was renamed or merged \
+         into another: name the verb it became."
     );
     // The union check still covers every other module; make sure the files listed here are a
     // subset of what the sibling test scans, so nothing escapes both.
@@ -550,7 +644,7 @@ fn verbs_named_after(
 /// mununu#1181 — a clock refusal names the verbs on which `--merge-clock-domains` accepts the
 /// merged model. The test above proves each verb it names takes the flag; this one proves none
 /// is left out, so a verb that gains the flag fails here until the sentence names it. The
-/// sentence is read on surfaces without the flag too (`sv discover`, `sv cegar`, `verify`), where
+/// sentence is read on surfaces without the flag too (`sv discover`, `verify`), where
 /// the list is the whole remedy. `sv cdc-lint` takes the flag and is not named: the lint reads
 /// the clock domains with or without it, so it never refuses.
 #[test]
@@ -626,7 +720,9 @@ fn the_scan_skips_every_test_module_and_keeps_the_code_between_them() {
 }
 
 /// Negative controls — the two live positives of 2026-11-20 as they read on 10172037 — and the
-/// scoped sentences the series already writes, which must pass.
+/// scoped sentences the series already writes, which must pass. The first positive was found on
+/// `sv cegar`, which has taken the flag since mununu#1190; the control reads it on `sv discover`,
+/// which reaches the same refusal and does not take it.
 #[test]
 fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence() {
     let root = repo_root();
@@ -634,12 +730,12 @@ fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence(
 
     let yosys_old = "Model the gating as a clock enable (`if (en) q <= d;` on the root clock), \
                      or pass `--merge-clock-domains` to accept the lockstep model explicitly.";
-    let found = check_literal(yosys_old, &["sv verify-auto", "sv cegar"], &verbs);
+    let found = check_literal(yosys_old, &["sv verify-auto", "sv discover"], &verbs);
     assert_eq!(
         found,
         vec![Finding {
             flag: "--merge-clock-domains".into(),
-            not_on: vec!["sv cegar".into()],
+            not_on: vec!["sv discover".into()],
         }],
         "a bare flag of one verb in a message two verbs reach"
     );
@@ -660,7 +756,7 @@ fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence(
     let scoped = "`--merge-clock-domains` on `sv verify-auto` accepts the lockstep model \
                   explicitly; the other verbs have no such switch.";
     assert!(
-        check_literal(scoped, &["sv verify-auto", "sv cegar"], &verbs).is_empty(),
+        check_literal(scoped, &["sv verify-auto", "sv discover"], &verbs).is_empty(),
         "a flag scoped to its verb passes"
     );
     let group = "`MUNUNU_NATIVE_QUERY_RLIMIT` raises it on this verb (`--timeout-ms` scales the \
@@ -684,4 +780,145 @@ fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence(
         }],
         "a value scoped to a verb that rejects it is flagged"
     );
+}
+
+/// mununu#1203 — a group in the scope ("on the `sv` verbs") is held to every verb of the group
+/// that reaches the module. Negative control: the sentence that was the blocker of #1200's
+/// review, which the check passed because one `sv` verb takes the flag.
+#[test]
+fn a_flag_named_on_a_verb_group_is_on_every_verb_of_the_group_that_reaches() {
+    let root = repo_root();
+    let verbs = verb_flags(&root);
+    const REACHING: &[&str] = &[
+        "sv verify-auto",
+        "sv cegar",
+        "sv discover",
+        "sv emit-btor2-per-module",
+        "verify",
+    ];
+    for (verb, takes) in [
+        ("sv verify-auto", true),
+        ("sv cegar", true),
+        ("sv discover", false),
+        ("sv emit-btor2-per-module", false),
+    ] {
+        assert_eq!(
+            verbs
+                .get(verb)
+                .is_some_and(|f| f.contains("merge-clock-domains")),
+            takes,
+            "`{verb}` and --merge-clock-domains (the premise of the control)"
+        );
+    }
+
+    let group = "`--merge-clock-domains` on the `sv` verbs accepts the lockstep model explicitly";
+    assert_eq!(
+        check_literal(group, REACHING, &verbs),
+        vec![Finding {
+            flag: "--merge-clock-domains".into(),
+            not_on: vec!["sv discover".into(), "sv emit-btor2-per-module".into()],
+        }],
+        "a group is every verb of it that reaches the module, and the finding names the ones \
+         without the flag"
+    );
+    assert!(
+        check_literal(group, &["sv verify-auto", "sv lint", "verify"], &verbs).is_empty(),
+        "every `sv` verb that reaches takes the flag; `verify` is not of the group"
+    );
+
+    let to_its_takers = "`--merge-clock-domains` on the `sv` verbs that take it accepts the \
+                         lockstep model explicitly";
+    assert!(
+        check_literal(to_its_takers, REACHING, &verbs).is_empty(),
+        "the sentence says itself that not every `sv` verb takes the flag"
+    );
+    assert_eq!(
+        check_literal(
+            to_its_takers,
+            &["sv discover", "sv emit-btor2-per-module"],
+            &verbs
+        ),
+        vec![Finding {
+            flag: "--merge-clock-domains".into(),
+            not_on: vec!["sv".into()],
+        }],
+        "no `sv` verb that reaches takes it: \"that take it\" names nothing the reader can use"
+    );
+
+    // The same sentences as the source can wrap them: the literal the scan reads keeps the
+    // newline and the indentation of the continuation.
+    let wrapped_phrase = "`--merge-clock-domains` on the `sv` verbs that\n            take it \
+                          accepts the lockstep model explicitly";
+    assert!(
+        check_literal(wrapped_phrase, REACHING, &verbs).is_empty(),
+        "a phrase wrapped by the source is the same phrase"
+    );
+    let wrapped_verb = "`--merge-clock-domains` on `sv\n            verify-auto` accepts the \
+                        lockstep model explicitly";
+    assert!(
+        check_literal(wrapped_verb, REACHING, &verbs).is_empty(),
+        "a verb name wrapped by the source is the same verb"
+    );
+
+    let elsewhere = "`--timeout-ms` scales the nominal allowance on the `btor2` verbs";
+    assert!(
+        check_literal(elsewhere, &["sv verify-auto"], &verbs).is_empty(),
+        "no `btor2` verb reaches: the sentence points at another surface, where the flag exists"
+    );
+    let nowhere = "`--merge-clock-domains` on the `btor2` verbs accepts the lockstep model";
+    assert_eq!(
+        check_literal(nowhere, &["sv verify-auto"], &verbs),
+        vec![Finding {
+            flag: "--merge-clock-domains".into(),
+            not_on: vec!["btor2".into()],
+        }],
+        "another surface that has no such flag"
+    );
+}
+
+/// mununu#1203 — a sentence that names a verb the CLI does not have is a finding. Negative
+/// control: the clock refusal as it read on 18aed7f7, which went on naming `sv
+/// verify-liveness-all` after 0.5 merged that verb into `sv verify-liveness --response`.
+#[test]
+fn a_verb_the_cli_does_not_have_is_a_finding() {
+    let root = repo_root();
+    let verbs = verb_flags(&root);
+    const RETIRED: &str = "sv verify-liveness-all";
+    assert!(
+        !verbs.contains_key(RETIRED) && verbs.contains_key("sv verify-liveness"),
+        "the premise of the control: `{RETIRED}` is no verb and `sv verify-liveness` is one"
+    );
+
+    let old = "`--merge-clock-domains` on `sv verify-auto` / `sv verify-liveness` / \
+               `sv verify-liveness-all` / `sv verify-recoverability` (API \
+               `lift.merge_clock_domains`) accepts the lockstep model explicitly";
+    assert_eq!(
+        check_literal(old, &["sv verify-auto", "sv cegar"], &verbs),
+        vec![Finding {
+            flag: "--merge-clock-domains".into(),
+            not_on: vec![RETIRED.into()],
+        }]
+    );
+    let alone = "pass `--merge-clock-domains` on `sv verify-liveness-all`";
+    assert_eq!(
+        check_literal(alone, &["sv verify-liveness-all"], &verbs),
+        vec![Finding {
+            flag: "--merge-clock-domains".into(),
+            not_on: vec![RETIRED.into()],
+        }],
+        "the only verb named, and the only one said to reach"
+    );
+
+    // What is not a verb of a group is left alone: a key, an API field, a verb with its flag.
+    for clean in [
+        "`--top` on `sv verify-auto` and `top` in a `mununu verify` config",
+        "`--no-input-state` on `sv verify-auto` (API `input_state: false`)",
+        "`--top` on `sv verify-auto --plan-only`",
+        "`--top` on `sv verify-auto` or the `SV_TOP` of the design",
+    ] {
+        assert!(
+            check_literal(clean, &["sv verify-auto"], &verbs).is_empty(),
+            "{clean}"
+        );
+    }
 }

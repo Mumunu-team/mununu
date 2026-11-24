@@ -1281,8 +1281,8 @@ pub(crate) enum MergeOptIn {
     /// flag (API `lift.merge_clock_domains`) and reports the domains.
     Offered,
     /// The entries that return the model alone ([`sv_to_btor2`], [`sv_discover_state_cells`],
-    /// [`translate_sv`]): `sv discover`, `sv cegar` on the command line, `POST /translate`
-    /// with `sv-yosys`, `verify project`, `context import`. None of them takes the flag, and
+    /// [`translate_sv`]): `sv discover`, `POST /translate` with `sv-yosys`, `verify project`,
+    /// `context import`. None of them takes the flag, and
     /// the entries refuse it ([`refuse_merge_without_domains`]).
     NotOffered,
 }
@@ -1317,7 +1317,7 @@ fn merge_opt_in_remedy(opt_in: MergeOptIn, accepts: &str, report: &str) -> Strin
     };
     format!(
         "{here}`--merge-clock-domains` on `sv verify-auto` / `sv verify-liveness` / \
-         `sv verify-liveness-all` / `sv verify-recoverability` / `sv check-fsm` / `sv lint` / \
+         `sv verify-recoverability` / `sv cegar` / `sv check-fsm` / `sv lint` / \
          `sv mutate` (API `lift.merge_clock_domains`) accepts {accepts} explicitly, and the \
          report then {report}."
     )
@@ -1484,7 +1484,7 @@ fn free_source_wording(d: &ClockDomain) -> (String, &'static str, &'static str) 
         ),
         ClockRoot::Cut => (
             "a cut net (the output of a declared or empty black box, or a cut point: \
-             `--cutpoint` on the `sv` verbs)"
+             `--cutpoint` on the `sv` verbs that take it)"
                 .to_string(),
             FREE,
             "provide the black box's source, or remove the cut point from the clock net",
@@ -1700,15 +1700,12 @@ pub fn translate_sv(
     Ok(out)
 }
 
-/// Run the flattened Yosys script and return *just*
-/// the design's BTOR2 text. This is the SV-direct CEGAR one-call
-/// frontend: `mununu sv cegar` and `POST /api/v1/sv/cegar` lift SV to a
-/// single flattened BTOR2 here, then hand it to `cegar_refine_loop` (the
-/// predicate-cube lift operates on one transition system, so the
-/// flattened single-BTOR2 shape — not the per-module split — is the
-/// right input for the cube). Thin wrapper over [`run_sv_flatten_btor2`];
-/// for multi-module *composition* (not single-system CEGAR) use
-/// [`translate_sv_per_module`] instead.
+/// Run the flattened Yosys script and return *just* the design's BTOR2 text: one flattened
+/// transition system, not the per-module split. `verify project` lifts a SystemVerilog source
+/// for the predicate cube with it. `sv cegar` and `POST /api/v1/sv/cegar` lift with
+/// [`sv_to_btor2_with_blackboxes`], which also returns what the lift did. Thin wrapper over
+/// [`run_sv_flatten_btor2`]; for multi-module *composition* use [`translate_sv_per_module`]
+/// instead.
 ///
 /// mununu#1181 — this entry returns the model and nothing about the lift, so it cannot say that
 /// clock domains were merged: it refuses [`YosysOptions::merge_clock_domains`]. A verb that
@@ -3976,7 +3973,8 @@ fn absolute_include_dir(p: &Path) -> Result<PathBuf, AdapterError> {
         kind: AdapterErrorKind::ParseError,
         message: format!(
             "adapter/yosys: the include directory `{}` is relative and the working directory \
-             cannot be read ({e}); give `--include-dir` an absolute path on the `sv` verbs",
+             cannot be read ({e}); give `--include-dir` an absolute path on the `sv` verbs \
+             that take it",
             p.display()
         ),
         location: None,
@@ -4418,7 +4416,7 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
                 "the include directory",
                 "",
                 "a directory path",
-                "check the path given to `--include-dir` on the `sv` verbs",
+                "check the path given to `--include-dir` on the `sv` verbs that take it",
             ));
         }
         let abs = absolute_include_dir(dir)?;
@@ -4433,7 +4431,8 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
                 &text,
                 "a path without whitespace, quotes or `;` on this platform (slang takes it as \
                  one unquoted token and the lift stages no link here)",
-                "move or rename the directory given to `--include-dir` on the `sv` verbs",
+                "move or rename the directory given to `--include-dir` on the `sv` verbs that \
+                 take it",
             ));
         }
     }
@@ -6201,8 +6200,8 @@ endmodule
     /// mununu#1181 — a clock refusal names the opt-in in the terms of the surface that reads it
     /// (failure-paths rule 5). Every refused shape, on both kinds of entry: behind a verb that
     /// takes the flag the last sentence names the flag, the verbs it is on and its API field;
-    /// behind an entry that returns the model alone (`sv discover`, `sv cegar` on the command
-    /// line, `/translate`, `verify project`, `context import`), which has no such flag, it says
+    /// behind an entry that returns the model alone (`sv discover`, `/translate`,
+    /// `verify project`, `context import`), which has no such flag, it says
     /// first that this operation has none, and nothing else differs. Which verbs the sentence
     /// names is checked against the verbs' definitions by the policy tests
     /// `every_flag_a_message_names_is_on_the_verb_that_produced_it` (each one takes the flag)
@@ -9216,6 +9215,9 @@ mod lift_cache_tests {
         )
         .expect("write fake yosys");
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // The fake has no probe of its own: run with `-V` it finds no script, fails to write
+        // its output and exits; only whether the kernel ran it matters here.
+        crate::adapter::stand_in_script::wait_out_a_busy_script(&fake, "-V");
         fake
     }
 

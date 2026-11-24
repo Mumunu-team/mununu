@@ -58,6 +58,8 @@ fn a_tool_that_hangs_on_its_probe_is_reported_unavailable_within_the_budget() {
     );
 }
 
+// mununu#1247: the launcher is run right after it is written, with no wait for a busy file.
+// This binary has one test, so no other thread forks while the launcher is open for writing.
 #[cfg(unix)]
 fn hanging_launcher(dir: &std::path::Path, pidfile: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;

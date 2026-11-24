@@ -1,6 +1,6 @@
 # Consumer briefing: what a verdict under `--merge-clock-domains` is worth depends on the clocks merged (2026-11)
 
-> Source of truth: [`merged_clock_transfer`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L2073) — surface: CLI+API — every `sv` verb and route that takes `--merge-clock-domains` / `lift.merge_clock_domains`: the `clock-domains-merged` note, `diagnostics.merged_clock_transfer` on `sv verify-auto`, the refusal of a design on both edges of one clock, the flag's help text
+> Source of truth: [`merged_clock_transfer`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L2070) — surface: CLI+API — every `sv` verb and route that takes `--merge-clock-domains` / `lift.merge_clock_domains`: the `clock-domains-merged` note, `diagnostics.merged_clock_transfer` on `sv verify-auto`, the refusal of a design on both edges of one clock, the flag's help text
 
 **Audience:** anyone who passes `--merge-clock-domains` (API `lift.merge_clock_domains`) and acts on a VIOLATED, or who reads or matches on the `clock-domains-merged` note. It follows [every `sv` verb reports the clock domains it merged](2026-11-merged-clock-domains-on-every-sv-verb.md) and replaces what that briefing quotes as the note's `summary`.
 
