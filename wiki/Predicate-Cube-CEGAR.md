@@ -113,7 +113,10 @@ Key flags:
 | `--engine` | `explicit` (default, SMT edges + CEGAR) \| `symbolic` (R-F5 BDD relation + CEGAR loop, no per-cube-pair SMT — orders of magnitude faster at large `\|P\|`; handles equality + non-derived sidecar compound predicates) |
 
 `mununu sv cegar <design.sv> --formula … --predicate …` accepts the same property
-flags and runs sv2v + Yosys internally.
+flags and lifts the design itself. It takes the lift flags of the other `sv` verbs
+(`--top`, `--source`, `--design-dir`, `--exclude`, `--search-path`, `--include-dir`,
+`--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`), and what the lift
+did with them is in the report's `lift_notes`.
 
 ## 3-valued verdicts
 

@@ -560,8 +560,8 @@ fn every_flag_a_message_names_is_on_the_verb_that_produced_it() {
         );
     }
     assert!(
-        !verbs["sv cegar"].contains("merge-clock-domains"),
-        "sv cegar does not take --merge-clock-domains (the negative control's premise)"
+        !verbs["sv discover"].contains("merge-clock-domains"),
+        "sv discover does not take --merge-clock-domains (the negative control's premise)"
     );
 
     for (suffix, reach) in REACH {
@@ -644,7 +644,7 @@ fn verbs_named_after(
 /// mununu#1181 — a clock refusal names the verbs on which `--merge-clock-domains` accepts the
 /// merged model. The test above proves each verb it names takes the flag; this one proves none
 /// is left out, so a verb that gains the flag fails here until the sentence names it. The
-/// sentence is read on surfaces without the flag too (`sv discover`, `sv cegar`, `verify`), where
+/// sentence is read on surfaces without the flag too (`sv discover`, `verify`), where
 /// the list is the whole remedy. `sv cdc-lint` takes the flag and is not named: the lint reads
 /// the clock domains with or without it, so it never refuses.
 #[test]
@@ -720,7 +720,9 @@ fn the_scan_skips_every_test_module_and_keeps_the_code_between_them() {
 }
 
 /// Negative controls — the two live positives of 2026-11-20 as they read on 10172037 — and the
-/// scoped sentences the series already writes, which must pass.
+/// scoped sentences the series already writes, which must pass. The first positive was found on
+/// `sv cegar`, which has taken the flag since mununu#1190; the control reads it on `sv discover`,
+/// which reaches the same refusal and does not take it.
 #[test]
 fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence() {
     let root = repo_root();
@@ -728,12 +730,12 @@ fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence(
 
     let yosys_old = "Model the gating as a clock enable (`if (en) q <= d;` on the root clock), \
                      or pass `--merge-clock-domains` to accept the lockstep model explicitly.";
-    let found = check_literal(yosys_old, &["sv verify-auto", "sv cegar"], &verbs);
+    let found = check_literal(yosys_old, &["sv verify-auto", "sv discover"], &verbs);
     assert_eq!(
         found,
         vec![Finding {
             flag: "--merge-clock-domains".into(),
-            not_on: vec!["sv cegar".into()],
+            not_on: vec!["sv discover".into()],
         }],
         "a bare flag of one verb in a message two verbs reach"
     );
@@ -754,7 +756,7 @@ fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence(
     let scoped = "`--merge-clock-domains` on `sv verify-auto` accepts the lockstep model \
                   explicitly; the other verbs have no such switch.";
     assert!(
-        check_literal(scoped, &["sv verify-auto", "sv cegar"], &verbs).is_empty(),
+        check_literal(scoped, &["sv verify-auto", "sv discover"], &verbs).is_empty(),
         "a flag scoped to its verb passes"
     );
     let group = "`MUNUNU_NATIVE_QUERY_RLIMIT` raises it on this verb (`--timeout-ms` scales the \
@@ -787,11 +789,18 @@ fn the_per_verb_check_flags_the_two_live_positives_and_passes_a_scoped_sentence(
 fn a_flag_named_on_a_verb_group_is_on_every_verb_of_the_group_that_reaches() {
     let root = repo_root();
     let verbs = verb_flags(&root);
-    const REACHING: &[&str] = &["sv verify-auto", "sv cegar", "sv discover", "verify"];
+    const REACHING: &[&str] = &[
+        "sv verify-auto",
+        "sv cegar",
+        "sv discover",
+        "sv emit-btor2-per-module",
+        "verify",
+    ];
     for (verb, takes) in [
         ("sv verify-auto", true),
-        ("sv cegar", false),
+        ("sv cegar", true),
         ("sv discover", false),
+        ("sv emit-btor2-per-module", false),
     ] {
         assert_eq!(
             verbs
@@ -807,7 +816,7 @@ fn a_flag_named_on_a_verb_group_is_on_every_verb_of_the_group_that_reaches() {
         check_literal(group, REACHING, &verbs),
         vec![Finding {
             flag: "--merge-clock-domains".into(),
-            not_on: vec!["sv cegar".into(), "sv discover".into()],
+            not_on: vec!["sv discover".into(), "sv emit-btor2-per-module".into()],
         }],
         "a group is every verb of it that reaches the module, and the finding names the ones \
          without the flag"
@@ -824,7 +833,11 @@ fn a_flag_named_on_a_verb_group_is_on_every_verb_of_the_group_that_reaches() {
         "the sentence says itself that not every `sv` verb takes the flag"
     );
     assert_eq!(
-        check_literal(to_its_takers, &["sv cegar", "sv discover"], &verbs),
+        check_literal(
+            to_its_takers,
+            &["sv discover", "sv emit-btor2-per-module"],
+            &verbs
+        ),
         vec![Finding {
             flag: "--merge-clock-domains".into(),
             not_on: vec!["sv".into()],
