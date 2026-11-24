@@ -15960,6 +15960,68 @@ module uart_tx(); endmodule"#;
     }
     impl<T> Pipe for T {}
 
+    /// mununu#1189 — `sv verify-auto` is one row of the decision × verb table: its notes name the
+    /// lift's five decisions under the kinds every other `sv` verb puts in its `lift_notes`
+    /// (the other rows are `x1189_every_reader_reports_every_lift_decision`), each once.
+    #[test]
+    fn x1189_verify_auto_reports_the_lift_decisions_under_the_shared_kinds() {
+        use crate::adapter::lift_decisions::LIFT_DECISION_KINDS;
+        let report = AutoVerifyReport {
+            diagnostics: ModelDiagnostics {
+                blackboxed_modules: vec!["vendor_ram".into()],
+                auto_provided_stubs: vec!["prim_flop".into()],
+                lift_retry: Some("the backend refused the first script".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let notes = build_notes(
+            &report,
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[("WIDTH".to_string(), "8".to_string())],
+            &[],
+            &["busy".to_string()],
+            &NotePosture::Cube,
+        );
+        let items_of = |kind: &str| -> Vec<Vec<String>> {
+            notes
+                .iter()
+                .filter(|n| n.kind == kind)
+                .map(|n| n.items.clone())
+                .collect()
+        };
+        let want: [Vec<String>; 5] = [
+            Vec::new(),
+            vec!["WIDTH=8".to_string()],
+            vec!["busy".to_string()],
+            vec!["prim_flop".to_string()],
+            vec!["vendor_ram".to_string()],
+        ];
+        for (kind, items) in LIFT_DECISION_KINDS.iter().zip(want) {
+            assert_eq!(
+                items_of(kind),
+                vec![items],
+                "`sv verify-auto` reports the lift decision `{kind}` once, with what it applies to"
+            );
+        }
+        let none = build_notes(
+            &AutoVerifyReport::default(),
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[],
+            &[],
+            &[],
+            &NotePosture::Cube,
+        );
+        assert!(
+            !none
+                .iter()
+                .any(|n| LIFT_DECISION_KINDS.contains(&n.kind.as_str())),
+            "a lift that decided nothing is not reported as one that did"
+        );
+    }
+
     #[test]
     fn lift_retry_note_is_info_and_names_the_backend_loop() {
         let with = AutoVerifyReport {
@@ -23981,11 +24043,16 @@ mod clock_root_note_tests {
         );
     }
 
-    /// mununu#1180 — a cut on a clock net: the control-slice note's "a definite HOLDS
-    /// transfers" stops at the storage cells on a clock with no driver, and says so naming the
-    /// clock and its note. With no such clock the note reads as it did.
+    /// mununu#1180, mununu#1189 — the control-slice note claims a transfer only when the lift
+    /// has no clock note. Under merged domains (an under-approximation of the interleavings) or
+    /// a clock with no driver the model can follow, a cut does not leave an over-approximation:
+    /// the note drops the claim and names each clock note. The rows are what a lift returns for
+    /// its domains (the merged list in the diagnostics, the root notes in the report), and one
+    /// row has a root note alone. With one domain on an input clock the note reads as it did.
     #[test]
-    fn x1180_the_control_slice_claim_stops_at_a_clock_with_no_driver() {
+    fn x1180_the_control_slice_claim_is_made_only_without_a_clock_note() {
+        use crate::adapter::lift_decisions::{CLOCK_DOMAINS_MERGED, clock_note_names};
+        use crate::adapter::slang::verify_auto_text::CUT_HOLDS_TRANSFERS;
         let cut = ["gclk".to_string()];
         let slice = |report: &AutoVerifyReport| -> String {
             build_notes(report, "", &[], &[], &[], &cut, &NotePosture::Exact)
@@ -23994,9 +24061,36 @@ mod clock_root_note_tests {
                 .expect("a cut net gives the control-slice note")
                 .detail
         };
+        // The report of a lift with these domains, as `sv verify-auto` fills it.
+        let lifted = |domains: &[ClockDomain]| -> AutoVerifyReport {
+            let mut report = AutoVerifyReport::default();
+            report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(domains);
+            report.notes.extend(clock_root_notes(domains));
+            report
+        };
         let plain = slice(&AutoVerifyReport::default());
-        assert!(plain.contains("a definite HOLDS transfers"), "{plain}");
-        assert!(!plain.contains("does NOT extend"), "{plain}");
+        assert!(plain.contains(CUT_HOLDS_TRANSFERS), "{plain}");
+        assert_eq!(
+            slice(&lifted(&[domain("clk", ClockRoot::Input)])),
+            plain,
+            "one domain on an input clock: no clock note, the claim is unqualified"
+        );
+
+        let merged_only = [
+            vec![
+                domain("clk_a", ClockRoot::Input),
+                domain("clk_b", ClockRoot::Input),
+            ],
+            vec![domain("gated", ClockRoot::Derived("$and".into()))],
+        ];
+        for domains in merged_only {
+            let detail = slice(&lifted(&domains));
+            assert!(!detail.contains(CUT_HOLDS_TRANSFERS), "{detail}");
+            assert!(
+                detail.contains(&format!("note `{CLOCK_DOMAINS_MERGED}`")),
+                "{detail}"
+            );
+        }
         for root in [
             ClockRoot::Cut,
             ClockRoot::BlackBox("pll".into()),
@@ -24008,25 +24102,32 @@ mod clock_root_note_tests {
             },
             ClockRoot::Undriven,
         ] {
-            let mut report = AutoVerifyReport::default();
-            let notes = clock_root_notes(&[domain("gclk", root.clone())]);
-            let kind = notes[0].kind.clone();
-            report.notes.extend(notes);
-            let detail = slice(&report);
+            let domains = [domain("gclk", root.clone())];
+            let report = lifted(&domains);
             assert!(
-                detail.contains(&format!(
-                    "This does NOT extend to the storage cells clocked on `gclk` (note `{kind}`)"
-                )),
-                "{root:?}: {detail}"
+                !report.diagnostics.merged_clock_domains.is_empty(),
+                "{root:?}: a clock with no driver is lifted only merged"
+            );
+            let kind = report.notes[0].kind.clone();
+            let detail = slice(&report);
+            assert!(!detail.contains(CUT_HOLDS_TRANSFERS), "{root:?}: {detail}");
+            for name in [
+                format!("note `{CLOCK_DOMAINS_MERGED}`"),
+                format!("`gclk` (note `{kind}`)"),
+            ] {
+                assert!(detail.contains(&name), "{root:?}: {name} in {detail}");
+            }
+            // The root note alone (a report built by hand) withdraws the claim too.
+            let mut alone = AutoVerifyReport::default();
+            alone.notes.extend(clock_root_notes(&domains));
+            let detail = slice(&alone);
+            assert!(!detail.contains(CUT_HOLDS_TRANSFERS), "{root:?}: {detail}");
+            assert_eq!(
+                clock_note_names(&alone.notes),
+                vec![format!("`gclk` (note `{kind}`)")],
+                "{root:?}"
             );
         }
-        // An input or a derived clock has no such note, and the claim is unqualified.
-        let mut report = AutoVerifyReport::default();
-        report.notes.extend(clock_root_notes(&[
-            domain("clk", ClockRoot::Input),
-            domain("gated", ClockRoot::Derived("$and".into())),
-        ]));
-        assert_eq!(slice(&report), plain);
     }
 
     /// The report's notes rebuild keeps the note (a kind it does not regenerate), so a note

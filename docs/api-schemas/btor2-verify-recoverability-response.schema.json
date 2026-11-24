@@ -999,7 +999,7 @@
       ]
     },
     "lift_notes": {
-      "description": "On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock domains, a derived clock or a clock the design holds no driver for on the model's one clock, and one note per such clock. The result is one on that model. Empty — and omitted — for a design on one input clock, and on the `btor2` routes, which lift nothing.",
+      "description": "On the `sv` routes: what the lift decided besides the model (mununu#1181, mununu#1189), as typed notes — `clock-domains-merged` and one note per clock with no driver the model can follow, when `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose outputs are free; `control-slice` for the cut points requested; `parameter-override` for the parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry` when the lift ran its script twice. Each says what it means for this result. Empty — and omitted — when the lift made none of these decisions, and on the `btor2` routes, which lift nothing.",
       "items": {
         "$ref": "#/definitions/VerificationNoteView"
       },

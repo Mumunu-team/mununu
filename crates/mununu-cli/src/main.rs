@@ -7707,11 +7707,27 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
     use mununu_core::verdict::PropertyVerdict;
 
     let file = args.lift.primary_display();
-    // One lift's notes speak for both: `--liveness` below lifts the same sources again.
+    let terminal = if args.liveness {
+        Some(mununu_core::api::models::parse_terminal_states(
+            &args.terminal,
+        )?)
+    } else {
+        None
+    };
+    // mununu#1189 — one lift for the whole report: with `--liveness` its notes say what a free
+    // net means for the inventory as well as for the encoding scan.
     let mununu_core::adapter::sv_verify::Lifted {
         lift_notes,
-        result: findings,
-    } = core_sv_check_fsm(&read_sv_lift(&args.lift)?, args.max_width)?;
+        result:
+            mununu_core::adapter::sv_verify::FsmCheck {
+                registers: findings,
+                liveness,
+            },
+    } = core_sv_check_fsm(
+        &read_sv_lift(&args.lift)?,
+        args.max_width,
+        terminal.as_deref(),
+    )?;
 
     let registers: Vec<serde_json::Value> = findings.iter().map(fsm_register_json).collect();
     let mut summary = serde_json::json!({
@@ -7720,15 +7736,8 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
         "illegal_encodings_found": findings.iter().filter(|f| f.is_finding()).count(),
         "registers": registers,
     });
-    if args.liveness {
-        let terminal = mununu_core::api::models::parse_terminal_states(&args.terminal)?;
-        let inv = mununu_core::adapter::sv_verify::sv_check_fsm_liveness(
-            &read_sv_lift(&args.lift)?,
-            args.max_width,
-            &terminal,
-        )?
-        .result;
-        summary["liveness"] = liveness_json(&inv);
+    if let Some(inv) = &liveness {
+        summary["liveness"] = liveness_json(inv);
     }
     attach_lift_notes(&mut summary, &lift_notes)?;
     print_json_summary(&summary)?;
@@ -7844,7 +7853,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
             lift_notes,
             result: btor2,
         } = lift
-            .lift_with_notes()
+            .lift_with_notes(mununu_core::adapter::sv_verify::LiftReader::MutationTargets)
             .map_err(|e| format!("sv mutate --list: {e}"))?;
         let t = list_targets(&btor2)?;
         let mut summary = serde_json::json!({

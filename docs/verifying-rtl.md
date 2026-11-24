@@ -477,7 +477,7 @@ namespace is shared with other tools.
 
 ## No-sidecar SystemVerilog verification: `sv verify-auto`
 
-> Source of truth: [`verify_auto`](../crates/mununu-core/src/planner/entry.rs#L119) — surface: (CLI+API+UI)
+> Source of truth: [`verify_auto`](../crates/mununu-core/src/planner/entry.rs#L125) — surface: (CLI+API+UI)
 
 `sv verify-auto` takes a SystemVerilog module and checks its properties with **no
 hand-written sidecar and no supplied formula**. End to end:
@@ -492,7 +492,7 @@ hand-written sidecar and no supplied formula**. End to end:
 The HTTP request is just the source plus options — there is no `sidecar` or `formula`
 field:
 
-> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2358) — surface: API
+> Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L2356) — surface: API
 
 ```bash
 mununu sv verify-auto my_module.sv
@@ -603,7 +603,7 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 
 ### Which engines decided a row, and which refused: `portfolio` (mununu#873)
 
-> Source of truth: [`PortfolioAttributionView`](../crates/mununu-core/src/api/models.rs#L3532) — surface: (CLI+API)
+> Source of truth: [`PortfolioAttributionView`](../crates/mununu-core/src/api/models.rs#L3553) — surface: (CLI+API)
 
 When a ⊥ row goes to the reachability portfolio (the safety, liveness, fair-cycle and
 reachability rescues), the row carries `portfolio`: the members that answered (`decided_by`) and
@@ -1126,7 +1126,8 @@ keeps that reading as an explicit choice, and every verb that takes it says so i
 `clock-domains-merged` soundness caveat lists the domains (its `items`) and says what a verdict is
 worth. `sv verify-auto` has it in `notes`, beside `diagnostics.merged_clock_domains`; every other
 verb has it in `lift_notes`, an array of the same typed notes (`kind`, `level`, `summary`,
-`detail`, `items`) that is absent when the lift has nothing to say; `sv cdc-lint`, which merges
+`detail`, `items`) that is absent when the lift has nothing to say (the field also carries the
+lift's other decisions, [below](#what-the-lift-decided-besides-the-model-lift_notes-mununu1189)); `sv cdc-lint`, which merges
 with or without the flag, lists the domains it lints in `domains`. A design clocked on a single
 edge of a single net, falling edge included, is one domain and lifts as before, with no note.
 
@@ -1193,15 +1194,83 @@ in `lift_notes` on the other verbs:
 | `clock-constant` | a constant | the constant as the netlist writes it (`1'b0`, `1'b1`); one register it clocks; the number of cells |
 | `clock-multi-driven` | several drivers | the net; the driver cell types joined by `, `; the number of cells |
 
-When the report has such a note and a `control-slice` note (a `--cutpoint` on a clock net gives
-both), the `control-slice` detail says that its "a HOLDS transfers" claim does not extend to the
-storage cells on that clock, and names the clock's note.
+When the report has a clock note and a `control-slice` note (a `--cutpoint` on a clock net gives
+both), the `control-slice` note does not claim that a HOLDS transfers: it names the clock notes
+and says that no verdict under the cut points transfers on its own (mununu#1189; the rule is in
+the next section).
 
 Before 2026-11-21 the cut shape was refused as "derived from logic (driven by `$anyseq`)" and a
 deleted stub's output lifted as a silent root clock. Before 2026-11-22 a flop on a constant clock
 was in no domain (it lifted on the model's clock and was counted nowhere), a net on several cell
 outputs or on a stub's `inout` took the last cell read as its root, and a stub that only read an
 undriven clock was named as its driver (mununu#1180).
+
+### What the lift decided besides the model: `lift_notes` (mununu#1189)
+
+> Source of truth: `lift_decision_notes` and `LiftReader` in [`adapter/lift_decisions.rs`](../crates/mununu-core/src/adapter/lift_decisions.rs) — surface: (CLI+API) — `sv verify-liveness`, `sv verify-liveness-all`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`, `sv verify-auto --plan-only`, `sv cdc-lint` and their `POST /api/v1/sv/…` routes, `POST /api/v1/sv/plan`, `POST /api/v1/sv/cegar`
+
+A lift returns a model, and with it a handful of decisions that make the model something other
+than "the design as written". A result is read on the model, so each decision belongs in the
+report of the verb that produced the result. `sv verify-auto` has them in `notes`. Every other
+verb that lifts has them in `lift_notes`, after the clock notes of the section above:
+
+| note kind | level | when | `items` |
+|---|---|---|---|
+| `lift-retry` | `info` | the lift ran its yosys script a second time (the BTOR backend's "topological loop", under [The server host needs the SV toolchain](#1-the-server-host-needs-the-sv-toolchain)) | none; the reason is in the summary |
+| `parameter-override` | `scope-caveat` | the request set module parameters (`--param`, API `lift.params`) | one `NAME=VALUE` each |
+| `control-slice` | `scope-caveat` | the request asked for cut points (`--cutpoint`, API `lift.cutpoints`) | the nets asked for |
+| `flop-stub` | `info` | a flop primitive the sources do not define was lifted with a behavioural model (`sv verify-auto`'s lift, which the plan and `sv mutate` share) | the primitives |
+| `blackbox-cut` | `soundness-caveat` | the sources hold no body for a module the design instantiates | the modules |
+
+The field is absent when the lift made none of these decisions and has no clock note.
+
+A cut module and a cut point both leave nets **free**: such a net takes any value on every step
+of the model, and the logic that drove it is left out. When the lift has no clock note, the model
+then has every run of the design and more, an over-approximation. What that allows depends on
+what the verb computes, so the `detail` of the two cut notes is written per verb:
+
+| verb | what transfers to the design when the model has free nets and the lift has no clock note |
+|---|---|
+| `sv verify-liveness`, `sv verify-liveness-all` | a HOLDS (a response property speaks of every run). A VIOLATED may follow a run only a free value allows: read its trace against the nets listed. |
+| `sv verify-recoverability` | neither verdict on its own. `AG EF target` needs every reachable state *and* some run back from each: a HOLDS may get back through a value the left-out logic never produces, a VIOLATED may start from a state only such a value reaches. |
+| `sv check-fsm` | a register reported as staying within its encodings. A reachable illegal encoding may be reached only through a free value; a register whose own logic was left out may be scanned against fewer encodings, or not at all. |
+| `sv check-fsm --liveness` | the report holds the scan (`registers`) and the inventory (`liveness`), read off one lift, and its notes state the rule of each by field name. In `registers`, the row above. In `liveness`, an encoding listed as never reached; every other entry (an encoding the register cannot leave, the return to its reset value, the absence of either) may rest on a free value. |
+| `sv lint` | a finding on a signal that reads a free net describes the model with that net free; a register that is not in the model is not checked. |
+| `POST /api/v1/sv/cegar` | a HOLDS of a formula whose modalities are all universal (`[…]`, negation only on the atoms), a VIOLATED of one whose modalities are all existential (`<…>`). With both kinds nested, neither verdict on its own. |
+| `sv mutate --list` | the targets listed are those of the lifted model: a register that is not in it is not among them. |
+| `sv mutate` | the verdicts compared are `sv verify-auto`'s on this model, and its note of the same kind says what a free net means for them. A property counts as flipped when its two verdicts differ; one the mutant run no longer has reads there as `skipped`. |
+| the plan (`sv verify-auto --plan-only`, `POST /api/v1/sv/plan`) | nothing is decided yet: `sv verify-auto` on the same request reports the note with what a free net means for each verdict. |
+
+**With a clock note, nothing in that table transfers.** When the same lift has a clock note of
+the section above (`clock-domains-merged`, or a clock with no driver the model can follow), the
+model ticks every clock on every step and so lacks the runs of the design in which they do not
+tick together. With free nets on top it has runs the design lacks and lacks runs the design has:
+it is neither an over- nor an under-approximation. The two cut notes then do not make the
+over-approximation claim. Each names the clock notes it rests on, and says that neither verdict
+of `sv verify-liveness`, no answer of `sv check-fsm` (either mode) and no verdict of
+`POST /api/v1/sv/cegar` transfers to the design on its own. The other rows of the table make no
+transfer claim and read the same. `sv verify-auto`'s own `control-slice` note follows the same
+rule: under a clock note it claims no transfer and names the clock notes. Lifting without the
+cut points, or with the modules' sources, takes the cut note out, and the clock notes say what
+the clocks alone allow.
+
+The `parameter-override`, `lift-retry` and `flop-stub` notes are the same text on every verb,
+`sv verify-auto` included.
+
+`sv cdc-lint` has plain lines in `notes` instead of typed notes, and gets one line per decision:
+a net the lift cut is unclocked in the netlist the lint walks, so a crossing through a cut point
+or through a module with no body is not seen.
+
+The `control-slice` note lists the nets the request *asked* to cut. The lift does not report
+which names it applied: a name outside the net grammar is skipped without a message, on every
+verb, `sv verify-auto` included (mununu#1217, open).
+
+Still not in any report: the sources a `--lift-override` replaced (mununu#1214), and the value the
+lift reads an `x` constant as (mununu#1216). The operations that lift and return the model alone
+(the model loader and `POST /translate` with `sv-yosys`, `context import`, `verify project`,
+`sv discover`, the per-module lift, `sv cegar` on the command line) report none of the above
+(mununu#1215, mununu#1190). Before mununu#1189 only `sv verify-auto` reported any of these
+decisions; the other verbs returned a result on the cut or re-sized model with nothing about it.
 
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 
@@ -1276,7 +1345,9 @@ mechanism is `read_slang`'s `-G NAME=VALUE` (slang elaborates at read time, so
 the value is in the netlist before `hierarchy`). A parameter that is **not** a real
 parameter of the design is a hard **error** (it lists the declared parameters),
 never a silent drop; the applied overrides are echoed as a `parameter-override`
-scope note — the verdicts are scoped to those values.
+scope note — every result is scoped to those values. Every `sv` verb that lifts
+carries the note: `sv verify-auto` in `notes`, the others in `lift_notes`
+([What the lift decided besides the model](#what-the-lift-decided-besides-the-model-lift_notes-mununu1189)).
 
 **The SVA side sees the same values** (mununu#717). The assertions are extracted by a separate
 slang run, which until mununu#717 elaborated the design at its parameter **defaults** while the lift
@@ -1308,7 +1379,7 @@ the verdict host-dependent, so it is opt-in). Bit count cannot see the reachable
 wall-clock budget — the message distinguishes the four so the remedy is not blind
 trial-and-error.
 
-> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1241) — surface: (CLI+API+UI)
+> Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/adapter/slang/verify_auto_text.rs#L1214) — surface: (CLI+API+UI)
 
 ### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
 
@@ -2032,7 +2103,7 @@ MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto desig
 
 ### Estimating a run before running it: `--plan-only` (roadmap J2)
 
-> Source of truth: [`RoutingRationale::estimate`](../crates/mununu-core/src/routing.rs#L129) + [`plan_auto`](../crates/mununu-core/src/planner/entry.rs#L203) — surface: (CLI+API: `sv verify-auto --plan-only [--json]` · `POST /api/v1/sv/plan`)
+> Source of truth: [`RoutingRationale::estimate`](../crates/mununu-core/src/routing.rs#L129) + [`plan_auto`](../crates/mununu-core/src/planner/entry.rs#L211) — surface: (CLI+API: `sv verify-auto --plan-only [--json]` · `POST /api/v1/sv/plan`)
 
 `sv verify-auto --plan-only` lifts the design and runs the planner, and **no engine**: it prints,
 per property, a **time band** (`seconds` < 10 s, `minutes` < 10 min, `hour`, `wall`), a
@@ -2267,7 +2338,8 @@ arbiter's grant vector). On exactly that error the lift reruns its script
 once, with every named net marked `keep` and then `opt_clean` before `write_btor`. The pass folds the
 buffers into connections and drops only cells that reach no named net and no output port, which the
 backend does not write either, so the model has the same registers and the verdicts are over the same
-design. The lift reports the retry as the `lift-retry` note and `diagnostics.lift_retry`. Before
+design. The lift reports the retry as the `lift-retry` note (`sv verify-auto`: in `notes`, with
+`diagnostics.lift_retry`; every other `sv` verb that lifts: in `lift_notes`, since mununu#1189). Before
 2026-11-23 the retry ran a bare `opt_clean`, which also dropped every register that no output port reads
 (mununu#1229). Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
@@ -2277,7 +2349,7 @@ is unchanged.
 
 ### 2. Properties come from the module's own assertions
 
-> Source of truth: [`verify_auto`](../crates/mununu-core/src/planner/entry.rs#L119) — surface: (CLI+API+UI)
+> Source of truth: [`verify_auto`](../crates/mununu-core/src/planner/entry.rs#L125) — surface: (CLI+API+UI)
 
 `sv verify-auto` checks the SVA the design *carries*. An agent that emits RTL **with**
 `assert property` statements gets those checked automatically. Properties the design does not
@@ -2287,7 +2359,7 @@ its readings are in [`wiki/Property-Templates.md`](../wiki/Property-Templates.md
 reported as a row labelled `tmpl.<instance>` — or with an **SV-direct verb**, which lifts the
 module *and* decides one property in one call:
 
-> Source of truth: [`sv_verify::sv_verify_recoverability_explained`](../crates/mununu-core/src/adapter/sv_verify.rs#L321) — surface: (CLI+API+UI)
+> Source of truth: [`sv_verify::sv_verify_recoverability_explained`](../crates/mununu-core/src/adapter/sv_verify.rs#L344) — surface: (CLI+API+UI)
 
 ```bash
 mununu sv verify-recoverability my_module.sv --target "state_q == 3"
@@ -2614,7 +2686,7 @@ portfolio engines) — an agent can trust a definite verdict and treat `unknown`
 
 ## Preflight: `sv lint` — structural faults refused at write time
 
-> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L527) — surface: (CLI+API+UI)
+> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L575) — surface: (CLI+API+UI)
 
 `sv lint` runs a set of **purely structural** checks over the lifted netlist — no
 bit-blast, no properties, no environment, ~lift cost. Each finding carries a
@@ -2793,7 +2865,7 @@ sibling libraries — for a design + peer-utility layout.
 
 ## Are the properties adequate? `sv mutate`
 
-> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/planner/entry.rs#L67) — surface: (CLI+API+UI)
+> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/planner/entry.rs#L69) — surface: (CLI+API+UI)
 
 A `holds` verdict is only as strong as the property that produced it — a **vacuous**
 property `holds` no matter what the design does. `sv mutate` measures that: it applies

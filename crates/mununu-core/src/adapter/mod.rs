@@ -189,6 +189,7 @@ pub mod gr1_synth;
 pub mod ir;
 pub mod justice;
 pub mod langgraph;
+pub mod lift_decisions;
 pub mod liveness_rescue;
 pub mod memory_budget;
 pub mod microcode;

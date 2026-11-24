@@ -1324,11 +1324,14 @@ pub struct Btor2VerifyLivenessResponse {
     /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
-    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
-    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
-    /// domains, a derived clock or a clock the design holds no driver for on the model's one
-    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
-    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    /// On the `sv` routes: what the lift decided besides the model (mununu#1181, mununu#1189), as
+    /// typed notes — `clock-domains-merged` and one note per clock with no driver the model can
+    /// follow, when `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with
+    /// no body, whose outputs are free; `control-slice` for the cut points requested;
+    /// `parameter-override` for the parameters set; `flop-stub` for a flop primitive the lift
+    /// supplied a model for; `lift-retry` when the lift ran its script twice. Each says what it
+    /// means for this result. Empty — and omitted — when the lift made none of these decisions, and
+    /// on the `btor2` routes, which lift nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -1443,11 +1446,14 @@ pub struct Btor2VerifyRecoverabilityResponse {
     /// unreachable → the cycle the run stays in (`kind: "lasso"`, `loop_start` marks the cycle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
-    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
-    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
-    /// domains, a derived clock or a clock the design holds no driver for on the model's one
-    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
-    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    /// On the `sv` routes: what the lift decided besides the model (mununu#1181, mununu#1189), as
+    /// typed notes — `clock-domains-merged` and one note per clock with no driver the model can
+    /// follow, when `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with
+    /// no body, whose outputs are free; `control-slice` for the cut points requested;
+    /// `parameter-override` for the parameters set; `flop-stub` for a flop primitive the lift
+    /// supplied a model for; `lift-retry` when the lift ran its script twice. Each says what it
+    /// means for this result. Empty — and omitted — when the lift made none of these decisions, and
+    /// on the `btor2` routes, which lift nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -1514,11 +1520,14 @@ pub struct Btor2CheckFsmResponse {
     /// The liveness inventory, when `liveness` was requested.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub liveness: Vec<FsmLivenessView>,
-    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
-    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
-    /// domains, a derived clock or a clock the design holds no driver for on the model's one
-    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
-    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    /// On the `sv` routes: what the lift decided besides the model (mununu#1181, mununu#1189), as
+    /// typed notes — `clock-domains-merged` and one note per clock with no driver the model can
+    /// follow, when `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with
+    /// no body, whose outputs are free; `control-slice` for the cut points requested;
+    /// `parameter-override` for the parameters set; `flop-stub` for a flop primitive the lift
+    /// supplied a model for; `lift-retry` when the lift ran its script twice. Each says what it
+    /// means for this result. Empty — and omitted — when the lift made none of these decisions, and
+    /// on the `btor2` routes, which lift nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -2001,11 +2010,13 @@ pub struct SvLintResponse {
     pub registers_flagged: usize,
     /// Per-signal findings (sorted by rule, then by name).
     pub findings: Vec<SvLintFinding>,
-    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
-    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
-    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
-    /// one clock, and one note per such clock. The result is one on that model. Empty — and
-    /// omitted — for a design on one input clock.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), as typed notes —
+    /// `clock-domains-merged` and one note per clock with no driver the model can follow, when
+    /// `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose
+    /// outputs are free; `control-slice` for the cut points requested; `parameter-override` for the
+    /// parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry`
+    /// when the lift ran its script twice. Each says what it means for this result. Empty — and
+    /// omitted — when the lift made none of these decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -2110,11 +2121,13 @@ pub struct SvMutateResponse {
     pub flipped: usize,
     /// Count the mutation did NOT flip — the property-adequacy finding.
     pub unflipped: usize,
-    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
-    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
-    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
-    /// one clock, and one note per such clock. The result is one on that model. Empty — and
-    /// omitted — for a design on one input clock.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), as typed notes —
+    /// `clock-domains-merged` and one note per clock with no driver the model can follow, when
+    /// `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose
+    /// outputs are free; `control-slice` for the cut points requested; `parameter-override` for the
+    /// parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry`
+    /// when the lift ran its script twice. Each says what it means for this result. Empty — and
+    /// omitted — when the lift made none of these decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -2243,11 +2256,13 @@ pub struct SvPlanResponse {
     pub lift_ms: u64,
     /// How many properties carry an estimate, per band — the run's shape at a glance.
     pub bands: std::collections::BTreeMap<String, usize>,
-    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
-    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
-    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
-    /// one clock, and one note per such clock. The result is one on that model. Empty — and
-    /// omitted — for a design on one input clock.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), as typed notes —
+    /// `clock-domains-merged` and one note per clock with no driver the model can follow, when
+    /// `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose
+    /// outputs are free; `control-slice` for the cut points requested; `parameter-override` for the
+    /// parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry`
+    /// when the lift ran its script twice. Each says what it means for this result. Empty — and
+    /// omitted — when the lift made none of these decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -3003,11 +3018,13 @@ pub struct SvVerifyRecoverabilityReport {
     /// unreachable → the cycle the run stays in (`kind: "lasso"`, `loop_start` marks the cycle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
-    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
-    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
-    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
-    /// one clock, and one note per such clock. The result is one on that model. Empty — and
-    /// omitted — for a design on one input clock.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), as typed notes —
+    /// `clock-domains-merged` and one note per clock with no driver the model can follow, when
+    /// `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose
+    /// outputs are free; `control-slice` for the cut points requested; `parameter-override` for the
+    /// parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry`
+    /// when the lift ran its script twice. Each says what it means for this result. Empty — and
+    /// omitted — when the lift made none of these decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -3032,11 +3049,13 @@ pub struct SvVerifyLivenessReport {
     /// saying whether the result rests on that member alone. Empty — and omitted — otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
-    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
-    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
-    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
-    /// one clock, and one note per such clock. The result is one on that model. Empty — and
-    /// omitted — for a design on one input clock.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), as typed notes —
+    /// `clock-domains-merged` and one note per clock with no driver the model can follow, when
+    /// `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose
+    /// outputs are free; `control-slice` for the cut points requested; `parameter-override` for the
+    /// parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry`
+    /// when the lift ran its script twice. Each says what it means for this result. Empty — and
+    /// omitted — when the lift made none of these decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -3053,11 +3072,13 @@ pub struct SvVerifyLivenessAllReport {
     /// Per-response provenance, so a failing conjunct is identifiable rather than being hidden
     /// behind one aggregate verdict.
     pub responses: Vec<SvLivenessResponseView>,
-    /// What the lift says about the design's clocks (mununu#1181): a `clock-domains-merged`
-    /// soundness caveat when `--merge-clock-domains` (`lift.merge_clock_domains`) put several
-    /// clock domains, a derived clock or a clock the design holds no driver for on the model's
-    /// one clock, and one note per such clock. The result is one on that model. Empty — and
-    /// omitted — for a design on one input clock.
+    /// What the lift decided besides the model (mununu#1181, mununu#1189), as typed notes —
+    /// `clock-domains-merged` and one note per clock with no driver the model can follow, when
+    /// `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with no body, whose
+    /// outputs are free; `control-slice` for the cut points requested; `parameter-override` for the
+    /// parameters set; `flop-stub` for a flop primitive the lift supplied a model for; `lift-retry`
+    /// when the lift ran its script twice. Each says what it means for this result. Empty — and
+    /// omitted — when the lift made none of these decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
@@ -3657,11 +3678,14 @@ pub struct Btor2CegarResponse {
     /// `emit_ctxdsl: true`. Omitted from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ctxdsl: Option<String>,
-    /// On the `sv` routes: what the lift says about the design's clocks (mununu#1181) — a
-    /// `clock-domains-merged` soundness caveat when `lift.merge_clock_domains` put several clock
-    /// domains, a derived clock or a clock the design holds no driver for on the model's one
-    /// clock, and one note per such clock. The result is one on that model. Empty — and omitted
-    /// — for a design on one input clock, and on the `btor2` routes, which lift nothing.
+    /// On the `sv` routes: what the lift decided besides the model (mununu#1181, mununu#1189), as
+    /// typed notes — `clock-domains-merged` and one note per clock with no driver the model can
+    /// follow, when `lift.merge_clock_domains` accepted them; `blackbox-cut` for the modules with
+    /// no body, whose outputs are free; `control-slice` for the cut points requested;
+    /// `parameter-override` for the parameters set; `flop-stub` for a flop primitive the lift
+    /// supplied a model for; `lift-retry` when the lift ran its script twice. Each says what it
+    /// means for this result. Empty — and omitted — when the lift made none of these decisions, and
+    /// on the `btor2` routes, which lift nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lift_notes: Vec<VerificationNoteView>,
 }
