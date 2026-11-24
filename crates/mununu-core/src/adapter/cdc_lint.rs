@@ -1257,8 +1257,8 @@ fn foreign_cone_source(net: &Netlist, cones: &mut Cones, src: usize) -> Option<u
 
 /// The gray-step invariant on a bus's source register: `holds` when no step flips two bits.
 ///
-/// SOUNDNESS: the query runs on the lift with merged clock domains, an under-approximation of the
-/// interleavings. It is exact for the source register when the register's sequential cone (every
+/// SOUNDNESS: the query runs on the lift with merged clock domains: every domain steps on the
+/// model's one clock. It is exact for the source register when the register's sequential cone (every
 /// flop that can influence it) lies in its own domain: the other domains then cannot affect it,
 /// so how they tick is irrelevant. When the cone reaches another domain the row stays `unknown`.
 /// The reset is pinned inactive after the post-reset state, as `check-fsm` does: a bus is not
@@ -1428,6 +1428,7 @@ mod tests {
             posedge: true,
             cells: 1,
             root,
+            input: None,
         };
         let notes = clock_root_notes(&[
             d("clk", ClockRoot::Input),

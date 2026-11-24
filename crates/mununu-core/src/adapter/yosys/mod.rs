@@ -267,14 +267,19 @@ pub struct YosysOptions {
     pub cutpoint_signals: Vec<String>,
     /// When `true`, a design whose flops sit in more than one clock domain (distinct clock nets,
     /// or both edges of one net) is lifted anyway, every domain stepping on the one implicit
-    /// clock of the BTOR2 model. **SOUNDNESS — an UNDER-approximation of the interleavings:**
-    /// the domains only ever tick together, so a crossing defect that needs one domain to tick
-    /// while the other does not (a lost pulse, an incoherent multi-bit bus) is invisible and a
-    /// HOLDS does not transfer. Roadmap B2: it also lets through a design whose one domain is a
-    /// DERIVED clock (gated, divided, muxed — [`ClockDomain::derived_from`]), which the model then
-    /// ticks on every step; for a divided clock neither verdict transfers. Default `false`: such a
-    /// design is refused at lift time ([`clock_domains_with_hierarchy`]). It also lets through a clock the
-    /// lifted design holds no driver for (mununu#1148, mununu#1180).
+    /// clock of the BTOR2 model. **SOUNDNESS — a HOLDS never transfers:** the domains only ever
+    /// tick together, so a crossing defect that needs one domain to tick while the other does
+    /// not (a lost pulse, an incoherent multi-bit bus) is invisible. Whether a VIOLATED
+    /// transfers depends on the shapes merged ([`merged_clock_transfer`], mununu#1202): for
+    /// clocks on distinct inputs the lockstep runs are an UNDER-approximation of the
+    /// interleavings and a VIOLATED is a run in which the clocks tick together; for both edges
+    /// of one clock, a divided clock, a clock driven by logic, a constant or a clock with no
+    /// known driver, the lockstep step is one the design may never take and neither verdict
+    /// transfers. Roadmap B2: the flag also lets through a design whose one domain is a
+    /// DERIVED clock (gated, divided, muxed — [`ClockDomain::derived_from`]), which the model
+    /// then ticks on every step, and a clock the lifted design holds no driver for
+    /// (mununu#1148, mununu#1180). Default `false`: such a design is refused at lift time
+    /// ([`clock_domains_with_hierarchy`]).
     ///
     /// mununu#1181 — every verb that takes the opt-in reports what it merged: the lift result
     /// carries the domains ([`SvLiftResult::clock_domains`]) and the caller turns them into the
@@ -1288,6 +1293,14 @@ pub(crate) enum MergeOptIn {
 pub(crate) const MERGE_NOT_OFFERED_HERE: &str =
     "this operation has no opt-in to lift the design as it is (a mununu limitation); elsewhere, ";
 
+/// What the opt-in accepts, in a refusal's last sentence. mununu#1202 — "an
+/// under-approximation" is said only of the shape for which the merge is one (clocks on
+/// distinct inputs, [`merged_clock_transfer`]); every other shape gets the lockstep model by
+/// its name. `x1202_a_refusal_calls_the_merge_an_under_approximation_only_when_it_is_one`.
+pub(crate) const ACCEPTS_THE_UNDER_APPROXIMATION: &str = "that under-approximation";
+/// What the opt-in accepts for every other shape: the model, by its name.
+pub(crate) const ACCEPTS_THE_LOCKSTEP_MODEL: &str = "the lockstep model";
+
 /// The last sentence of a clock refusal: where the opt-in is. `accepts` is what the flag
 /// accepts and `report` what the report then does. Follows a `; `.
 ///
@@ -1341,7 +1354,7 @@ pub(crate) fn refuse_merged_clock_domains(
                 describe_clock_domains(domains),
                 merge_opt_in_remedy(
                     opt_in,
-                    "the lockstep model",
+                    ACCEPTS_THE_LOCKSTEP_MODEL,
                     "says so in a `clock-domains-merged` note"
                 )
             ),
@@ -1366,15 +1379,39 @@ pub(crate) fn refuse_merged_clock_domains(
                 d.subject(),
                 d.cells,
                 describe_clock_domains(domains),
-                merge_opt_in_remedy(opt_in, "the lockstep model", "names the root in a note")
+                merge_opt_in_remedy(
+                    opt_in,
+                    ACCEPTS_THE_LOCKSTEP_MODEL,
+                    "names the root in a note"
+                )
             ),
             location: None,
         });
     }
     if domains.len() > 1 {
-        return Err(AdapterError {
-            kind: AdapterErrorKind::UnsupportedConstruct,
-            message: format!(
+        // mununu#1202 — every domain left here is on an input clock. Stepping distinct inputs
+        // together is an under-approximation of their interleavings; stepping BOTH EDGES of
+        // one input together is a step the design never takes, so the flag is not offered as
+        // "that under-approximation" and the refusal says there is no model for the shape.
+        let both_edges = merged_clock_transfer(domains)
+            .is_some_and(|t| t.shapes.contains(&MergedClockShape::BothEdges));
+        let message = if both_edges {
+            format!(
+                "adapter/yosys: the design has {} clock domains ({}), among them both edges of \
+                 one clock; the model has one implicit clock, so lifting it would update the \
+                 cells of both edges in one step, which the design never does, and no verdict \
+                 would transfer; mununu has no model for a design that uses both edges of one \
+                 clock (a mununu limitation; nothing to change in the design); {}",
+                domains.len(),
+                describe_clock_domains(domains),
+                merge_opt_in_remedy(
+                    opt_in,
+                    ACCEPTS_THE_LOCKSTEP_MODEL,
+                    "says in a `clock-domains-merged` note that neither verdict transfers"
+                )
+            )
+        } else {
+            format!(
                 "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
                  clock, so lifting it would step every domain together and hide every crossing \
                  defect. Run `mununu sv cdc-lint` to classify the crossings, or verify each \
@@ -1383,10 +1420,14 @@ pub(crate) fn refuse_merged_clock_domains(
                 describe_clock_domains(domains),
                 merge_opt_in_remedy(
                     opt_in,
-                    "that under-approximation",
+                    ACCEPTS_THE_UNDER_APPROXIMATION,
                     "says so in a `clock-domains-merged` note"
                 )
-            ),
+            )
+        };
+        return Err(AdapterError {
+            kind: AdapterErrorKind::UnsupportedConstruct,
+            message,
             location: None,
         });
     }
@@ -1765,6 +1806,23 @@ pub struct ClockDomain {
     /// and, under the opt-in, a note in the verb's report name the root (mununu#1181: every
     /// verb that takes the opt-in).
     pub root: ClockRoot,
+    /// mununu#1202 — for an [`ClockRoot::Input`] root: the top-level input the walk through
+    /// inverters and buffers ended at, and the edge of THAT input the cells fire on (the cell's
+    /// own edge, flipped once per inverter on the way). Cells on `posedge clk_n` with
+    /// `clk_n = ~clk` fire on the falling edge of `clk`: a domain that never ticks at the
+    /// instant one on `posedge clk` does, whatever its net is called
+    /// ([`merged_clock_transfer`]). `None` for every other root, and on a domain built by hand,
+    /// whose own net and edge are then the input's ([`ClockDomain::input_edge`]).
+    pub input: Option<ClockInput>,
+}
+
+/// mununu#1202 — a top-level input clock and one of its edges ([`ClockDomain::input`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockInput {
+    /// The input's net name.
+    pub net: String,
+    /// The rising edge (`true`) or the falling one.
+    pub posedge: bool,
 }
 
 /// mununu#1148 — what drives a clock net, after the walk through inverters and buffers
@@ -1828,6 +1886,17 @@ impl ClockDomain {
         }
     }
 
+    /// mununu#1202 — for an [`ClockRoot::Input`] root, the input and the edge of it this
+    /// domain's cells fire on: what the scan recorded ([`ClockDomain::input`]), else the
+    /// domain's own net and edge. `None` for every other root.
+    pub fn input_edge(&self) -> Option<(&str, bool)> {
+        match (&self.root, &self.input) {
+            (ClockRoot::Input, Some(i)) => Some((i.net.as_str(), i.posedge)),
+            (ClockRoot::Input, None) => Some((self.net.as_str(), self.posedge)),
+            _ => None,
+        }
+    }
+
     /// How a message names this clock: its net, or — a constant is no net — a storage cell
     /// clocked by it.
     pub fn subject(&self) -> String {
@@ -1865,7 +1934,16 @@ pub fn describe_clock_domains(domains: &[ClockDomain]) -> String {
                 d.cells,
                 if d.cells == 1 { "" } else { "s" },
                 match &d.root {
-                    ClockRoot::Input => String::new(),
+                    // mununu#1202 — an inverted or buffered copy of an input names the input
+                    // and the edge of it: `clk_n (posedge, …, the falling edge of input `clk`)`.
+                    ClockRoot::Input => match &d.input {
+                        Some(i) if i.net != d.net || i.posedge != d.posedge => format!(
+                            ", the {} edge of input `{}`",
+                            if i.posedge { "rising" } else { "falling" },
+                            i.net
+                        ),
+                        _ => String::new(),
+                    },
                     ClockRoot::Undriven => ", undriven".to_string(),
                     ClockRoot::Derived(t) => format!(", derived: driven by `{t}`"),
                     ClockRoot::Constant { value, register } =>
@@ -1886,6 +1964,157 @@ pub fn describe_clock_domains(domains: &[ClockDomain]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The yosys word-level storage cells: flip-flops and latches.
+const STORAGE_CELL_TYPES: [&str; 14] = [
+    "$dff",
+    "$dffe",
+    "$adff",
+    "$adffe",
+    "$sdff",
+    "$sdffe",
+    "$sdffce",
+    "$aldff",
+    "$aldffe",
+    "$dffsr",
+    "$dffsre",
+    "$dlatch",
+    "$adlatch",
+    "$dlatchsr",
+];
+
+/// Whether a cell type is an edge-triggered flip-flop: a clock driven by one is a divided
+/// clock. A latch is not one (its output follows its input while it is open).
+fn is_flip_flop(cell_type: &str) -> bool {
+    STORAGE_CELL_TYPES.contains(&cell_type) && !cell_type.contains("latch")
+}
+
+/// Whether the lift put something on the model's one clock that is not one clock of the
+/// design: more than one domain, or a single domain on a clock derived from logic or on one the
+/// lifted design holds no driver for. Each goes through only under `--merge-clock-domains`.
+pub(crate) fn clocks_were_merged(domains: &[ClockDomain]) -> bool {
+    domains.len() > 1
+        || domains
+            .iter()
+            .any(|d| d.derived_from().is_some() || d.is_free_source())
+}
+
+/// mununu#1202 — one shape of clock that `--merge-clock-domains` puts on the model's one
+/// implicit clock. What a verdict on the merged model is worth follows from the shapes
+/// ([`MergedClockTransfer`]); a HOLDS transfers under none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum MergedClockShape {
+    /// Two or more clocks the design receives on its inputs. The environment may make them
+    /// tick at the same instants, and the model is the design under that environment.
+    InputClocks,
+    /// Both edges of one input clock, written directly (`posedge clk` and `negedge clk`) or
+    /// through an inverter (`posedge clk_n` with `clk_n = ~clk`). The two edges never fall at
+    /// the same instant, and the model updates both sets of cells in one step.
+    BothEdges,
+    /// A clock that is the output of a flip-flop: a divided clock. It ticks at most on every
+    /// other tick of its source, and the model ticks it on every step.
+    Divided,
+    /// A clock tied to a constant. Its cells never update on a clock edge in the design, and
+    /// the model updates them on every step.
+    Constant,
+    /// A clock driven by other logic (a gate, a multiplexer, a latch). The model ignores that
+    /// logic and ticks the clock on every step, which is a run of the design only where the
+    /// logic passes every edge; that is not checked.
+    LogicDriven,
+    /// A clock whose driver is not in the lifted design: the output or a port of a black box,
+    /// a cut net, a net with several drivers or with none. Whether it can tick with the model's
+    /// clock is not known.
+    NoKnownDriver,
+}
+
+/// mununu#1202 — which verdict on the merged model says something about the design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum MergedClockVerdicts {
+    /// A VIOLATED is a run of the design in which the merged clocks tick at the same instants.
+    /// A HOLDS does not transfer: an interleaving of the clocks is not in the model.
+    ViolatedIfClocksCoincide,
+    /// Neither verdict transfers on its own: the model is not known to be, or is known not to
+    /// be, a set of runs of the design.
+    Neither,
+}
+
+/// mununu#1202 — what the verdicts of a lift under `--merge-clock-domains` are worth, and
+/// why: the shapes that were merged, sorted, each once.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct MergedClockTransfer {
+    /// Which verdict says something about the design.
+    pub transfers: MergedClockVerdicts,
+    /// The shapes of clock that were merged. Only `input-clocks` leaves a VIOLATED a run of
+    /// the design; any other shape among them and neither verdict transfers.
+    pub shapes: Vec<MergedClockShape>,
+}
+
+/// mununu#1202 — classify what `--merge-clock-domains` merged; `None` when nothing was
+/// ([`clocks_were_merged`]). Pure over the domains.
+///
+/// SOUNDNESS: the model steps every storage cell on every step. That is a subset of the
+/// design's runs (an under-approximation: a VIOLATED is a run, a HOLDS is not a proof) only
+/// when the design has a run in which every merged clock has its active edge at every model
+/// step. That holds for clocks on different inputs, which the environment may drive together.
+/// It does not hold for the two edges of one clock, a divided clock or a constant one (the
+/// model's runs are then not runs of the design), and it is not known for a clock behind logic
+/// or with no driver in the model — for those neither verdict transfers. Two input-rooted
+/// domains on one input and one edge (a buffered copy under a second name) are the same clock;
+/// they are reported as `input-clocks`, which claims less than is true.
+pub fn merged_clock_transfer(domains: &[ClockDomain]) -> Option<MergedClockTransfer> {
+    if !clocks_were_merged(domains) {
+        return None;
+    }
+    let mut shapes = std::collections::BTreeSet::new();
+    // (the input, the edge of it) per input-rooted domain.
+    let mut inputs: Vec<(&str, bool)> = Vec::new();
+    for d in domains {
+        // Exhaustive: a new root kind is a compile error here, not a silent `input-clocks`.
+        match &d.root {
+            ClockRoot::Input => inputs.extend(d.input_edge()),
+            ClockRoot::Derived(cell) if is_flip_flop(cell) => {
+                shapes.insert(MergedClockShape::Divided);
+            }
+            ClockRoot::Derived(_) => {
+                shapes.insert(MergedClockShape::LogicDriven);
+            }
+            ClockRoot::Constant { .. } => {
+                shapes.insert(MergedClockShape::Constant);
+            }
+            ClockRoot::Undriven
+            | ClockRoot::BlackBox(_)
+            | ClockRoot::BlackBoxPort(_)
+            | ClockRoot::MultiDriven(_)
+            | ClockRoot::Cut => {
+                shapes.insert(MergedClockShape::NoKnownDriver);
+            }
+        }
+    }
+    let both_edges = inputs
+        .iter()
+        .any(|(net, edge)| inputs.iter().any(|(n, e)| n == net && e != edge));
+    let distinct: std::collections::BTreeSet<&str> = inputs.iter().map(|(net, _)| *net).collect();
+    if both_edges {
+        shapes.insert(MergedClockShape::BothEdges);
+    }
+    if distinct.len() > 1 || (inputs.len() > 1 && !both_edges) {
+        shapes.insert(MergedClockShape::InputClocks);
+    }
+    let transfers = if shapes.iter().all(|s| *s == MergedClockShape::InputClocks) {
+        MergedClockVerdicts::ViolatedIfClocksCoincide
+    } else {
+        MergedClockVerdicts::Neither
+    };
+    Some(MergedClockTransfer {
+        transfers,
+        shapes: shapes.into_iter().collect(),
+    })
 }
 
 /// The post-flatten netlist snapshot the clock-domain scan reads, beside the BTOR2 output.
@@ -2022,22 +2251,6 @@ pub fn cell_sources(flat_netlist_json: &str) -> Vec<crate::trace::CellSource> {
         }
     }
     // The registers: the `Q` bits of every storage cell, with the cell's `src`.
-    const FLOPS: [&str; 14] = [
-        "$dff",
-        "$dffe",
-        "$adff",
-        "$adffe",
-        "$sdff",
-        "$sdffe",
-        "$sdffce",
-        "$aldff",
-        "$aldffe",
-        "$dffsr",
-        "$dffsre",
-        "$dlatch",
-        "$adlatch",
-        "$dlatchsr",
-    ];
     let mut assigned: std::collections::BTreeMap<&str, Vec<SourceLoc>> =
         std::collections::BTreeMap::new();
     for cell in top
@@ -2047,7 +2260,7 @@ pub fn cell_sources(flat_netlist_json: &str) -> Vec<crate::trace::CellSource> {
         .flat_map(|c| c.values())
     {
         let ty = cell.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if !FLOPS.contains(&ty) {
+        if !STORAGE_CELL_TYPES.contains(&ty) {
             continue;
         }
         let loc = src_of(cell);
@@ -2168,6 +2381,8 @@ pub fn clock_domains_with_hierarchy(
     };
     let mut count: std::collections::BTreeMap<(String, bool), usize> = Default::default();
     let mut roots: std::collections::BTreeMap<(String, bool), ClockRoot> = Default::default();
+    // mununu#1202 — for a domain rooted at a top-level input: that input and the edge of it.
+    let mut inputs: std::collections::BTreeMap<(String, bool), ClockInput> = Default::default();
     for body in modules.values() {
         let names = net_names(body);
         let drivers = clock_drivers(body, &declared);
@@ -2186,7 +2401,22 @@ pub fn clock_domains_with_hierarchy(
             *count.entry(key.clone()).or_default() += 1;
             match (bit.as_i64(), bit.as_str()) {
                 (Some(id), _) => {
-                    roots.entry(key).or_insert_with(|| drivers.root_of(id));
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        roots.entry(key.clone())
+                    {
+                        let walk = drivers.root_of(id);
+                        if walk.root == ClockRoot::Input {
+                            let net = names
+                                .get(&walk.end)
+                                .cloned()
+                                .unwrap_or_else(|| format!("net#{}", walk.end));
+                            // Each inverter on the way flips the edge of the input the cell
+                            // fires on.
+                            let posedge = edge != walk.inverted;
+                            inputs.insert(key, ClockInput { net, posedge });
+                        }
+                        slot.insert(walk.root);
+                    }
                 }
                 (None, Some(value)) => {
                     // The storage cell named is the first by name, whatever the cell order.
@@ -2267,6 +2497,7 @@ pub fn clock_domains_with_hierarchy(
                 .get(&(net.clone(), posedge))
                 .cloned()
                 .unwrap_or(ClockRoot::Undriven),
+            input: inputs.remove(&(net.clone(), posedge)),
             net,
             posedge,
             cells,
@@ -2321,6 +2552,18 @@ struct ClockDrivers {
 /// clock is the same clock (its edge flips, which [`clock_domains_with_hierarchy`] reads from the cell's
 /// polarity, not from the net).
 const CLOCK_PASS_THROUGH: &[&str] = &["$not", "$buf", "$pos", "$_NOT_", "$_BUF_"];
+
+/// The members of [`CLOCK_PASS_THROUGH`] that invert: each one on the way from a clock net to
+/// its root swaps which edge of the root the net's cells fire on (mununu#1202).
+const CLOCK_INVERTERS: &[&str] = &["$not", "$_NOT_"];
+
+/// mununu#1202 — where [`ClockDrivers::root_of`] ended: the root, the bit it stopped at, and
+/// whether an odd number of inverters lies between the clock net and that bit.
+struct ClockWalk {
+    root: ClockRoot,
+    end: i64,
+    inverted: bool,
+}
 
 fn clock_drivers(
     body: &serde_json::Value,
@@ -2429,8 +2672,14 @@ impl ClockDrivers {
     /// `Cut`). Not measured against the missing module's real direction: a stub whose `inout`
     /// does drive a top-level clock input lifts by default as an input clock, and no report
     /// names the stub. Pinned by `x1180_an_input_wins_over_a_port_of_unknown_direction`.
-    fn root_of(&self, bit: i64) -> ClockRoot {
+    fn root_of(&self, bit: i64) -> ClockWalk {
         let mut at = bit;
+        let mut inverted = false;
+        let ended = |root: ClockRoot, end: i64, inverted: bool| ClockWalk {
+            root,
+            end,
+            inverted,
+        };
         // A pass-through chain longer than the design has cells is a combinational loop; the
         // bound keeps the walk finite and reports the loop's cell as the driver.
         for _ in 0..=self.driver.len() {
@@ -2439,34 +2688,47 @@ impl ClockDrivers {
                 [] => {
                     // SOUNDNESS: the input is tested before the candidate ports, and the
                     // single-driver arms below never read them — the precedence stated above.
-                    return if self.inputs.contains(&at) {
+                    let root = if self.inputs.contains(&at) {
                         ClockRoot::Input
                     } else if let Some(types) = self.candidate.get(&at) {
                         ClockRoot::BlackBoxPort(types.iter().cloned().collect())
                     } else {
                         ClockRoot::Undriven
                     };
+                    return ended(root, at, inverted);
                 }
-                [(ty, Some(next))] if CLOCK_PASS_THROUGH.contains(&ty.as_str()) => at = *next,
-                [(ty, _)] if ty == "$anyseq" => return ClockRoot::Cut,
-                [(ty, _)] if ty.starts_with('$') => return ClockRoot::Derived(ty.clone()),
-                [(ty, _)] => return ClockRoot::BlackBox(ty.clone()),
+                [(ty, Some(next))] if CLOCK_PASS_THROUGH.contains(&ty.as_str()) => {
+                    inverted ^= CLOCK_INVERTERS.contains(&ty.as_str());
+                    at = *next;
+                }
+                [(ty, _)] if ty == "$anyseq" => return ended(ClockRoot::Cut, at, inverted),
+                [(ty, _)] if ty.starts_with('$') => {
+                    return ended(ClockRoot::Derived(ty.clone()), at, inverted);
+                }
+                [(ty, _)] => return ended(ClockRoot::BlackBox(ty.clone()), at, inverted),
                 // mununu#1180 — several cell outputs on one bit. Two cut black boxes on one
                 // net are two `$anyseq` cells (measured): still a cut net. Anything else is
                 // named with every driver, sorted, so the answer does not follow the cell
                 // order of the netlist.
-                many if many.iter().all(|(ty, _)| ty == "$anyseq") => return ClockRoot::Cut,
+                many if many.iter().all(|(ty, _)| ty == "$anyseq") => {
+                    return ended(ClockRoot::Cut, at, inverted);
+                }
                 many => {
                     let types: std::collections::BTreeSet<String> =
                         many.iter().map(|(ty, _)| ty.clone()).collect();
-                    return ClockRoot::MultiDriven(types.into_iter().collect());
+                    return ended(
+                        ClockRoot::MultiDriven(types.into_iter().collect()),
+                        at,
+                        inverted,
+                    );
                 }
             }
         }
-        match self.driver.get(&at).and_then(|d| d.first()) {
+        let root = match self.driver.get(&at).and_then(|d| d.first()) {
             Some((ty, _)) => ClockRoot::Derived(ty.clone()),
             None => ClockRoot::Undriven,
-        }
+        };
+        ended(root, at, inverted)
     }
 }
 
@@ -4499,6 +4761,13 @@ mod tests {
             }
         }}}"#;
         let d = clock_domains(json);
+        // mununu#1202 — an input-rooted domain names its input and the edge of it.
+        let input = |net: &str, posedge: bool| {
+            Some(ClockInput {
+                net: net.into(),
+                posedge,
+            })
+        };
         assert_eq!(
             d,
             vec![
@@ -4510,24 +4779,28 @@ mod tests {
                         value: "0".into(),
                         register: "k".into(),
                     },
+                    input: None,
                 },
                 ClockDomain {
                     net: "clk_a".into(),
                     posedge: false,
                     cells: 1,
                     root: ClockRoot::Input,
+                    input: input("clk_a", false),
                 },
                 ClockDomain {
                     net: "clk_a".into(),
                     posedge: true,
                     cells: 2,
                     root: ClockRoot::Input,
+                    input: input("clk_a", true),
                 },
                 ClockDomain {
                     net: "clk_b".into(),
                     posedge: true,
                     cells: 1,
                     root: ClockRoot::Input,
+                    input: input("clk_b", true),
                 },
             ]
         );
@@ -5630,6 +5903,7 @@ endmodule
             posedge: true,
             cells: 1,
             root,
+            input: None,
         };
         let roots = [
             ClockRoot::Input,
@@ -5641,10 +5915,23 @@ endmodule
             several(&["$and", "osc"]),
             ClockRoot::Cut,
         ];
-        let mut shapes = vec![(
-            "two input clocks",
-            vec![on("clk_a", ClockRoot::Input), on("clk_b", ClockRoot::Input)],
-        )];
+        let mut shapes = vec![
+            (
+                "two input clocks",
+                vec![on("clk_a", ClockRoot::Input), on("clk_b", ClockRoot::Input)],
+            ),
+            // mununu#1202 — two domains again, and not an under-approximation when merged.
+            (
+                "both edges of one clock",
+                vec![
+                    on("clk", ClockRoot::Input),
+                    ClockDomain {
+                        posedge: false,
+                        ..on("clk", ClockRoot::Input)
+                    },
+                ],
+            ),
+        ];
         for root in roots {
             let name = match &root {
                 // One input clock is the shape that lifts: no row.
@@ -5662,6 +5949,254 @@ endmodule
         shapes
     }
 
+    /// mununu#1202 — a refusal offers the flag as "that under-approximation" exactly for the
+    /// shapes whose merge is one: a VIOLATED on the merged model is then a run of the design.
+    /// For every other refused shape the merged model has steps the design may never take, and
+    /// the refusal names the lockstep model instead. Walks the table of refused shapes, so a
+    /// new shape is checked against the classifier, not against a sentence.
+    #[test]
+    fn x1202_a_refusal_calls_the_merge_an_under_approximation_only_when_it_is_one() {
+        let mut said_once = false;
+        for (shape, domains) in every_refused_clock_shape() {
+            let message = refuse_merged_clock_domains(
+                &domains,
+                &YosysOptions::default(),
+                MergeOptIn::Offered,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{shape}: lifted without the opt-in"))
+            .message;
+            let transfer = merged_clock_transfer(&domains)
+                .unwrap_or_else(|| panic!("{shape}: a refused shape is a merge under the opt-in"));
+            let is_one = transfer.transfers == MergedClockVerdicts::ViolatedIfClocksCoincide;
+            assert_eq!(
+                message.contains(ACCEPTS_THE_UNDER_APPROXIMATION),
+                is_one,
+                "{shape} ({transfer:?}): {message}"
+            );
+            assert_eq!(
+                message.contains(ACCEPTS_THE_LOCKSTEP_MODEL),
+                !is_one,
+                "{shape} ({transfer:?}): {message}"
+            );
+            said_once |= is_one;
+        }
+        assert!(said_once, "the table has the shape whose merge is one");
+    }
+
+    /// mununu#1202 — what a merge is worth, from the shapes merged. One row per root kind
+    /// (exhaustive: `shape_of_root` fails to compile on a new one), alone and beside the
+    /// design's input clock, and the input-clock rows: distinct inputs, both edges of one input
+    /// written directly, both edges through an inverted copy under another name, and the same
+    /// edge of one input under two names. A VIOLATED transfers for `input-clocks` alone.
+    #[test]
+    fn x1202_what_a_merge_transfers_follows_from_the_shapes_merged() {
+        use MergedClockShape as S;
+        use MergedClockVerdicts as V;
+        let on = |net: &str, posedge: bool, root: ClockRoot| ClockDomain {
+            net: net.into(),
+            posedge,
+            cells: 1,
+            root,
+            input: None,
+        };
+        // An input-rooted domain whose net is a copy of input `input`, on the edge `rising`.
+        let copy_of = |net: &str, input: &str, rising: bool| ClockDomain {
+            input: Some(ClockInput {
+                net: input.into(),
+                posedge: rising,
+            }),
+            ..on(net, true, ClockRoot::Input)
+        };
+        let clk = || on("clk", true, ClockRoot::Input);
+        fn shape_of_root(root: &ClockRoot) -> Option<S> {
+            match root {
+                ClockRoot::Input => None,
+                ClockRoot::Derived(cell) if cell.contains("ff") => Some(S::Divided),
+                ClockRoot::Derived(_) => Some(S::LogicDriven),
+                ClockRoot::Constant { .. } => Some(S::Constant),
+                ClockRoot::Undriven
+                | ClockRoot::BlackBox(_)
+                | ClockRoot::BlackBoxPort(_)
+                | ClockRoot::MultiDriven(_)
+                | ClockRoot::Cut => Some(S::NoKnownDriver),
+            }
+        }
+        let got = |domains: &[ClockDomain]| {
+            let t = merged_clock_transfer(domains).expect("a merge");
+            assert!(!t.shapes.is_empty(), "a merge has a shape: {domains:?}");
+            assert_eq!(
+                t.transfers == V::ViolatedIfClocksCoincide,
+                t.shapes == [S::InputClocks],
+                "a VIOLATED transfers for input clocks alone: {t:?}"
+            );
+            t.shapes
+        };
+
+        // Nothing merged: one input clock, on either edge, direct or through a copy.
+        assert_eq!(merged_clock_transfer(&[]), None);
+        assert_eq!(merged_clock_transfer(&[clk()]), None);
+        assert_eq!(
+            merged_clock_transfer(&[on("clk", false, ClockRoot::Input)]),
+            None
+        );
+        assert_eq!(
+            merged_clock_transfer(&[copy_of("clk_n", "clk", false)]),
+            None
+        );
+
+        for root in [
+            ClockRoot::Derived("$and".into()),
+            ClockRoot::Derived("$mux".into()),
+            ClockRoot::Derived("$dlatch".into()),
+            ClockRoot::Derived("$dff".into()),
+            ClockRoot::Derived("$sdff".into()),
+            ClockRoot::Derived("$adffe".into()),
+            ClockRoot::Undriven,
+            tied("0", "q"),
+            ClockRoot::BlackBox("pll".into()),
+            port_of(&["pad"]),
+            several(&["$and", "osc"]),
+            ClockRoot::Cut,
+        ] {
+            let shape = shape_of_root(&root).expect("not an input root");
+            assert_eq!(
+                got(&[on("pclk", true, root.clone())]),
+                [shape],
+                "{root:?} alone"
+            );
+            // Beside the design's clock the input adds no shape: one input, one edge.
+            assert_eq!(
+                got(&[clk(), on("pclk", true, root.clone())]),
+                [shape],
+                "{root:?} beside an input clock"
+            );
+            // Beside two input clocks both shapes are reported, and nothing transfers.
+            assert_eq!(
+                got(&[
+                    on("clk_a", true, ClockRoot::Input),
+                    on("clk_b", true, ClockRoot::Input),
+                    on("pclk", true, root.clone()),
+                ]),
+                [S::InputClocks, shape],
+                "{root:?} beside two input clocks"
+            );
+        }
+
+        let input_rows: [(&str, Vec<ClockDomain>, &[S]); 7] = [
+            (
+                "two inputs",
+                vec![
+                    on("clk_a", true, ClockRoot::Input),
+                    on("clk_b", true, ClockRoot::Input),
+                ],
+                &[S::InputClocks],
+            ),
+            (
+                "two inputs on opposite edges",
+                vec![
+                    on("clk_a", true, ClockRoot::Input),
+                    on("clk_b", false, ClockRoot::Input),
+                ],
+                &[S::InputClocks],
+            ),
+            (
+                "both edges of one input",
+                vec![clk(), on("clk", false, ClockRoot::Input)],
+                &[S::BothEdges],
+            ),
+            (
+                "an input and its inverted copy",
+                vec![clk(), copy_of("clk_n", "clk", false)],
+                &[S::BothEdges],
+            ),
+            (
+                "a negedge flop beside a flop on the inverted copy: one edge of one input",
+                vec![
+                    on("clk", false, ClockRoot::Input),
+                    copy_of("clk_n", "clk", false),
+                ],
+                &[S::InputClocks],
+            ),
+            (
+                "one input, one edge, two names",
+                vec![clk(), copy_of("clk_buf", "clk", true)],
+                &[S::InputClocks],
+            ),
+            (
+                "both edges of one input beside a second input",
+                vec![
+                    clk(),
+                    on("clk", false, ClockRoot::Input),
+                    on("clk_b", true, ClockRoot::Input),
+                ],
+                &[S::InputClocks, S::BothEdges],
+            ),
+        ];
+        for (name, domains, want) in input_rows {
+            assert_eq!(got(&domains), want, "{name}");
+        }
+    }
+
+    /// mununu#1202 at the scan: an inverted copy of an input clock is input-rooted, and the
+    /// domain records which input and which edge of it, so a flop on `posedge clk` beside one
+    /// on `posedge clk_n` (`clk_n = ~clk`) is both edges of `clk`, not two clocks. A buffered
+    /// copy keeps the edge. The netlist has `ports`, as yosys writes it, so `clk` is an input.
+    #[test]
+    fn x1202_the_scan_records_the_input_and_the_edge_behind_an_inverted_clock() {
+        let json = r#"{"modules": {"top": {
+            "ports": {"clk": {"direction": "input", "bits": [2]},
+                      "d": {"direction": "input", "bits": [9]}},
+            "netnames": {
+                "clk": {"hide_name": 0, "bits": [2]}, "clk_n": {"hide_name": 0, "bits": [4]},
+                "clk_nb": {"hide_name": 0, "bits": [5]}, "d": {"hide_name": 0, "bits": [9]}
+            },
+            "cells": {
+                "inv": {"type": "$not", "port_directions": {"A": "input", "Y": "output"},
+                        "connections": {"A": [2], "Y": [4]}},
+                "buf": {"type": "$buf", "port_directions": {"A": "input", "Y": "output"},
+                        "connections": {"A": [4], "Y": [5]}},
+                "on_clk": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                           "port_directions": {"CLK": "input", "D": "input", "Q": "output"},
+                           "connections": {"CLK": [2], "D": [9], "Q": [10]}},
+                "on_inv": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                           "port_directions": {"CLK": "input", "D": "input", "Q": "output"},
+                           "connections": {"CLK": [4], "D": [9], "Q": [11]}},
+                "on_inv_buf_neg": {"type": "$dff", "parameters": {"CLK_POLARITY": "0"},
+                           "port_directions": {"CLK": "input", "D": "input", "Q": "output"},
+                           "connections": {"CLK": [5], "D": [9], "Q": [12]}}
+            }
+        }}}"#;
+        let domains = clock_domains(json);
+        let seen: Vec<_> = domains
+            .iter()
+            .map(|d| (d.net.as_str(), d.posedge, d.input_edge()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("clk", true, Some(("clk", true))),
+                // `posedge clk_n` is the falling edge of `clk`.
+                ("clk_n", true, Some(("clk", false))),
+                // `negedge` of a buffered `clk_n` is the rising edge of `clk` again.
+                ("clk_nb", false, Some(("clk", true))),
+            ],
+            "{domains:?}"
+        );
+        assert_eq!(
+            merged_clock_transfer(&domains).map(|t| t.shapes),
+            Some(vec![MergedClockShape::BothEdges])
+        );
+        // The documented item format names the input and the edge of it where the net's own
+        // name and edge do not.
+        assert_eq!(
+            describe_clock_domains(&domains),
+            "clk (posedge, 1 cell), \
+             clk_n (posedge, 1 cell, the falling edge of input `clk`), \
+             clk_nb (negedge, 1 cell, the rising edge of input `clk`)"
+        );
+    }
+
     /// mununu#1181 — a clock refusal names the opt-in in the terms of the surface that reads it
     /// (failure-paths rule 5). Every refused shape, on both kinds of entry: behind a verb that
     /// takes the flag the last sentence names the flag, the verbs it is on and its API field;
@@ -5674,7 +6209,11 @@ endmodule
     #[test]
     fn x1181_a_clock_refusal_names_the_opt_in_where_the_caller_can_take_it() {
         let shapes = every_refused_clock_shape();
-        assert_eq!(shapes.len(), 8, "two input clocks and seven refused roots");
+        assert_eq!(
+            shapes.len(),
+            9,
+            "two input clocks, both edges of one, and seven refused roots"
+        );
         for (shape, domains) in shapes {
             let refusal = |opt_in| {
                 refuse_merged_clock_domains(&domains, &YosysOptions::default(), opt_in)
@@ -6251,6 +6790,7 @@ endmodule
                 posedge: true,
                 cells: 1,
                 root: root.clone(),
+                input: None,
             }];
             assert!(domains[0].is_free_source(), "{root:?}");
             assert_eq!(domains[0].derived_from(), None, "{root:?}");
@@ -6457,6 +6997,7 @@ endmodule
             posedge: true,
             cells: 2,
             root: ClockRoot::Derived("$and".into()),
+            input: None,
         }];
         let Err(e) =
             refuse_merged_clock_domains(&gated, &YosysOptions::default(), MergeOptIn::Offered)

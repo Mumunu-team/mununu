@@ -175,8 +175,9 @@ impl LiftReader {
     ///
     /// SOUNDNESS: such a lift puts every clock on the model's one clock, which ticks on every
     /// step. Of the design's runs the model keeps those in which the clocks tick together, an
-    /// UNDER-approximation of the interleavings (and for a divided clock or one with no driver
-    /// not even that: the clock's own note says so). The free nets add runs the design lacks.
+    /// UNDER-approximation of the interleavings (and for both edges of one clock, a divided
+    /// clock or one with no driver not even that: the clock's own note says so). The free nets
+    /// add runs the design lacks.
     /// The model is then neither an over- nor an under-approximation: a claim about every run of
     /// the model says nothing of the runs it lacks, and a claim that some run exists may rest on
     /// a free value. So the four readers whose rule in [`Self::on_a_free_net`] lets a result

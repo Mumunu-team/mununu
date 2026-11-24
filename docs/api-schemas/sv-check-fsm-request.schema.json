@@ -47,7 +47,7 @@
         },
         "merge_clock_domains": {
           "default": false,
-          "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer. Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which then ticks on every step, and a clock with no driver in the lifted design (a black box, a cut net, a constant, undriven). Every route reports what was merged: `sv/verify-auto` in `notes`, `sv/cdc-lint` in `domains` and `notes`, the others in `lift_notes`.",
+          "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it: every storage cell then updates on every step. A HOLDS never transfers to the design. A VIOLATED is a run of the design only when every merged clock is on an input of its own (the run in which they tick together); with both edges of one clock, a clock derived from logic (gated, divided, muxed) or a clock with no driver in the lifted design (a black box, a cut net, a constant, undriven) neither verdict transfers. Every route reports what was merged and which case it is: `sv/verify-auto` in `notes` and `diagnostics.merged_clock_transfer`, `sv/cdc-lint` in `domains` and `notes`, the others in `lift_notes`.",
           "type": "boolean"
         },
         "params": {

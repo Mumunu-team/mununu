@@ -163,11 +163,37 @@ pub(super) fn coverage_summary_note(report: &AutoVerifyReport) -> VerificationNo
             report.properties.len(),
             report.unsupported.len(),
         ),
-        detail: "A definite verdict transfers to the RTL (see abstraction-posture); ⊥ means the \
-                 abstraction is too coarse to decide — an honest 'don't know', not a violation."
-            .into(),
+        detail: format!(
+            "A definite verdict transfers to the RTL (see abstraction-posture); ⊥ means the \
+             abstraction is too coarse to decide — an honest 'don't know', not a violation.{}",
+            merged_clocks_qualifier(&report.diagnostics)
+        ),
         items: Vec::new(),
         property: None,
+    }
+}
+
+/// mununu#1202 — the clause the notes that say "a definite verdict transfers to the RTL" end
+/// with when the lift merged clocks: the statement is about the lifted model, and what the
+/// model's verdict is worth for the design is in the `clock-domains-merged` caveat. Empty when
+/// nothing was merged. The portfolio's rewrite of the posture note ends with it too.
+pub(super) fn merged_clocks_qualifier(d: &ModelDiagnostics) -> &'static str {
+    if d.merged_clock_domains.is_empty() {
+        ""
+    } else {
+        " This run lifted the design with its clocks merged onto the model's one clock, which \
+         limits what transfers: the clock-domains-merged note says which verdict does, if any."
+    }
+}
+
+/// mununu#1202 — the same pointer for a summary that calls a definite verdict sound: a reader
+/// of the summaries alone is sent to the caveat. Empty when nothing was merged.
+pub(super) fn merged_clocks_summary_pointer(d: &ModelDiagnostics) -> &'static str {
+    if d.merged_clock_domains.is_empty() {
+        ""
+    } else {
+        " Clocks were merged at the lift: the clock-domains-merged note says what transfers to \
+         the design."
     }
 }
 
@@ -317,43 +343,147 @@ pub(crate) fn clock_root_notes(
         .collect()
 }
 
-/// The `clock-domains-merged` caveat over [`merged_clock_domain_descriptions`]; `None` when
-/// nothing was merged. SOUNDNESS: the merge is an UNDER-approximation of the interleavings, so a
-/// HOLDS does not transfer — the note is a soundness caveat on every verb's report, not only on
-/// `sv verify-auto`'s (mununu#1181).
-pub(crate) fn merged_clock_domains_note(merged: &[String]) -> Option<VerificationNote> {
-    let first = merged.first()?;
+/// mununu#1202 — how a `clock-domains-merged` note names one merged shape, and why a run of
+/// the model is or is not a run of the design under it. One exhaustive match: a new shape is a
+/// compile error here.
+pub(crate) fn merged_shape_wording(
+    shape: crate::adapter::yosys::MergedClockShape,
+) -> (&'static str, &'static str) {
+    use crate::adapter::yosys::MergedClockShape as Shape;
+    match shape {
+        Shape::InputClocks => (
+            "clocks on different inputs",
+            "Clocks the design receives on different inputs may tick at the same instants, and \
+             the model is the design under an environment that makes them.",
+        ),
+        Shape::BothEdges => (
+            "both edges of one clock",
+            "Both edges of one clock are in use (written directly, or through an inverter): \
+             the two edges never fall at the same instant, and the model updates the cells on \
+             both in one step, so a run of the model is not a run of the design. mununu has no \
+             model for a design that uses both edges of one clock (a mununu limitation; \
+             nothing to change in the design).",
+        ),
+        Shape::Divided => (
+            "a divided clock",
+            "A clock is the output of a flip-flop (a divided clock): it ticks at most on every \
+             other tick of its source, and the model ticks it on every step, so a run of the \
+             model is not a run of the design. Write the divider as a clock enable on the \
+             source clock in the RTL.",
+        ),
+        Shape::Constant => (
+            "a clock tied to a constant",
+            "A clock is tied to a constant: its cells never update on a clock edge in the \
+             design, and the model updates them on every step. The `clock-constant` note names \
+             the cells.",
+        ),
+        Shape::LogicDriven => (
+            "a clock driven by logic",
+            "A clock is driven by logic (a gate, a multiplexer, a latch): the model ignores \
+             that logic and ticks the clock on every step, which is a run of the design only \
+             where the logic passes every edge (for a gated clock, while its enable is high), \
+             and that is not checked. Write the gating as a clock enable on the source clock \
+             in the RTL.",
+        ),
+        Shape::NoKnownDriver => (
+            "a clock with no driver in the lifted design",
+            "A clock has no driver the lifted design can show (a black box, a cut net, several \
+             drivers or none): whether it can tick with the model's clock is not known. The \
+             note on that clock says what is missing.",
+        ),
+    }
+}
+
+/// mununu#1202 — the two claims the `clock-domains-merged` caveat makes about a VIOLATED, one
+/// per value of [`crate::adapter::yosys::MergedClockVerdicts`]. The note's detail carries
+/// exactly one of them, and the tests read the claim through these, not through the prose
+/// around them.
+pub(crate) const MERGED_VIOLATED_IS_A_RUN: &str =
+    "A VIOLATED is a run of the design in which the merged clocks tick at the same instants.";
+pub(crate) const MERGED_VIOLATED_DOES_NOT_TRANSFER: &str = "A VIOLATED does not transfer either";
+
+/// The `clock-domains-merged` caveat over [`merged_clock_domain_descriptions`] and the class of
+/// what was merged ([`crate::adapter::yosys::merged_clock_transfer`]); `None` when nothing was
+/// merged. A soundness caveat on every verb's report, not only on `sv verify-auto`'s
+/// (mununu#1181).
+///
+/// SOUNDNESS (mununu#1202): a HOLDS never transfers under a merge. A VIOLATED is claimed to be
+/// a run of the design only when every merged shape is `input-clocks`; with any other shape —
+/// or with no class at all, a list that reached here without one — the note says neither
+/// verdict transfers. Before this the note said "a VIOLATED is a run of the design" whatever
+/// was merged, and told a divided clock from the rest by reading the description's text.
+pub(crate) fn merged_clock_domains_note(
+    merged: &[String],
+    transfer: Option<&crate::adapter::yosys::MergedClockTransfer>,
+) -> Option<VerificationNote> {
+    use crate::adapter::yosys::{MergedClockShape, MergedClockVerdicts};
+    if merged.is_empty() {
+        return None;
+    }
+    let shapes: &[MergedClockShape] = transfer.map(|t| t.shapes.as_slice()).unwrap_or(&[]);
+    let violated_is_a_run =
+        transfer.is_some_and(|t| t.transfers == MergedClockVerdicts::ViolatedIfClocksCoincide);
+    // The shapes under which a run of the model is not known to be a run of the design.
+    let named: Vec<&str> = shapes
+        .iter()
+        .filter(|s| **s != MergedClockShape::InputClocks)
+        .map(|s| merged_shape_wording(*s).0)
+        .collect();
+    const NEITHER: &str = "neither verdict transfers to the design on its own.";
+    let summary = match (merged.len() > 1, violated_is_a_run, named.is_empty()) {
+        (_, true, _) => format!(
+            "lift: {} clock domains merged onto one clock — a VIOLATED is a run in which they \
+             tick together; a HOLDS does not transfer.",
+            merged.len()
+        ),
+        (true, false, true) => format!(
+            "lift: {} clock domains merged onto one clock — {NEITHER}",
+            merged.len()
+        ),
+        (true, false, false) => format!(
+            "lift: {} clock domains merged onto one clock, among them {} — {NEITHER}",
+            merged.len(),
+            named.join(", ")
+        ),
+        (false, false, true) => {
+            format!("lift: a clock merged onto the model's clock — {NEITHER}")
+        }
+        (false, false, false) => format!(
+            "lift: {} merged onto the model's clock — {NEITHER}",
+            named.join(", ")
+        ),
+    };
+    const MODEL: &str = "`--merge-clock-domains` lifted the design onto the model's one \
+        implicit clock: every storage cell updates on every step. A crossing defect that needs \
+        one domain to tick while another does not (a lost pulse, an incoherent multi-bit bus) \
+        cannot occur in this model, so a HOLDS does not transfer to the design.";
+    let detail = if violated_is_a_run {
+        format!(
+            "{MODEL} {MERGED_VIOLATED_IS_A_RUN} {}",
+            merged_shape_wording(MergedClockShape::InputClocks).1
+        )
+    } else if shapes.is_empty() {
+        format!(
+            "{MODEL} {MERGED_VIOLATED_DOES_NOT_TRANSFER}: which shapes of clock were merged was \
+             not recorded with this report, so it is not known that a run of the model is a \
+             run of the design."
+        )
+    } else {
+        let why: Vec<&str> = shapes
+            .iter()
+            .filter(|s| **s != MergedClockShape::InputClocks)
+            .map(|s| merged_shape_wording(*s).1)
+            .collect();
+        format!(
+            "{MODEL} {MERGED_VIOLATED_DOES_NOT_TRANSFER}. {}",
+            why.join(" ")
+        )
+    };
     Some(VerificationNote {
         kind: crate::adapter::lift_decisions::CLOCK_DOMAINS_MERGED.into(),
         level: NoteLevel::SoundnessCaveat,
-        summary: if merged.len() > 1 {
-            format!(
-                "lift: {} clock domains merged onto one clock — every verdict assumes they \
-                 tick together.",
-                merged.len()
-            )
-        } else if first.contains(", derived") {
-            // Roadmap B2 — one domain, on a derived clock.
-            "lift: a derived clock merged onto the model's clock — every verdict assumes it \
-             ticks on every step."
-                .to_string()
-        } else {
-            // mununu#1148 — one domain, on a clock the design holds no driver for; the
-            // `clock-rooted-at-black-box` / `clock-undriven` note beside this one names it.
-            "lift: a clock with no driver in the lifted design merged onto the model's \
-             clock — every verdict assumes it ticks on every step."
-                .to_string()
-        },
-        detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
-                 implicit clock. That is an UNDER-approximation of the real interleavings: a \
-                 crossing defect that needs one domain to tick while another does not (a \
-                 lost pulse, an incoherent multi-bit bus) cannot occur in this model, so a \
-                 HOLDS does not transfer to the design. A VIOLATED is a run of the design in \
-                 which the domains happen to tick together. A domain marked `derived` (a \
-                 gated, divided or muxed clock) ticks here on every step: for a gated clock \
-                 that is the run where the enable stays high; a divided clock cannot tick \
-                 every step, so neither verdict transfers."
-            .to_string(),
+        summary,
+        detail,
         items: merged.to_vec(),
         property: None,
     })
@@ -363,16 +493,19 @@ pub(crate) fn merged_clock_domains_note(merged: &[String]) -> Option<Verificatio
 /// the `clock-domains-merged` caveat, then one note per clock the lifted design holds no driver
 /// for ([`clock_root_notes`]). Empty for a design with one domain on a clock the model can
 /// follow. Every verb that can lift under `--merge-clock-domains` puts these in its report:
-/// `sv verify-auto` in `notes` (the caveat through `diagnostics.merged_clock_domains`), the
-/// other verbs in `lift_notes`. The policy test
+/// `sv verify-auto` in `notes` (the caveat through `diagnostics.merged_clock_domains` and
+/// `diagnostics.merged_clock_transfer`), the other verbs in `lift_notes`. The policy test
 /// `every_lift_that_can_merge_clock_domains_reports_them` lists the callers.
 pub(crate) fn lift_clock_notes(
     domains: &[crate::adapter::yosys::ClockDomain],
 ) -> Vec<VerificationNote> {
-    merged_clock_domains_note(&merged_clock_domain_descriptions(domains))
-        .into_iter()
-        .chain(clock_root_notes(domains))
-        .collect()
+    merged_clock_domains_note(
+        &merged_clock_domain_descriptions(domains),
+        crate::adapter::yosys::merged_clock_transfer(domains).as_ref(),
+    )
+    .into_iter()
+    .chain(clock_root_notes(domains))
+    .collect()
 }
 
 /// What `sv verify-auto`'s `control-slice` note claims for a cut when the lift has no clock
@@ -396,7 +529,10 @@ pub(super) fn build_notes(
     // Coverage summary (Info) — the honest at-a-glance tally.
     notes.push(coverage_summary_note(report));
 
-    notes.extend(merged_clock_domains_note(&d.merged_clock_domains));
+    notes.extend(merged_clock_domains_note(
+        &d.merged_clock_domains,
+        d.merged_clock_transfer.as_ref(),
+    ));
     // The lift re-ran its yosys script (Info). The note is the one every other `sv` verb puts in
     // its `lift_notes` (mununu#1189).
     notes.extend(
@@ -551,12 +687,18 @@ pub(super) fn build_notes(
         NotePosture::Exact => notes.push(VerificationNote {
             kind: "abstraction-posture".into(),
             level: NoteLevel::Info,
-            summary: "Exact-symbolic model checking — no abstraction, so a definite verdict is sound and there is no ⊥."
-                .into(),
-            detail: "Each property is decided over the full bit-blasted state space by ROBDD \
-                     fixpoint; a definite HOLDS or VIOLATED transfers to the concrete RTL, and no \
-                     property is left ⊥ (the predicate abstraction that would produce ⊥ is not used)."
-                .into(),
+            summary: format!(
+                "Exact-symbolic model checking — no abstraction, so a definite verdict is sound \
+                 and there is no ⊥.{}",
+                merged_clocks_summary_pointer(d)
+            ),
+            detail: format!(
+                "Each property is decided over the full bit-blasted state space by ROBDD \
+                 fixpoint; a definite HOLDS or VIOLATED transfers to the concrete RTL, and no \
+                 property is left ⊥ (the predicate abstraction that would produce ⊥ is not \
+                 used).{}",
+                merged_clocks_qualifier(d)
+            ),
             items: Vec::new(),
             property: None,
         }),
@@ -564,14 +706,18 @@ pub(super) fn build_notes(
             notes.push(VerificationNote {
                 kind: "abstraction-posture".into(),
                 level: NoteLevel::Info,
-                summary: "KMTS may-over-approximation — a definite HOLDS on a safety property is sound."
-                    .into(),
+                summary: format!(
+                    "KMTS may-over-approximation — a definite HOLDS on a safety property is \
+                     sound.{}",
+                    merged_clocks_summary_pointer(d)
+                ),
                 detail: format!(
                     "The may-relation over-approximates the concrete transitions (SMT all-pairs), so \
                      a definite HOLDS transfers to the concrete RTL (safety + over-approximation = \
                      sound); a definite VIOLATED is a real reachable counterexample class. Must-edge \
-                     inference: {}.",
+                     inference: {}.{}",
                     must_edge_posture,
+                    merged_clocks_qualifier(d),
                 ),
                 items: Vec::new(),
                 property: None,
@@ -1254,8 +1400,9 @@ pub(super) fn exact_skip_rescue_note(name: &str, verdict: &str) -> VerificationN
                  no state-cell / combinational atom for the cube to build a dimension from, so \
                  the cube reports Skipped. The exact engine bit-blasts the design and decides \
                  it directly. Sound: the exact engine is the differential oracle — under \
-                 reset-gating a definite verdict transfers to the RTL; the property is upgraded \
-                 only on a definite Holds/Violated."
+                 reset-gating its definite verdict is exact for the lifted model, and the \
+                 abstraction-posture note says what transfers to the RTL; the property is \
+                 upgraded only on a definite Holds/Violated."
             .into(),
         items: Vec::new(),
         property: None,

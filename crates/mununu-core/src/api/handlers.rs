@@ -7003,11 +7003,11 @@ endmodule
     }
 
     /// REPRODUCER and the class's enumerating test at the API. A two-clock design lifted under
-    /// `merge_clock_domains` steps both domains together, an under-approximation no verdict on
-    /// it transfers from; every route says so with the `clock-domains-merged` soundness caveat
-    /// in `lift_notes`. Fails on the parent, where no row carried it: the routes lifted through
-    /// entries that drop the clock domains. The same routes on the design with one clock carry
-    /// no `lift_notes` key at all.
+    /// `merge_clock_domains` steps both domains together; every route says what a verdict on
+    /// that model is worth with the `clock-domains-merged` soundness caveat in `lift_notes`
+    /// (mununu#1202: by the shapes merged). Fails on the parent, where no row carried it: the
+    /// routes lifted through entries that drop the clock domains. The same routes on the design
+    /// with one clock carry no `lift_notes` key at all.
     #[test]
     #[ignore = "requires yosys-slang + z3 (mununu-sva docker image); run with --ignored"]
     fn e2e_x1181_every_sv_route_reports_the_merged_clock_domains() {
@@ -7041,6 +7041,133 @@ endmodule
                      nothing to say about its clocks: {response:#}"
                 );
             }
+        }
+    }
+
+    /// Both edges of one clock, written on the clock itself. In the design `r` takes `q` half a
+    /// period after `q` changed, so at every rising edge `r == q`; on the model's one clock
+    /// both cells update in one step and `r` lags `q` by a step.
+    const BOTH_EDGES: &str = "\
+module top(input clk, input d, output reg q, output reg r);
+  initial q = 1'b0;
+  initial r = 1'b0;
+  always @(posedge clk) q <= d;
+  always @(negedge clk) r <= q;
+  a_follow: assert property (@(posedge clk) r == q);
+endmodule
+";
+
+    /// A clock divided by a flip-flop, and a clock gated by logic.
+    const DIVIDED_CLOCK: &str = "\
+module top(input clk, input rst, input d, output reg q);
+  reg div;
+  always @(posedge clk) if (rst) div <= 1'b0; else div <= ~div;
+  always @(posedge div) q <= d;
+  a_q: assert property (@(posedge clk) q == q);
+endmodule
+";
+    const GATED_CLOCK: &str = "\
+module top(input clk, input en, input d, output reg q);
+  wire gclk = clk & en;
+  always @(posedge gclk) q <= d;
+  a_q: assert property (@(posedge clk) q == q);
+endmodule
+";
+
+    /// mununu#1202 on the real lift, at the API. What `sv/verify-auto` says a merge is worth
+    /// follows the shapes of clock that were merged: `diagnostics.merged_clock_transfer` names
+    /// them, the `clock-domains-merged` caveat claims a VIOLATED is a run of the design for
+    /// clocks on inputs of their own and for nothing else, and the refusal that offers the
+    /// opt-in calls the merge an under-approximation for that class alone. The two spellings
+    /// of "both edges of one clock" are one shape: on the clock itself and through an inverted
+    /// copy, which the scan used to read as two independent clocks. Their row is VIOLATED on
+    /// the merged model and holds in the design, which is the reason the caveat may not say a
+    /// VIOLATED transfers there.
+    #[test]
+    #[ignore = "requires yosys-slang + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_x1202_verify_auto_reports_what_a_merge_transfers_by_the_shapes_merged() {
+        use crate::adapter::lift_decisions::CLOCK_DOMAINS_MERGED;
+        use crate::adapter::slang::verify_auto_text::{
+            MERGED_VIOLATED_DOES_NOT_TRANSFER, MERGED_VIOLATED_IS_A_RUN,
+        };
+        use crate::adapter::yosys::ACCEPTS_THE_UNDER_APPROXIMATION;
+        const COINCIDE: &str = "violated-if-clocks-coincide";
+        let inverted_copy = BOTH_EDGES
+            .replace(
+                "  initial q = 1'b0;\n",
+                "  wire clk_n = ~clk;\n  initial q = 1'b0;\n",
+            )
+            .replace("@(negedge clk) r <= q", "@(posedge clk_n) r <= q");
+        assert!(inverted_copy.contains("clk_n = ~clk") && inverted_copy.contains("posedge clk_n"));
+        let auto = |source: &str, merge: bool| {
+            body(sv_verify_auto_handler_impl(request(
+                &lift_of(source, merge),
+                json!({}),
+            )))
+        };
+        let rows: [(&str, &str, &str, &[&str]); 5] = [
+            ("two input clocks", TWO_CLOCKS, COINCIDE, &["input-clocks"]),
+            ("both edges", BOTH_EDGES, "neither", &["both-edges"]),
+            (
+                "an inverted copy",
+                inverted_copy.as_str(),
+                "neither",
+                &["both-edges"],
+            ),
+            ("a divided clock", DIVIDED_CLOCK, "neither", &["divided"]),
+            ("a gated clock", GATED_CLOCK, "neither", &["logic-driven"]),
+        ];
+        for (name, source, transfers, shapes) in rows {
+            let is_a_run = transfers == COINCIDE;
+            let refusal = match auto(source, false) {
+                Err(refusal) => refusal,
+                Ok(response) => panic!("{name}: lifted without the opt-in: {response:#}"),
+            };
+            assert_eq!(
+                refusal.contains(ACCEPTS_THE_UNDER_APPROXIMATION),
+                is_a_run,
+                "{name}: {refusal}"
+            );
+            let response = auto(source, true).unwrap_or_else(|refusal| panic!("{name}: {refusal}"));
+            assert_eq!(
+                response["diagnostics"]["merged_clock_transfer"],
+                json!({ "transfers": transfers, "shapes": shapes }),
+                "{name}: {response:#}"
+            );
+            let detail = response["notes"]
+                .as_array()
+                .and_then(|notes| notes.iter().find(|n| n["kind"] == CLOCK_DOMAINS_MERGED))
+                .and_then(|note| note["detail"].as_str())
+                .unwrap_or_else(|| panic!("{name}: no `{CLOCK_DOMAINS_MERGED}` note"));
+            assert_eq!(
+                (
+                    detail.contains(MERGED_VIOLATED_IS_A_RUN),
+                    detail.contains(MERGED_VIOLATED_DOES_NOT_TRANSFER)
+                ),
+                (is_a_run, !is_a_run),
+                "{name}: {detail}"
+            );
+            if shapes == ["both-edges"] {
+                assert_eq!(
+                    response["properties"][0]["outcome"], "violated",
+                    "{name}: {response:#}"
+                );
+            }
+        }
+
+        // One clock: nothing was merged, so the report carries no class.
+        let one_clock = TWO_CLOCKS.replace("clk_b", "clk_a").replace(
+            "input logic clk_a, input logic clk_a,",
+            "input logic clk_a,",
+        );
+        for merge in [false, true] {
+            let response = auto(&one_clock, merge).unwrap_or_else(|refusal| panic!("{refusal}"));
+            assert!(
+                response["diagnostics"]
+                    .get("merged_clock_transfer")
+                    .is_none(),
+                "merge_clock_domains: {merge}: {response:#}"
+            );
         }
     }
 

@@ -73,10 +73,11 @@ use super::verify_auto_text::{
     IMMEDIATE_ASSUME_REASON, annotation_note, bottom_reason_note, build_notes,
     coverage_summary_note, dropped_immediate_notes, escalation_stopped_note, exact_abandoned_note,
     exact_skip_rescue_note, fair_cycle_rescue_note, isolated_engine_died_note,
-    isolated_engine_stopped_note, liveness_rescue_note, reachability_rescue_note,
-    recoverability_bot_reason_note, recoverability_rescue_note, rescue_note, strong_reading_notes,
-    trap_certificate_search_note, trap_certificate_withheld_note, two_state_fold_notes,
-    unseedable_skip_reason, witness_miss_note,
+    isolated_engine_stopped_note, liveness_rescue_note, merged_clocks_qualifier,
+    merged_clocks_summary_pointer, reachability_rescue_note, recoverability_bot_reason_note,
+    recoverability_rescue_note, rescue_note, strong_reading_notes, trap_certificate_search_note,
+    trap_certificate_withheld_note, two_state_fold_notes, unseedable_skip_reason,
+    witness_miss_note,
 };
 pub(crate) use super::verify_auto_text::{
     clock_root_notes, lift_clock_notes, merged_clock_domains_note, row_not_run_reason,
@@ -579,10 +580,15 @@ pub struct ModelDiagnostics {
     /// The clock domains the lift MERGED onto the model's one implicit clock, each
     /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain,
     /// or one DERIVED domain (`…, derived: driven by \`$and\``, roadmap B2), and
-    /// `--merge-clock-domains` let it through (otherwise the lift refuses it). Every verdict
-    /// then holds only for runs where all domains tick together (the `clock-domains-merged`
-    /// soundness caveat).
+    /// `--merge-clock-domains` let it through (otherwise the lift refuses it). What a verdict
+    /// is then worth for the design depends on the clocks merged: `merged_clock_transfer` and
+    /// the `clock-domains-merged` soundness caveat say it.
     pub merged_clock_domains: Vec<String>,
+    /// mununu#1202 — what the verdicts of a merged lift are worth, and the shapes of clock that
+    /// were merged ([`crate::adapter::yosys::merged_clock_transfer`]); `None` exactly when
+    /// `merged_clock_domains` is empty. The `clock-domains-merged` note is worded from it: a
+    /// VIOLATED is a run of the design only when every merged clock is on an input of its own.
+    pub merged_clock_transfer: Option<crate::adapter::yosys::MergedClockTransfer>,
     /// mununu#536 — config inputs pinned to constants for this run, each
     /// `"<signal>=<value>"` (the `--pin` / API `pins` operands that were
     /// actually APPLIED, not those merely requested).
@@ -2493,6 +2499,12 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
     if engines_ran.len() < 2 {
         return;
     }
+    // mununu#1202 — the rewrite keeps the pointer at the merged-clocks caveat the per-engine
+    // text carried: "sound" below is about the lifted model, whichever engine decided.
+    let (merged_summary, merged_detail) = (
+        merged_clocks_summary_pointer(&report.diagnostics),
+        merged_clocks_qualifier(&report.diagnostics),
+    );
     let Some(slot) = report
         .notes
         .iter_mut()
@@ -2502,7 +2514,8 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
     };
     slot.level = NoteLevel::ScopeCaveat;
     slot.summary = format!(
-        "Portfolio run — {} engines ran; the abstraction posture is PER ENGINE, not per report.",
+        "Portfolio run — {} engines ran; the abstraction posture is PER ENGINE, not per \
+         report.{merged_summary}",
         engines_ran.len()
     );
     slot.detail = format!(
@@ -2513,7 +2526,7 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
          posture of whichever engine produced it — see the `portfolio` note's `decided-by:` items \
          for the per-engine counts. The single-engine wording this note carries by default (\"no \
          abstraction, so there is no ⊥\") describes only the highest-precision engine and is NOT \
-         a statement about the merged report.",
+         a statement about the merged report.{merged_detail}",
         engines_ran.len(),
         engines_ran.join(", ")
     );
@@ -2538,11 +2551,7 @@ pub(crate) const CLOCK_ROOT_NOTE_KINDS: &[&str] = &[
 pub(crate) fn merged_clock_domain_descriptions(
     domains: &[crate::adapter::yosys::ClockDomain],
 ) -> Vec<String> {
-    if domains.len() > 1
-        || domains
-            .iter()
-            .any(|d| d.derived_from().is_some() || d.is_free_source())
-    {
+    if crate::adapter::yosys::clocks_were_merged(domains) {
         domains
             .iter()
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
@@ -2557,16 +2566,19 @@ pub(crate) fn merged_clock_domain_descriptions(
 /// `diagnostics.merged_clock_domains` (a skeleton holds the list before its notes are built),
 /// then the root notes the report carries.
 pub(crate) fn clock_notes_of_report(report: &AutoVerifyReport) -> Vec<VerificationNote> {
-    merged_clock_domains_note(&report.diagnostics.merged_clock_domains)
-        .into_iter()
-        .chain(
-            report
-                .notes
-                .iter()
-                .filter(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
-                .cloned(),
-        )
-        .collect()
+    merged_clock_domains_note(
+        &report.diagnostics.merged_clock_domains,
+        report.diagnostics.merged_clock_transfer.as_ref(),
+    )
+    .into_iter()
+    .chain(
+        report
+            .notes
+            .iter()
+            .filter(|n| CLOCK_ROOT_NOTE_KINDS.contains(&n.kind.as_str()))
+            .cloned(),
+    )
+    .collect()
 }
 
 /// Options for [`verify_auto`] beyond the Yosys lift options.
@@ -5632,6 +5644,8 @@ pub(crate) fn prepare_model(
     // rebuild turns the list into the `clock-domains-merged` caveat (`merged_clock_domains_note`,
     // the builder the other verbs' `lift_clock_notes` uses).
     report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(&clock_domains);
+    report.diagnostics.merged_clock_transfer =
+        crate::adapter::yosys::merged_clock_transfer(&clock_domains);
     // mununu#1148 — a clock the model ticks every step without a driver it can read (a black
     // box, a cut net, no driver) is a note the reader sees; the rebuild below keeps it (a kind
     // it does not regenerate).
@@ -23825,6 +23839,7 @@ mod clock_root_note_tests {
             posedge: true,
             cells: 3,
             root,
+            input: None,
         }
     }
 
@@ -23906,6 +23921,226 @@ mod clock_root_note_tests {
         );
     }
 
+    /// REPRODUCER of mununu#1202 at the note. The caveat used to say one thing whatever was
+    /// merged: two clocks on two inputs and the two edges of one clock got the same text ("a
+    /// VIOLATED is a run of the design in which the domains happen to tick together"), and so
+    /// did a gated and a divided clock. Each of these shapes now has a text of its own. Written
+    /// against what the parent has, so it fails there: the first two details are equal.
+    #[test]
+    fn x1202_the_caveat_differs_between_the_shapes_that_were_merged() {
+        let falling = |net: &str| ClockDomain {
+            posedge: false,
+            ..domain(net, ClockRoot::Input)
+        };
+        let shapes: [(&str, Vec<ClockDomain>); 5] = [
+            (
+                "two input clocks",
+                vec![
+                    domain("clk_a", ClockRoot::Input),
+                    domain("clk_b", ClockRoot::Input),
+                ],
+            ),
+            (
+                "both edges of one clock",
+                vec![domain("clk", ClockRoot::Input), falling("clk")],
+            ),
+            (
+                "a divided clock",
+                vec![
+                    domain("clk", ClockRoot::Input),
+                    domain("div", ClockRoot::Derived("$dff".into())),
+                ],
+            ),
+            (
+                "a gated clock",
+                vec![
+                    domain("clk", ClockRoot::Input),
+                    domain("gclk", ClockRoot::Derived("$and".into())),
+                ],
+            ),
+            (
+                "a clock with no driver",
+                vec![
+                    domain("clk", ClockRoot::Input),
+                    domain("pclk", ClockRoot::Undriven),
+                ],
+            ),
+        ];
+        let caveat = |domains: &[ClockDomain]| {
+            let notes = lift_clock_notes(domains);
+            assert_eq!(notes[0].kind, "clock-domains-merged");
+            (notes[0].summary.clone(), notes[0].detail.clone())
+        };
+        for (i, (a, domains_a)) in shapes.iter().enumerate() {
+            for (b, domains_b) in &shapes[i + 1..] {
+                let (summary_a, detail_a) = caveat(domains_a);
+                let (summary_b, detail_b) = caveat(domains_b);
+                assert_ne!(detail_a, detail_b, "{a} and {b} have one detail");
+                assert_ne!(summary_a, summary_b, "{a} and {b} have one summary");
+            }
+        }
+    }
+
+    /// mununu#1202 — the caveat's claim about a VIOLATED follows the class of what was merged,
+    /// for every shape: it says a VIOLATED is a run of the design exactly when the class is
+    /// `violated-if-clocks-coincide`, and otherwise that it does not transfer, with the reason
+    /// of each merged shape that takes it away. Exhaustive over the shapes (`every_shape`
+    /// fails to compile on a new one). A list that arrives with no class claims nothing.
+    #[test]
+    fn x1202_the_caveat_claims_a_violated_only_for_the_class_that_has_one() {
+        use crate::adapter::slang::verify_auto_text::{
+            MERGED_VIOLATED_DOES_NOT_TRANSFER, MERGED_VIOLATED_IS_A_RUN, merged_shape_wording,
+        };
+        use crate::adapter::yosys::{
+            MergedClockShape as Shape, MergedClockTransfer, MergedClockVerdicts as Verdicts,
+        };
+        fn every_shape() -> Vec<Shape> {
+            let all = [
+                Shape::InputClocks,
+                Shape::BothEdges,
+                Shape::Divided,
+                Shape::Constant,
+                Shape::LogicDriven,
+                Shape::NoKnownDriver,
+            ];
+            for shape in all {
+                match shape {
+                    Shape::InputClocks
+                    | Shape::BothEdges
+                    | Shape::Divided
+                    | Shape::Constant
+                    | Shape::LogicDriven
+                    | Shape::NoKnownDriver => {}
+                }
+            }
+            all.to_vec()
+        }
+        let items = vec!["clk_a (posedge, 1 cell)".to_string(), "x".to_string()];
+        let claims = |transfer: Option<&MergedClockTransfer>| {
+            let note = merged_clock_domains_note(&items, transfer).expect("a merge has a note");
+            assert_eq!(note.level, NoteLevel::SoundnessCaveat);
+            assert_eq!(note.items, items);
+            (
+                note.detail.contains(MERGED_VIOLATED_IS_A_RUN),
+                note.detail.contains(MERGED_VIOLATED_DOES_NOT_TRANSFER),
+                note,
+            )
+        };
+        for shape in every_shape() {
+            // The shape alone, and beside clocks on different inputs.
+            for shapes in [vec![shape], vec![Shape::InputClocks, shape]] {
+                let transfers = if shapes.iter().all(|s| *s == Shape::InputClocks) {
+                    Verdicts::ViolatedIfClocksCoincide
+                } else {
+                    Verdicts::Neither
+                };
+                let transfer = MergedClockTransfer {
+                    transfers,
+                    shapes: shapes.clone(),
+                };
+                let (is_a_run, does_not, note) = claims(Some(&transfer));
+                assert_eq!(
+                    (is_a_run, does_not),
+                    (
+                        transfers == Verdicts::ViolatedIfClocksCoincide,
+                        transfers == Verdicts::Neither
+                    ),
+                    "{shapes:?}: {}",
+                    note.detail
+                );
+                for s in shapes.iter().filter(|s| **s != Shape::InputClocks) {
+                    let (name, why) = merged_shape_wording(*s);
+                    assert!(note.detail.contains(why), "{s:?}: {}", note.detail);
+                    assert!(note.summary.contains(name), "{s:?}: {}", note.summary);
+                }
+            }
+        }
+        // No class: nothing is claimed for a VIOLATED.
+        let (is_a_run, does_not, note) = claims(None);
+        assert!(!is_a_run && does_not, "{}", note.detail);
+        // Nothing merged: no note, whatever the class says.
+        assert!(merged_clock_domains_note(&[], None).is_none());
+    }
+
+    /// mununu#1202 — the notes that say "a definite verdict transfers to the RTL" point at the
+    /// caveat when the lift merged clocks, on both postures, and say nothing more when it did
+    /// not: with and without the merge the two texts differ, and the one with it names the
+    /// caveat's kind.
+    #[test]
+    fn x1202_the_transfer_notes_point_at_the_caveat_when_clocks_were_merged() {
+        use crate::adapter::lift_decisions::CLOCK_DOMAINS_MERGED;
+        let domains = [
+            domain("clk_a", ClockRoot::Input),
+            domain("clk_b", ClockRoot::Input),
+        ];
+        let plain = AutoVerifyReport::default();
+        let mut merged = AutoVerifyReport::default();
+        merged.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(&domains);
+        merged.diagnostics.merged_clock_transfer =
+            crate::adapter::yosys::merged_clock_transfer(&domains);
+        for posture in [NotePosture::Exact, NotePosture::Cube] {
+            for kind in ["coverage-summary", "abstraction-posture"] {
+                let note = |report: &AutoVerifyReport| {
+                    build_notes(report, "", &[], &[], &[], &[], &posture)
+                        .into_iter()
+                        .find(|n| n.kind == kind)
+                        .unwrap_or_else(|| panic!("no `{kind}` note"))
+                };
+                let (without, with) = (note(&plain), note(&merged));
+                assert!(
+                    !without.detail.contains(CLOCK_DOMAINS_MERGED),
+                    "{kind}: {}",
+                    without.detail
+                );
+                assert!(
+                    with.detail.starts_with(&without.detail)
+                        && with.detail.contains(CLOCK_DOMAINS_MERGED),
+                    "{kind}: {}",
+                    with.detail
+                );
+                // The posture note's summary calls a definite verdict sound, so it points too.
+                if kind == "abstraction-posture" {
+                    assert!(
+                        !without.summary.contains(CLOCK_DOMAINS_MERGED)
+                            && with.summary.contains(CLOCK_DOMAINS_MERGED),
+                        "{} / {}",
+                        without.summary,
+                        with.summary
+                    );
+                }
+            }
+        }
+        // A portfolio's merged report rewrites the posture note: the pointer survives the
+        // rewrite, in the summary and in the detail, and is absent with no merge.
+        let engines = ["exact-symbolic".to_string(), "symbolic".to_string()];
+        for (mut report, expect) in [(plain, false), (merged, true)] {
+            report.notes = build_notes(&report, "", &[], &[], &[], &[], &NotePosture::Exact);
+            refresh_abstraction_posture(&mut report, &engines);
+            let note = report
+                .notes
+                .iter()
+                .find(|n| n.kind == "abstraction-posture")
+                .expect("the posture note");
+            assert_eq!(
+                note.items,
+                ["ran:exact-symbolic", "ran:symbolic"],
+                "the rewrite ran"
+            );
+            assert_eq!(
+                note.summary.contains(CLOCK_DOMAINS_MERGED),
+                expect,
+                "{}",
+                note.summary
+            );
+            assert_eq!(
+                note.detail.contains(CLOCK_DOMAINS_MERGED),
+                expect,
+                "{}",
+                note.detail
+            );
+        }
+    }
+
     /// mununu#1181 — `sv verify-auto` builds its caveat from the same function the other verbs
     /// use: the note the rebuild makes from `diagnostics.merged_clock_domains` equals the first
     /// note of `lift_clock_notes`.
@@ -23917,6 +24152,8 @@ mod clock_root_note_tests {
         ];
         let mut report = AutoVerifyReport::default();
         report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(&domains);
+        report.diagnostics.merged_clock_transfer =
+            crate::adapter::yosys::merged_clock_transfer(&domains);
         let rebuilt = build_notes(&report, "", &[], &[], &[], &[], &NotePosture::Exact);
         let from_auto = rebuilt
             .iter()
@@ -24065,6 +24302,8 @@ mod clock_root_note_tests {
         let lifted = |domains: &[ClockDomain]| -> AutoVerifyReport {
             let mut report = AutoVerifyReport::default();
             report.diagnostics.merged_clock_domains = merged_clock_domain_descriptions(domains);
+            report.diagnostics.merged_clock_transfer =
+                crate::adapter::yosys::merged_clock_transfer(domains);
             report.notes.extend(clock_root_notes(domains));
             report
         };

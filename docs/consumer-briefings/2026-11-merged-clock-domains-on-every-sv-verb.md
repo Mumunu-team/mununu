@@ -4,6 +4,8 @@
 
 **Audience:** anyone who passes `--merge-clock-domains` (API `lift.merge_clock_domains`) to an `sv` verb other than `sv verify-auto`, or who reads those verbs' reports. It follows the briefings of [mununu#1148](2026-11-clock-rooted-at-black-box-note.md) and [mununu#1180](2026-11-clock-roots-constant-port-several-drivers.md) and closes the case both left open.
 
+> **Superseded in part 2026-11-24** by [`2026-11-merged-clock-verdict-transfer-by-shape.md`](2026-11-merged-clock-verdict-transfer-by-shape.md) (mununu#1202): the note's `summary` quoted below has other words now, and "an under-approximation" holds only when every merged clock is on an input of its own. Which verbs carry the note is unchanged.
+
 ## TL;DR
 
 - **A verdict under `--merge-clock-domains` now says so on every verb (mununu#1181).** The flag lifts a multi-clock design, or one on a derived clock, onto the model's one clock. That is an under-approximation of the real interleavings, so a HOLDS does not transfer to the design. `sv verify-auto` said so in a `clock-domains-merged` soundness caveat. The other verbs took the flag, lifted the same model and returned their verdict with nothing about it. **If you ran `sv verify-liveness`, `sv verify-recoverability`, `sv check-fsm`, `sv lint` or `sv mutate` with the flag and stored a HOLDS, that result was on the lockstep model and the report did not tell you.** The verdicts themselves are unchanged; what changes is that the report carries the caveat.

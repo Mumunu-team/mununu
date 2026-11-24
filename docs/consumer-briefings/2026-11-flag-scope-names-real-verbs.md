@@ -1,6 +1,6 @@
 # Consumer briefing: a refusal names a flag only on verbs that have it (2026-11)
 
-> Source of truth: [`merge_opt_in_remedy`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L1300) — surface: CLI+API — the text of the clock refusals, of the include-directory refusals and of the cut-net clock note, on every operation that lifts SystemVerilog
+> Source of truth: [`merge_opt_in_remedy`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L1313) — surface: CLI+API — the text of the clock refusals, of the include-directory refusals and of the cut-net clock note, on every operation that lifts SystemVerilog
 
 **Audience:** anyone who reads, shows or matches on the text of a SystemVerilog lift refusal.
 
