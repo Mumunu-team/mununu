@@ -2479,9 +2479,12 @@ fn attach_testbenches(
             // whose path has whitespace is refused there with the variable to set
             // (mununu#1176) and reaches the row as `replay: unavailable — …`.
             let dir = crate::adapter::verilator::scratch_root().map(|root| {
+                // This request's own directory (mununu#1221): named by the process, the
+                // row and the property alone, two requests at once that replayed a property
+                // of the same name built in one directory, and the first to finish removed it.
                 root.join(format!(
-                    "mununu-replay-{}-{idx}-{}",
-                    std::process::id(),
+                    "{}-{idx}-{}",
+                    crate::adapter::per_call_name("mununu-replay"),
                     p.name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
                 ))
             });

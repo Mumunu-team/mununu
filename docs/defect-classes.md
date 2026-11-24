@@ -391,3 +391,20 @@ The reports that state a stop at a time limit:
 | the `.bat` and PowerShell stand-ins on Windows | not covered: the wait is Unix-only. No failure of this kind is recorded there | — |
 
 **Enumerating test:** `every_test_that_writes_a_script_and_runs_it_waits_out_a_busy_file` (`tests/policy`), over every Rust file of the crates: a line that makes a file executable is followed by the wait, or its file is listed with the reason no other thread can fork; its control is `a_script_run_with_no_wait_is_seen`. The wait itself is pinned by `x1247_the_wait_pauses_once_per_busy_refusal_and_ends_at_the_first_other_answer` (the loop, on every OS) and `x1247_a_script_still_open_for_writing_elsewhere_is_waited_out` (the kernel's side).
+
+### `scratch-name-per-call`
+
+**What varies:** the site that names a file or directory one call makes for itself in a directory other calls use too (the system temporary directory, the staging root, the Verilator scratch root, a lift cache), and what the name is made of. Two calls at once in one process (two requests on one server, two evaluations a library user starts from two threads) must get two names. A name made from the process id alone, or from the process id and something two calls can share, is one file for both: the second call overwrites what the first wrote, and the first to finish removes what the second still reads.
+
+| Case | Behaviour | Landed |
+|---|---|---|
+| the model handed to the isolated `exact-symbolic` child (`MUNUNU_ISOLATE_ENGINES`) | `per_call_name`: a file of the call's own in the temporary directory. Before, a directory named by the process id with one `model.btor2` in it, so one path per process: with two evaluations at once a child could evaluate its formula on the other evaluation's model and the verdict was reported for the wrong model, or find the file removed (`engine-crashed`) | mununu#1221 |
+| the replay directory of one property of an HTTP request (`replay: true`) | `per_call_name`, then the row's index and the property's name. Before, the process id, the row's index and the property's name: two requests at once that replayed a property of the same index and name built in one directory, and the first to finish removed it. Read from the code, not reproduced | mununu#1221 |
+| the staging directory of one lift-cache store | `per_call_name`. Before, the process id and the clock's nanoseconds: apart by the clock alone | mununu#1221 |
+| the BTOR2 file Pono reads, the BTOR2 file rIC3 reads | `per_call_name`. Before, already one per call, each runner with a counter of its own | mununu#1221 |
+| the staging directory of one lift (yosys), the work directory of one Verilator build, the staging directory of one SVA extraction (slang) | `per_call_name`. Before, already one per call, each with its own mix of process id, thread id, counter and clock | mununu#1221 |
+| two processes | apart by the process id in the name | mununu#1221 |
+| what an earlier process with the same id left behind | differs by the clock's nanoseconds in practice; nothing checks it. A leftover model file is overwritten whole; a leftover directory would be reused with its contents | — |
+| a path the user names (a partial-results file, a usage ledger, an output file) | not of the class: the user chose the name, and two runs given the same one share it by request | — |
+
+**Enumerating test:** `policy::scratch_names_are_per_call_1221` — its table lists every file whose product code asks the helper for a name, how many and what is named; no product code outside the helper's file reads the process id; and a file whose product code reads the temporary directory, the staging root or the Verilator scratch root has a row. Its control is `a_hand_made_name_in_product_code_is_seen_and_one_in_a_test_or_a_comment_is_not`. The helper is pinned by `x1221_names_asked_for_at_once_are_all_different`, and the defect by `x1221_two_isolated_evaluations_at_once_each_get_their_own_model` (stand-in children that each report the model they were handed).

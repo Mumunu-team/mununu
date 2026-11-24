@@ -330,15 +330,12 @@ impl LiftCache {
     pub(super) fn store(&self, key: &LiftCacheKey, lift: &CachedLift) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("cannot create {}: {e}", self.dir.display()))?;
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let staging = self.dir.join(format!(
-            ".staging-{}-{}-{nanos}",
-            key.index(),
-            std::process::id()
-        ));
+        // This store's own directory (mununu#1221): two stores of one key at once in one
+        // process were kept apart by the clock alone.
+        let staging = self.dir.join(crate::adapter::per_call_name(&format!(
+            ".staging-{}",
+            key.index()
+        )));
         let publish = || -> Result<(), String> {
             std::fs::create_dir_all(&staging)
                 .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;

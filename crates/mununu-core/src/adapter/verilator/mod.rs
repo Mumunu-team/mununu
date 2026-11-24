@@ -414,27 +414,15 @@ pub struct VerilatorTempDir {
 }
 
 impl VerilatorTempDir {
-    /// Create a new per-call work directory under [`scratch_root`]. The
-    /// directory name embeds pid + thread id + sequence + nanos so
-    /// parallel tests in the same process do not collide.
+    /// Create a new per-call work directory under [`scratch_root`], named by
+    /// [`crate::adapter::per_call_name`] so two calls at once in one process do not collide.
     pub fn new() -> Result<Self, AdapterError> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let pid = std::process::id();
-        let tid = format!("{:?}", std::thread::current().id());
-        let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
         let mut base = scratch_root().map_err(|why| AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!("adapter/verilator: {why}"),
             location: None,
         })?;
-        base.push(format!("mununu-verilator-{pid}-{tid_digits}-{seq}-{nanos}"));
+        base.push(crate::adapter::per_call_name("mununu-verilator"));
         std::fs::create_dir_all(&base).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
@@ -1249,8 +1237,8 @@ mod tests {
 
     #[test]
     fn verilator_tempdir_creates_unique_directories() {
-        // Two tempdirs in the same process must not collide. The
-        // pid + thread + seq + nanos suffix guarantees this.
+        // Two tempdirs in the same process must not collide: `per_call_name` counts the calls
+        // of the process.
         let d1 = VerilatorTempDir::new().expect("tempdir 1");
         let d2 = VerilatorTempDir::new().expect("tempdir 2");
         assert_ne!(d1.path(), d2.path());
