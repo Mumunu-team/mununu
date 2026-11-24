@@ -43,6 +43,7 @@
     "nav.docs": "Documentación",
     "nav.contact": "Contacto",
     "nav.blog": "Blog",
+    "nav.videos": "Videos",
     "cta.readdocs": "Leer la documentación",
     "tech.more": "Detalle técnico",
     "legend.title": "Cómo leer nuestra evidencia",
