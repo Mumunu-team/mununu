@@ -2576,12 +2576,14 @@ struct SvLiftArgs {
     #[arg(long = "top", value_name = "NAME")]
     top: Option<String>,
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
-    /// occur and a HOLDS does not transfer. Every verb's report says so: the
-    /// `clock-domains-merged` soundness caveat, in `notes` on `sv verify-auto` and in
-    /// `lift_notes` on the other verbs. Also lets through a design clocked only by a derived
-    /// (gated, divided, muxed) clock, which then ticks on every step, and a clock with no
-    /// driver in the design (a black box, a cut net, undriven), whose root the same notes name.
+    /// The domains only ever tick together, so a crossing defect cannot occur and a HOLDS
+    /// never transfers to the design. A VIOLATED is a run of the design only when every merged
+    /// clock is on an input of its own (the run in which they tick together); with both edges
+    /// of one clock, a divided clock, a clock driven by logic or tied to a constant, or a
+    /// clock with no driver in the design (a black box, a cut net, undriven), neither verdict
+    /// transfers. Every verb's report says which case it is: the `clock-domains-merged`
+    /// soundness caveat, in `notes` on `sv verify-auto` and in `lift_notes` on the other
+    /// verbs, and the notes that name each such clock's root.
     #[arg(long = "merge-clock-domains")]
     merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves

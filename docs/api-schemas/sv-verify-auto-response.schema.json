@@ -384,6 +384,97 @@
       ],
       "type": "object"
     },
+    "MergedClockShape": {
+      "description": "mununu#1202 — one shape of clock that `--merge-clock-domains` puts on the model's one implicit clock. What a verdict on the merged model is worth follows from the shapes ([`MergedClockTransfer`]); a HOLDS transfers under none of them.",
+      "oneOf": [
+        {
+          "description": "Two or more clocks the design receives on its inputs. The environment may make them tick at the same instants, and the model is the design under that environment.",
+          "enum": [
+            "input-clocks"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Both edges of one input clock, written directly (`posedge clk` and `negedge clk`) or through an inverter (`posedge clk_n` with `clk_n = ~clk`). The two edges never fall at the same instant, and the model updates both sets of cells in one step.",
+          "enum": [
+            "both-edges"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A clock that is the output of a flip-flop: a divided clock. It ticks at most on every other tick of its source, and the model ticks it on every step.",
+          "enum": [
+            "divided"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A clock tied to a constant. Its cells never update on a clock edge in the design, and the model updates them on every step.",
+          "enum": [
+            "constant"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A clock driven by other logic (a gate, a multiplexer, a latch). The model ignores that logic and ticks the clock on every step, which is a run of the design only where the logic passes every edge; that is not checked.",
+          "enum": [
+            "logic-driven"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A clock whose driver is not in the lifted design: the output or a port of a black box, a cut net, a net with several drivers or with none. Whether it can tick with the model's clock is not known.",
+          "enum": [
+            "no-known-driver"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MergedClockTransfer": {
+      "description": "mununu#1202 — what the verdicts of a lift under `--merge-clock-domains` are worth, and why: the shapes that were merged, sorted, each once.",
+      "properties": {
+        "shapes": {
+          "description": "The shapes of clock that were merged. Only `input-clocks` leaves a VIOLATED a run of the design; any other shape among them and neither verdict transfers.",
+          "items": {
+            "$ref": "#/definitions/MergedClockShape"
+          },
+          "type": "array"
+        },
+        "transfers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MergedClockVerdicts"
+            }
+          ],
+          "description": "Which verdict says something about the design."
+        }
+      },
+      "required": [
+        "shapes",
+        "transfers"
+      ],
+      "type": "object"
+    },
+    "MergedClockVerdicts": {
+      "description": "mununu#1202 — which verdict on the merged model says something about the design.",
+      "oneOf": [
+        {
+          "description": "A VIOLATED is a run of the design in which the merged clocks tick at the same instants. A HOLDS does not transfer: an interleaving of the clocks is not in the model.",
+          "enum": [
+            "violated-if-clocks-coincide"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Neither verdict transfers on its own: the model is not known to be, or is known not to be, a set of runs of the design.",
+          "enum": [
+            "neither"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ModelDiagnosticsView": {
       "description": "Model-level lift diagnostics (mirrors [`crate::adapter::slang::verify_auto::ModelDiagnostics`]).",
       "properties": {
@@ -454,11 +545,22 @@
           ]
         },
         "merged_clock_domains": {
-          "description": "The clock domains `merge_clock_domains` lifted onto one clock, each `\"<net> (<edge>, <n> cells)\"`, a derived clock suffixed `\", derived: driven by \\`<cell>\\`\"`; empty for a design on one root clock. Non-empty means every verdict assumes the domains tick together, and a derived one on every step (the `clock-domains-merged` note). mununu#1148, mununu#1180 — a domain whose root the model ticks every step without a driver it can read ends with \", rooted at black box `<cell>`\", \", rooted at a cut net (…)\", \", on a port of black box `<cell>`, which may drive it\", \", undriven\", \", tied to constant <value>: never ticks; clocks `<register>`\" (its net is the constant, `1'b0`) or \", driven by more than one cell: `<cell>`, `<cell>`\"; a derived one with \", derived: driven by `<cell>`\".",
+          "description": "The clock domains `merge_clock_domains` lifted onto one clock, each `\"<net> (<edge>, <n> cells)\"`, a derived clock suffixed `\", derived: driven by \\`<cell>\\`\"`; empty for a design on one root clock. Non-empty means every verdict is one of the model in which all of them tick on every step; `merged_clock_transfer` says which verdict then says something about the design (the `clock-domains-merged` note). mununu#1148, mununu#1180 — a domain whose root the model ticks every step without a driver it can read ends with \", rooted at black box `<cell>`\", \", rooted at a cut net (…)\", \", on a port of black box `<cell>`, which may drive it\", \", undriven\", \", tied to constant <value>: never ticks; clocks `<register>`\" (its net is the constant, `1'b0`) or \", driven by more than one cell: `<cell>`, `<cell>`\"; a derived one with \", derived: driven by `<cell>`\". mununu#1202 — an inverted or buffered copy of an input clock ends with \", the rising edge of input `<net>`\" or \", the falling edge of input `<net>`\".",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "merged_clock_transfer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MergedClockTransfer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "mununu#1202 — what the verdicts of a merged lift are worth: `transfers` is `violated-if-clocks-coincide` (a VIOLATED is a run of the design in which the merged clocks tick at the same instants) or `neither`, and `shapes` lists what was merged (`input-clocks`, `both-edges`, `divided`, `constant`, `logic-driven`, `no-known-driver`). A HOLDS transfers under none. Present exactly when `merged_clock_domains` is non-empty."
         },
         "source_map": {
           "allOf": [

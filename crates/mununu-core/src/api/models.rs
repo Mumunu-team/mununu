@@ -1843,12 +1843,15 @@ pub struct SvLiftRequest {
     /// Control-slice cut points: each named net becomes a free input (an over-approximation).
     #[serde(default)]
     pub cutpoints: Vec<String>,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
-    /// Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which
-    /// then ticks on every step, and a clock with no driver in the lifted design (a black box, a
-    /// cut net, a constant, undriven). Every route reports what was merged: `sv/verify-auto` in
-    /// `notes`, `sv/cdc-lint` in `domains` and `notes`, the others in `lift_notes`.
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it:
+    /// every storage cell then updates on every step. A HOLDS never transfers to the design.
+    /// A VIOLATED is a run of the design only when every merged clock is on an input of its
+    /// own (the run in which they tick together); with both edges of one clock, a clock
+    /// derived from logic (gated, divided, muxed) or a clock with no driver in the lifted
+    /// design (a black box, a cut net, a constant, undriven) neither verdict transfers. Every
+    /// route reports what was merged and which case it is: `sv/verify-auto` in `notes` and
+    /// `diagnostics.merged_clock_transfer`, `sv/cdc-lint` in `domains` and `notes`, the others
+    /// in `lift_notes`.
     #[serde(default)]
     pub merge_clock_domains: bool,
 }
@@ -2930,6 +2933,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 frontend: report.diagnostics.frontend.clone(),
                 lift_retry: report.diagnostics.lift_retry.clone(),
                 merged_clock_domains: report.diagnostics.merged_clock_domains.clone(),
+                merged_clock_transfer: report.diagnostics.merged_clock_transfer.clone(),
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
                 fault_model: report.diagnostics.fault_model.clone(),
@@ -3194,16 +3198,27 @@ pub struct ModelDiagnosticsView {
     pub lift_retry: Option<String>,
     /// The clock domains `merge_clock_domains` lifted onto one clock, each
     /// `"<net> (<edge>, <n> cells)"`, a derived clock suffixed `", derived: driven by \`<cell>\`"`;
-    /// empty for a design on one root clock. Non-empty means every verdict assumes the domains
-    /// tick together, and a derived one on every step (the `clock-domains-merged` note).
+    /// empty for a design on one root clock. Non-empty means every verdict is one of the model
+    /// in which all of them tick on every step; `merged_clock_transfer` says which verdict then
+    /// says something about the design (the `clock-domains-merged` note).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     /// mununu#1148, mununu#1180 — a domain whose root the model ticks every step without a
     /// driver it can read ends with ", rooted at black box `<cell>`", ", rooted at a cut net
     /// (…)", ", on a port of black box `<cell>`, which may drive it", ", undriven", ", tied to
     /// constant <value>: never ticks; clocks `<register>`" (its net is the constant, `1'b0`)
     /// or ", driven by more than one cell: `<cell>`, `<cell>`"; a derived one with
-    /// ", derived: driven by `<cell>`".
+    /// ", derived: driven by `<cell>`". mununu#1202 — an inverted or buffered copy of an input
+    /// clock ends with ", the rising edge of input `<net>`" or ", the falling edge of input
+    /// `<net>`".
     pub merged_clock_domains: Vec<String>,
+    /// mununu#1202 — what the verdicts of a merged lift are worth: `transfers` is
+    /// `violated-if-clocks-coincide` (a VIOLATED is a run of the design in which the merged
+    /// clocks tick at the same instants) or `neither`, and `shapes` lists what was merged
+    /// (`input-clocks`, `both-edges`, `divided`, `constant`, `logic-driven`,
+    /// `no-known-driver`). A HOLDS transfers under none. Present exactly when
+    /// `merged_clock_domains` is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_clock_transfer: Option<crate::adapter::yosys::MergedClockTransfer>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
     /// under a pin is a claim about THAT configuration only, so the scope ships with it.
     #[serde(default)]

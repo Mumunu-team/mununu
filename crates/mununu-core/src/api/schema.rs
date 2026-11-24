@@ -340,6 +340,10 @@ mod tests {
                     "clk_a (posedge, 3 cells)".into(),
                     "clk_b (posedge, 1 cell)".into(),
                 ],
+                merged_clock_transfer: Some(crate::adapter::yosys::MergedClockTransfer {
+                    transfers: crate::adapter::yosys::MergedClockVerdicts::ViolatedIfClocksCoincide,
+                    shapes: vec![crate::adapter::yosys::MergedClockShape::InputClocks],
+                }),
                 applied_config_values: vec!["cfg=7".into()],
                 cutpoint_signals: vec!["fits".into()],
                 fault_model: Some("fault: a (≤1, warm-up 10)".into()),

@@ -6,7 +6,7 @@ from C source, compose it with a peripheral protocol-spec automaton, and
 evaluate cross-boundary mu-calculus properties on the composition.
 
 > Source of truth: [`run.sh`](run.sh) — surface: CLI — the script invokes
-> `mununu codesign extract-c` ([`crates/mununu-cli/src/main.rs`](../../../../crates/mununu-cli/src/main.rs#L6386))
+> `mununu codesign extract-c` ([`crates/mununu-cli/src/main.rs`](../../../../crates/mununu-cli/src/main.rs#L6388))
 > and `mununu context eval`, both shipped CLI subcommands.
 
 ## What this recipe demonstrates
