@@ -777,7 +777,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1978) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L509) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1237) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1976) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L509) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1237) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L261) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -1103,7 +1103,7 @@ with its assertion code compiled out, which is what the shim is for.
 
 ### One clock per model: multi-clock designs are refused, `--merge-clock-domains` (mununu#758)
 
-> Source of truth: [`clock_domains_with_hierarchy`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify-liveness*`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv cdc-lint`, `sv mutate`); API `merge_clock_domains`, reported in `notes` (`sv verify-auto`) or `lift_notes` (the other verbs)
+> Source of truth: [`clock_domains_with_hierarchy`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify-liveness*`, `sv verify-recoverability`, `sv cegar`, `sv check-fsm`, `sv lint`, `sv cdc-lint`, `sv mutate`); API `merge_clock_domains`, reported in `notes` (`sv verify-auto`) or `lift_notes` (the other verbs)
 
 The BTOR2 model has one implicit clock: every register steps on it. After `flatten` the lift writes
 a netlist snapshot and counts the clock domains — every distinct (clock net, edge) that a flop or
@@ -1155,10 +1155,9 @@ module), and says it is a mununu defect: the lift's own script wrote the file. U
 lifted again. Before mununu#1198 the scan read such a text as a design with no storage cell, and a
 cache hit on it lifted a multi-clock design with no refusal and no note.
 
-An operation that lifts SystemVerilog and does not take the flag (`sv discover`, `sv cegar` on the
-command line, `POST /translate` with `sv-yosys`, `verify project`, `context import`) refuses such
-a design too. Its refusal says that the operation has no opt-in, and names the verbs that have
-one.
+An operation that lifts SystemVerilog and does not take the flag (`sv discover`, `POST /translate`
+with `sv-yosys`, `verify project`, `context import`) refuses such a design too. Its refusal says
+that the operation has no opt-in, and names the verbs that have one.
 
 What drives a clock net is classified by one walk (mununu#1148, mununu#1180), and every kind but
 a top-level input (an `inout` counts) is an abstraction decision. A **`$`-cell** (a gating `$and`,
@@ -1274,13 +1273,15 @@ decisions; the other verbs returned a result on the cut or re-sized model with n
 
 ### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
 
-> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L181) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
+> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L202) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
 
 A design that the lift refuses for its clock domains still has two questions to answer: whether
 every crossing is built as a synchroniser (structural), and whether the behaviour across the
 clocks is right (functional). `sv cdc-lint` answers the first one inside mununu. It lifts with the
-domains merged, reads the flattened netlist in which every flop keeps its own clock, and
-classifies each flop that samples a flop of another clock net:
+domains merged, reads the flattened netlist in which every storage cell keeps its own clock, and
+classifies each storage cell that samples one of another clock net. A memory is storage too
+(mununu#1230): a clocked write port samples its enable, its address and its data on the write
+clock, and the word it stores is a source on that clock.
 
 | `kind` | `outcome` | meaning |
 |---|---|---|
@@ -1290,15 +1291,22 @@ classifies each flop that samples a flop of another clock net:
 | `multi-bit-bus` | decided | several bits of one source register through parallel synchronisers; a reach query decides whether the source changes at most one bit per source cycle (gray step): `holds` if so, `violated` with the reason otherwise |
 | `qualified-data` | `unknown` | data captured directly, under an enable or mux select synchronised from the source domain; safe if the data holds while the qualifier is asserted |
 | `reconvergence` | `unknown` | one destination flop combines two separately synchronised signals from the same source domain |
-| `dual-clock-memory` | `unknown` | a memory written on one clock and read on another (an asynchronous FIFO); its pointers appear as ordinary rows |
+| `dual-clock-memory` | `unknown` | a register that reads, on its own clock, a word a memory stores on another (the read side of an asynchronous FIFO), or a memory written on more than one clock; safe only if no word is read while it is written, which is a functional property. The pointers, and every value a write port captures, appear as ordinary rows |
 
 The gray-step query runs on the merged model, which is exact for the source register when its
-whole sequential cone lies in its own domain; when the cone reaches another domain the row stays
-`unknown` and says so. The reset is pinned inactive after the post-reset state, as in
-`check-fsm`. The report's `notes` state what the lint does not see: primary inputs carry no clock,
-so a crossing that starts at an input port is not checked, and asynchronous set / reset pins,
-latches and black-boxed modules are not analysed. The worst row drives `--fail-on` (exit 2 on a
-`violated` row by default); the JSON is `SvCdcLintResponse`, the same type the API returns.
+whole sequential cone lies in its own domain; when the cone reaches another domain, also through
+a memory written on another clock, the row stays `unknown` and names what it reads. The reset is
+pinned inactive after the post-reset state, as in `check-fsm`. The report's `notes` state what the
+lint does not see: primary inputs carry no clock, so a crossing that starts at an input port is
+not checked, and asynchronous set / reset pins, latches (a memory port written without a clock
+among them) and black-boxed modules are not analysed. The worst row drives `--fail-on` (exit 2 on
+a `violated` row by default); the JSON is `SvCdcLintResponse`, the same type the API returns.
+
+Until 2026-11-23 the lint did not read memories (mununu#1230). A value that a write port captured
+from another domain, a word read on another clock than the one that stored it, and a read address
+from another domain got no row, and a design whose second clock only wrote a memory was reported
+as one clock net with `holds`. A `holds` from an earlier build on a design with a memory between
+two clocks says nothing about that memory: run the lint again.
 
 ```bash
 mununu sv cdc-lint rps_top.sv --top rps_top | jq '.crossings[] | {kind, outcome, source, destination}'
@@ -2256,7 +2264,7 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3625) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3738) — surface: (CLI+API+UI)
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3623) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3736) — surface: (CLI+API+UI)
 
 `sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
 yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
@@ -2344,7 +2352,7 @@ design. The lift reports the retry as the `lift-retry` note (`sv verify-auto`: i
 (mununu#1229). Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3678) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3676) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L92) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions

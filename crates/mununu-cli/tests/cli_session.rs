@@ -671,6 +671,51 @@ const MERGE_ROWS: &[MergeRow] = &[
         args: &["--fail-on", "none"],
         report: MergeReport::Domains,
     },
+    MergeRow {
+        name: "cegar (JSON)",
+        verb: "cegar",
+        args: &[
+            "--formula",
+            "nu X. < true > X",
+            "--predicate",
+            "st == 2",
+            "--json",
+        ],
+        report: MergeReport::LiftNotes,
+    },
+    MergeRow {
+        name: "cegar (text)",
+        verb: "cegar",
+        args: &["--formula", "nu X. < true > X", "--predicate", "st == 2"],
+        report: MergeReport::PlanText,
+    },
+    MergeRow {
+        name: "cegar (--engine symbolic, JSON)",
+        verb: "cegar",
+        args: &[
+            "--formula",
+            "nu X. <> X",
+            "--predicate",
+            "st == 2",
+            "--engine",
+            "symbolic",
+            "--json",
+        ],
+        report: MergeReport::LiftNotes,
+    },
+    MergeRow {
+        name: "cegar (--engine symbolic, text)",
+        verb: "cegar",
+        args: &[
+            "--formula",
+            "nu X. <> X",
+            "--predicate",
+            "st == 2",
+            "--engine",
+            "symbolic",
+        ],
+        report: MergeReport::PlanText,
+    },
 ];
 
 /// Whether `stdout` reports a merge of clock domains, read where the row's command carries it.
@@ -833,6 +878,165 @@ fn every_sv_verb_under_merge_clock_domains_prints_the_merged_domains() -> Result
         wrong.len(),
         2 * MERGE_ROWS.len(),
         wrong.join("\n")
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// mununu#1190 — `sv cegar` lifts what the lift arguments of the other `sv` verbs describe.
+// ---------------------------------------------------------------------------------------------
+
+/// `st` is clocked by `clk_b` when the parameter `SPLIT` is not zero and by `clk_a` otherwise:
+/// the parameter decides whether the design has one clock domain or two, so a run shows whether
+/// `--param` reached the lift.
+const CLOCKS_BY_PARAMETER: &str = "\
+module top #(parameter int SPLIT = 0)
+           (input logic clk_a, input logic clk_b, input logic rst, input logic req,
+            output logic gnt);
+  logic seen;
+  logic [1:0] st;
+  always_ff @(posedge clk_a)
+    if (rst) seen <= 1'b0;
+    else seen <= req;
+  if (SPLIT != 0) begin : g_two
+    always_ff @(posedge clk_b)
+      if (rst) st <= 2'd0;
+      else st <= seen ? 2'd1 : 2'd0;
+  end else begin : g_one
+    always_ff @(posedge clk_a)
+      if (rst) st <= 2'd0;
+      else st <= seen ? 2'd1 : 2'd0;
+  end
+  assign gnt = (st == 2'd1);
+endmodule
+";
+
+/// A top whose next-state logic is a module in another file of the same directory.
+const DIR_TOP: &str = "\
+module top(input logic clk, input logic rst, output logic hit);
+  logic [1:0] cnt, nxt;
+  step u_step(.a(cnt), .y(nxt));
+  always_ff @(posedge clk)
+    if (rst) cnt <= 2'd0;
+    else cnt <= nxt;
+  assign hit = (cnt == 2'd3);
+endmodule
+";
+const DIR_STEP: &str = "\
+module step(input logic [1:0] a, output logic [1:0] y);
+  assign y = a + 2'd1;
+endmodule
+";
+
+/// The wire value of the note a lift under `--param` owes its reader.
+const PARAMETER_KIND: &str = "parameter-override";
+
+/// mununu#1190 — `sv cegar` takes the design the way every lifting `sv` verb does: a module
+/// parameter set with `--param` sizes the design it lifts (here: decides its clock domains), a
+/// design of two domains is refused until `--merge-clock-domains`, and `--design-dir` assembles
+/// the sources of a directory with no file named. Each run's report says what the lift did.
+#[test]
+fn sv_cegar_lifts_the_design_its_lift_arguments_describe() -> Result<(), Box<dyn Error>> {
+    if !slang_lift_available() {
+        eprintln!("skipped: yosys with read_slang is not available on this host");
+        return Ok(());
+    }
+    let temp = tempdir()?;
+    let by_param = temp.path().join("by_param.sv");
+    fs::write(&by_param, CLOCKS_BY_PARAMETER)?;
+    let rtl = temp.path().join("rtl");
+    fs::create_dir(&rtl)?;
+    fs::write(rtl.join("top.sv"), DIR_TOP)?;
+    fs::write(rtl.join("step.sv"), DIR_STEP)?;
+
+    let cegar = |design: &[&str], predicate: &str, more: &[&str]| {
+        assert_cmd::cargo::cargo_bin_cmd!("mununu")
+            .current_dir(temp.path())
+            .args(["sv", "cegar"])
+            .args(design)
+            .args(["--top", "top", "--quiet", "--json"])
+            .args(["--formula", "nu X. < true > X", "--predicate", predicate])
+            .args(more)
+            .output()
+    };
+    let report = |output: &std::process::Output| -> Result<serde_json::Value, Box<dyn Error>> {
+        assert!(
+            output.status.success(),
+            "exit {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let kinds = |report: &serde_json::Value| -> Vec<String> {
+        report["lift_notes"]
+            .as_array()
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter_map(|n| n["kind"].as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let file = [by_param.to_str().unwrap()];
+
+    // The parameter's default: one clock domain, nothing for the lift to report.
+    let plain = report(&cegar(&file, "st == 1", &[])?)?;
+    assert!(
+        plain.get("lift_notes").is_none(),
+        "a lift with nothing to say adds no `lift_notes`: {plain}"
+    );
+
+    // `--param SPLIT=1` gives the design a second domain: refused without the opt-in.
+    let refused = cegar(&file, "st == 1", &["--param", "SPLIT=1"])?;
+    assert!(
+        !refused.status.success(),
+        "a design of two clock domains lifts only under --merge-clock-domains; stdout: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    // The refusal names the flag and, among the verbs that take it, the verb that was run.
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    for name in ["--merge-clock-domains", "`sv cegar`"] {
+        assert!(
+            refusal.contains(name),
+            "the refusal does not name {name}: {refusal}"
+        );
+    }
+
+    // With the opt-in the report carries both decisions of the lift.
+    let merged = report(&cegar(
+        &file,
+        "st == 1",
+        &["--param", "SPLIT=1", "--merge-clock-domains"],
+    )?)?;
+    let merged_kinds = kinds(&merged);
+    for kind in [MERGED_KIND, PARAMETER_KIND] {
+        assert!(
+            merged_kinds.iter().any(|k| k == kind),
+            "`lift_notes` lacks `{kind}`: {merged_kinds:?}"
+        );
+    }
+    let overridden: Vec<&str> = merged["lift_notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|n| n["kind"] == PARAMETER_KIND)
+        .flat_map(|n| n["items"].as_array().into_iter().flatten())
+        .filter_map(|item| item.as_str())
+        .collect();
+    assert_eq!(overridden, ["SPLIT=1"]);
+
+    // A directory, with no file named: the instantiated module comes from its own file.
+    let from_dir = report(&cegar(
+        &["--design-dir", rtl.to_str().unwrap()],
+        "cnt == 0",
+        &[],
+    )?)?;
+    assert!(
+        from_dir["iterations"].as_u64().is_some_and(|n| n > 0),
+        "the run over the assembled design reports its iterations: {from_dir}"
     );
     Ok(())
 }
