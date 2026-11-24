@@ -1,10 +1,10 @@
 //! The flattened netlist as a circuit of values (2026-10-30): yosys's `write_json` after
-//! `flatten` and an `opt_clean` that keeps every named net — the same artifact the source map reads (`cell_sources`,
-//! `trace_aliases`) — parsed into cells with their `src` spans, evaluated on one cycle's
-//! `(state, inputs)`, and walked backwards along a counterexample to the statements that decided
-//! it: the **trace-relative slice** (path slicing, Jhala & Majumdar, PLDI 2005: keep what lay on
-//! the concrete path and controlled its outcome; drop the branches not taken and the operands that
-//! did not matter).
+//! `flatten` and an `opt_clean` that keeps every named net — the same artifact the source map
+//! reads (`cell_sources`, `trace_aliases`) — parsed into cells with their `src` spans, evaluated
+//! on one cycle's `(state, inputs)`, and walked backwards along a counterexample to the statements
+//! that decided it: the **trace-relative slice** (path slicing, Jhala & Majumdar, PLDI 2005: keep
+//! what lay on the concrete path and controlled its outcome; drop the branches not taken and the
+//! operands that did not matter).
 //!
 //! Display only — no verdict is read or changed. The evaluation is exact where it evaluates
 //! (`simlib.v` semantics for the cell types below) and **widens** where it does not: a cell type
