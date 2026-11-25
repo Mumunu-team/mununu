@@ -433,9 +433,15 @@ See [Adapter Formats](Adapter-Formats.md) for supported formats and limitations.
 
 ### `mununu sv emit-btor2-per-module`
 
-Run Yosys with `hierarchy -check` (no `flatten`) and emit one BTOR2 per
-submodule reachable from the top — the per-submodule IR the KMTS lifter and
-multi-module composition consume. Requires `yosys` on `PATH`. Run
+Read the design with its module boundaries kept and emit one BTOR2 per
+distinct elaboration of each submodule: every instance below the top is lifted
+as the design elaborates it, with the parameter values of that instance, and
+instances whose models are the same share one file. A module type whose
+instances are all one model is written as `<module>.btor2`; a type whose
+instances differ gets one `<module>$<instance path>.btor2` per distinct model,
+and the verb prints the instances each file is the model of. This is the
+per-submodule IR the KMTS lifter and multi-module composition consume. One
+yosys run per instance; requires a `yosys` with `read_slang` on `PATH`. Run
 `mununu sv emit-btor2-per-module --help` for flags.
 
 See [RTL Verification Pipeline](RTL-Verification-Pipeline) for the full workflow.

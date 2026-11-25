@@ -1,6 +1,12 @@
 # sv_multi_module — SystemVerilog multi-module composition under the
 # verify framework, via the KMTS `sv-yosys` pipeline.
 #
+# REFUSED AT PRESENT: `mununu verify` answers this file with a validation
+# error. `multi_module = true` is refused until mununu#1249 is fixed: the
+# per-module composition leaves the top module's own logic out of the model.
+# The file is kept as the option's example for when it comes back; see the
+# README for what the tool prints today.
+#
 # Migrated from the native `mununu_sv_multi_v1` sidecar form (S.2b,
 # native-parser deletion). A single `[[sources]]` block with
 # `files = [top.sv, module_1.sv, module_2.sv]` and

@@ -271,8 +271,10 @@ pub struct MultiModuleComposition {
 /// Pipeline: yosys per-module BTOR2 with net-driving outputs surfaced +
 /// top-netlist connectivity + port directions
 /// ([`super::translate_sv_per_module_with_connectivity`]) → realise each
-/// module *type*'s CTXDSL into a `Clts` (inline valuations carry the
-/// surfaced output values) → rewrite each *instance* for composition
+/// per-module model's CTXDSL into a `Clts` (inline valuations carry the
+/// surfaced output values; mununu#1248 — a model is the elaboration of the
+/// instances it lists, so two instances of one type that differ are two
+/// models) → rewrite each *instance* for composition
 /// ([`prepare_instance_for_composition`], classifying each connected port as
 /// a reader input or driver output by direction) → synchronously
 /// fold-compose the instances ([`crate::composition::compose`]). The result
@@ -297,8 +299,12 @@ pub fn compose_sv_multi_module(
         });
     }
 
-    // Realise each module type's CTXDSL into a Clts once (cache by type).
-    let mut clts_by_type: HashMap<String, Clts<DefaultStateIdx, DefaultLabelIdx>> = HashMap::new();
+    // Realise each per-module model's CTXDSL into a Clts once, and find it by the module of
+    // every instance it is the elaboration of (mununu#1248: an instance names its own module,
+    // not its type, so an instance is never given the model of a differently elaborated one).
+    let mut realised: Vec<Clts<DefaultStateIdx, DefaultLabelIdx>> =
+        Vec::with_capacity(outputs.len());
+    let mut model_of_instance_module: HashMap<&str, usize> = HashMap::new();
     for out in &outputs {
         let clts = realize_module_clts(&out.output.ctxdsl).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -308,13 +314,19 @@ pub fn compose_sv_multi_module(
             ),
             location: None,
         })?;
-        clts_by_type.insert(out.module_name.clone(), clts);
+        for instance_module in &out.instance_modules {
+            model_of_instance_module.insert(instance_module.as_str(), realised.len());
+        }
+        realised.push(clts);
     }
 
     // Rewrite each instance for composition (relabel readers + driver labels).
     let mut prepared: Vec<(String, Clts<DefaultStateIdx, DefaultLabelIdx>)> = Vec::new();
     for inst in &connectivity {
-        let Some(base) = clts_by_type.get(&inst.module_type) else {
+        let Some(base) = model_of_instance_module
+            .get(inst.module_type.as_str())
+            .map(|&model| &realised[model])
+        else {
             continue; // type not lifted (black-box / unsupported) — skip
         };
         let dirs = directions.get(&inst.module_type);

@@ -160,8 +160,9 @@ pub struct SourceSection {
     /// A2.4. Recognised values today (subject to A2 evolution):
     /// `"c-codesign"` (firmware C via `codesign::c_extract_llvm`),
     /// `"sv-yosys"` / `"yosys"` (SystemVerilog via sv2v→Yosys→BTOR2 —
-    /// the sole SV route since S.2b; `multi_module = true` opts into
-    /// top-netlist composition), `"ctxdsl"` (raw
+    /// the sole SV route since S.2b; `multi_module = true` asks for the
+    /// per-module composition, which is refused until mununu#1249 is
+    /// fixed), `"ctxdsl"` (raw
     /// hand-authored automaton), `"xstate"`, `"crewai"` (CrewAI
     /// agentic JSON), `"langgraph"` (LangGraph StateGraph JSON),
     /// `"microcode"` (restricted JSON microcode form — plan Part 5.5),
@@ -423,6 +424,18 @@ pub enum ConfigIssue {
         key: String,
         hint: &'static str,
     },
+    /// `[[sources]]` entry sets an `options` value the tool refuses until a defect behind it is
+    /// fixed: the run would go through, and its verdicts would be about a model that is not
+    /// the design's. `multi_module = true` on an `sv-yosys` source (mununu#1249).
+    SourceOptionRefused {
+        source_id: String,
+        /// The option as the project file writes it, value included.
+        option: &'static str,
+        /// What the run would get wrong, and whose defect it is.
+        why: &'static str,
+        /// What the project file can say instead.
+        instead: &'static str,
+    },
     /// `[[sources]]` entry had `count = 0` — meaningless. Use `count
     /// = 1` (or omit the field) for a single instance, `>= 2` for
     /// parameterised expansion.
@@ -530,6 +543,15 @@ impl fmt::Display for ConfigIssue {
             } => write!(
                 f,
                 "[[sources]] `{source_id}`: options.{key} is no longer supported — {hint}"
+            ),
+            ConfigIssue::SourceOptionRefused {
+                source_id,
+                option,
+                why,
+                instead,
+            } => write!(
+                f,
+                "[[sources]] `{source_id}`: options.{option} is refused — {why}. {instead}"
             ),
             ConfigIssue::SourceCountZero { source_id } => write!(
                 f,
@@ -671,6 +693,34 @@ pub const PLAIN_OPTION_KEYS: &[&str] = &[
     "top",
 ];
 
+/// The adapter whose `multi_module` option asks for the per-module composition.
+pub(crate) const PER_MODULE_COMPOSITION_ADAPTER: &str = "sv-yosys";
+
+/// Whether a source's `options` ask for the per-module composition: `multi_module` set to the
+/// boolean `true`. The one reader of the option — the validation that refuses it and the
+/// dispatcher that would run it both call this, so the two cannot come to read it differently.
+/// Any other value (absent, `false`, a string) is the flattened lift.
+pub(crate) fn asks_for_per_module_composition(options: &BTreeMap<String, toml::Value>) -> bool {
+    options
+        .get("multi_module")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// What a per-module composition would get wrong (mununu#1249), in the words of
+/// [`ConfigIssue::SourceOptionRefused`]. The option was first refused for mununu#1248 as well
+/// (each module lifted at its default parameter values); that one is fixed, and a message
+/// names only what is open.
+const PER_MODULE_COMPOSITION_WHY: &str = "the per-module composition leaves the top module's own \
+     logic out of the model (mununu#1249), so a verdict on that model is not a verdict on the \
+     design; that is a mununu defect, not something to change in the design, and the option \
+     comes back when it is fixed";
+
+/// What the project file can say instead of `multi_module = true`.
+const PER_MODULE_COMPOSITION_INSTEAD: &str = "Remove the key or set `multi_module = false`: the \
+     design is then lifted flattened, as one module, and a property names the signals of that \
+     model instead of `<instance>__<signal>`";
+
 fn path_to_option(p: PathBuf) -> String {
     p.to_string_lossy().into_owned()
 }
@@ -809,6 +859,20 @@ impl VerifyConfig {
                     source_id: source.id.clone(),
                     key: "use_sv2v".to_string(),
                     hint: "the SystemVerilog lift runs yosys-slang's `read_slang` only; remove the key",
+                });
+            }
+            // mununu#1249 — the per-module composition answers on a model that is
+            // not the design's. Refused here, before any file is read or lifted, on every entry
+            // that validates (verify and the alphabet inspection, command line and HTTP).
+            // SOUNDNESS: a refusal gives no verdict; nothing is approximated.
+            if source.adapter == PER_MODULE_COMPOSITION_ADAPTER
+                && asks_for_per_module_composition(&source.options)
+            {
+                issues.push(ConfigIssue::SourceOptionRefused {
+                    source_id: source.id.clone(),
+                    option: "multi_module = true",
+                    why: PER_MODULE_COMPOSITION_WHY,
+                    instead: PER_MODULE_COMPOSITION_INSTEAD,
                 });
             }
             // Memory-abstraction posture: validate kind + fence_semantics
@@ -1089,8 +1153,9 @@ members = ["light", "ghost"]
     /// it": every `.get("<key>")` in the orchestrator's non-test code must be named by exactly one
     /// of [`PATH_OPTION_KEYS`] (confined), [`EXECUTABLE_OPTION_KEYS`] (refused under a root) or
     /// [`PLAIN_OPTION_KEYS`]. A new path-bearing option nobody classified would otherwise be read
-    /// unconfined. The options map does not leave `orchestrator.rs` (no other module takes a
-    /// `BTreeMap<String, toml::Value>`), so that file is the whole read surface.
+    /// unconfined. The options map does not leave `orchestrator.rs` but for one function of this
+    /// file, `asks_for_per_module_composition`, which reads the plain key `multi_module`; so
+    /// that file is the whole read surface of the keys that name a path or an executable.
     #[test]
     fn every_option_key_the_orchestrator_reads_is_classified() {
         let src = include_str!("orchestrator.rs");
@@ -1113,6 +1178,89 @@ members = ["light", "ghost"]
                 n, 1,
                 "option `{key}` is classified {n} times; add it to one list"
             );
+        }
+    }
+
+    /// A one-source project whose source has `adapter` and, when given, the line `multi_module`
+    /// of `[sources.options]`.
+    fn one_source_project(adapter: &str, multi_module: Option<&str>) -> VerifyConfig {
+        let options = match multi_module {
+            Some(value) => format!("[sources.options]\nmulti_module = {value}\n"),
+            None => String::new(),
+        };
+        let toml_src = format!(
+            "[project]\nname = \"p\"\n\n[[sources]]\nid = \"system\"\nadapter = \"{adapter}\"\n\
+             files = [\"top.sv\"]\n\n{options}\n[composition]\nsemantics = \"synchronous\"\n\
+             members = [\"system\"]\n"
+        );
+        VerifyConfig::from_toml(&toml_src).expect("the project parses")
+    }
+
+    /// mununu#1249 (and mununu#1248 until its fix) — the per-module composition is refused where
+    /// it would run, and only there. What varies is what the project file says: the adapter, and
+    /// the value of `multi_module`. The dispatcher reads the option with the function the refusal reads it
+    /// with (`asks_for_per_module_composition`), under the adapter the refusal names
+    /// (`PER_MODULE_COMPOSITION_ADAPTER`), so "refused" below is "would have been composed
+    /// per module".
+    #[test]
+    fn x1248_the_per_module_composition_is_refused_exactly_where_it_would_run() {
+        // (adapter, the `multi_module` line, refused)
+        let cases: &[(&str, Option<&str>, bool)] = &[
+            ("sv-yosys", Some("true"), true),
+            ("sv-yosys", Some("false"), false),
+            ("sv-yosys", None, false),
+            // Not a boolean: the option's reader takes it as unset, and the flattened lift runs.
+            ("sv-yosys", Some("\"true\""), false),
+            ("sv-yosys", Some("1"), false),
+            // An adapter that never reads the key composes nothing per module.
+            ("ctxdsl", Some("true"), false),
+            ("xstate", Some("true"), false),
+        ];
+        for (adapter, multi_module, refused) in cases {
+            let cfg = one_source_project(adapter, *multi_module);
+            assert_eq!(
+                asks_for_per_module_composition(&cfg.sources[0].options)
+                    && *adapter == PER_MODULE_COMPOSITION_ADAPTER,
+                *refused,
+                "{adapter} with multi_module {multi_module:?}: what the dispatcher would do"
+            );
+            let refusals = cfg
+                .validate()
+                .iter()
+                .filter(|i| matches!(i, ConfigIssue::SourceOptionRefused { .. }))
+                .count();
+            assert_eq!(
+                refusals,
+                usize::from(*refused),
+                "{adapter} with multi_module {multi_module:?}"
+            );
+        }
+    }
+
+    /// The refusal names the source, the option as the project file writes it, the open issue,
+    /// and a value of the same key the project file can set instead.
+    #[test]
+    fn x1248_the_refusal_names_the_source_the_option_and_a_key_the_file_can_set() {
+        let issues = one_source_project("sv-yosys", Some("true")).validate();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let ConfigIssue::SourceOptionRefused {
+            source_id,
+            option,
+            why,
+            instead,
+        } = &issues[0]
+        else {
+            panic!("expected the refusal, got {:?}", issues[0]);
+        };
+        assert_eq!(source_id, "system");
+        assert_eq!(*option, "multi_module = true");
+        assert!(why.contains("mununu#1249"), "{why}");
+        // mununu#1248 is fixed: a refusal that named it would send the reader to a closed issue.
+        assert!(!why.contains("mununu#1248"), "{why}");
+        assert!(instead.contains("multi_module = false"), "{instead}");
+        let shown = issues[0].to_string();
+        for part in ["system", *option, *why, *instead] {
+            assert!(shown.contains(part), "{shown}");
         }
     }
 

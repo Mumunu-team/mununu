@@ -2,6 +2,19 @@
 
 > **Source of truth:** [`crates/mununu-core/src/verify/orchestrator.rs`](../../../crates/mununu-core/src/verify/orchestrator.rs) (`dispatch_sv_yosys`) — surface: CLI+API+UI.
 
+> **Refused at present.** `mununu verify` and `POST /api/v1/verify` answer a
+> project that sets `multi_module = true` with a validation error, until
+> mununu#1249 is fixed: the per-module composition leaves the top module's
+> own logic out of the model, so a verdict on that model is not a verdict
+> on the design. This
+> example is kept as the option's example for when it comes back.
+> `transcript.txt` holds what the tool prints for it today, which is the
+> refusal; everything below describes the composition the option asks for,
+> not something the tool runs now. To verify a design of this shape today,
+> remove the key or set `multi_module = false`: the design is then lifted
+> flattened, as one module, and the consumer's state is `u_consumer_state`
+> in that model, not `u_consumer__state`.
+
 A producer and a consumer SystemVerilog module composed through the KMTS
 `sv-yosys` multi-module pipeline. A **top module**
 (`producer_consumer_system_top.sv`) structurally instantiates both
@@ -34,8 +47,8 @@ instances. The composed automaton is named `Circuit`.
 | `producer.sv` | RTL for the producer module (3-state FSM driving `valid`). |
 | `consumer.sv` | RTL for the consumer module (3-state FSM reacting to `valid`). |
 | `verify.toml` | Single source with `files = [top, producer, consumer]` + `multi_module = true`. |
-| `validate.sh` | End-to-end reproduction (guards on `yosys`). |
-| `transcript.txt` | Checked-in expected output. |
+| `validate.sh` | Runs `mununu verify` on the project and writes the transcript (guards on `yosys`, which the composition needs when it is back). |
+| `transcript.txt` | Checked-in output: at present, the refusal. |
 
 ## Reproduce
 

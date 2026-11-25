@@ -2548,46 +2548,69 @@ pub(crate) fn blackboxed_module_names(hier_json: &str) -> Vec<String> {
 /// deliberate `(* blackbox *)` cut (`cutpoint -blackbox`, next-less states, verdict kept).
 pub const MISSING_MODULE_ATTR: &str = "mununu_missing_module";
 
-/// One submodule's translated output, as returned by
-/// [`translate_sv_per_module`]. The `btor2_path` is `Some(..)` when
-/// `yopts.per_module_output_dir` was set (the BTOR2 file persists);
-/// `None` when the per-call tempdir is in use.
+/// One model of the per-module lift, as returned by [`translate_sv_per_module`]: the
+/// elaboration of one or more instances of a module, as the design instantiates them.
+///
+/// Instances of one module type whose elaborations are the same model share one output; a type
+/// whose instances differ (a parameter override, a `defparam`, a type parameter, a generate
+/// choice) has one output per distinct elaboration (mununu#1248).
 #[derive(Debug, Clone)]
 pub struct PerModuleOutput {
+    /// The module type (`producer`) when every instance of the type is this one model; for a
+    /// type whose instances differ, the first of [`Self::instance_modules`]
+    /// (`child$top.u_a`). Also the stem of the persisted file.
     pub module_name: String,
+    /// The module type the instances are instances of (`child`), whichever of the two
+    /// [`Self::module_name`] is.
+    pub module_type: String,
+    /// The modules of the hierarchy snapshot this model is the elaboration of, sorted: one per
+    /// instance, named `<type>$<instance path>` by the reader. For a design with no
+    /// submodule it is the top itself.
+    pub instance_modules: Vec<String>,
+    /// `Some(..)` when `yopts.per_module_output_dir` was set (the BTOR2 file persists); `None`
+    /// when the per-call staging directory is in use.
     pub btor2_path: Option<PathBuf>,
     pub output: AdapterOutput,
 }
 
-/// Translate a SystemVerilog design into one [`AdapterOutput`] *per
-/// submodule*, with Yosys's `hierarchy -check` preserving module
-/// boundaries and no `flatten` pass running anywhere on the path. This
-/// is the R.0b KMTS-pipeline frontend: each submodule reachable from
-/// the top is emitted as a separate BTOR2 file, then read back through
-/// the existing BTOR2 adapter to produce a per-submodule
-/// `AdapterOutput`.
+impl PerModuleOutput {
+    /// The hierarchical paths of the instances this model is the elaboration of
+    /// (`top.u_a`), in the order of [`Self::instance_modules`]. Empty for a module that is not
+    /// an instance of another: a design with no submodule.
+    pub fn instance_paths(&self) -> Vec<&str> {
+        instance_paths_of(&self.module_type, &self.instance_modules)
+    }
+}
+
+/// The instance path of each `<type>$<instance path>` module name of one module type; a name
+/// that is not one (the type itself: a module that is nobody's instance) has none.
+fn instance_paths_of<'a>(module_type: &str, instance_modules: &'a [String]) -> Vec<&'a str> {
+    instance_modules
+        .iter()
+        .filter_map(|module| module.strip_prefix(module_type)?.strip_prefix('$'))
+        .collect()
+}
+
+/// Translate a SystemVerilog design into one [`AdapterOutput`] per *distinct elaboration of a
+/// submodule*: the reader keeps the module boundaries, each instance's module is emitted as its
+/// own BTOR2 and read back through the BTOR2 adapter, and instances whose BTOR2 is the same
+/// model are grouped ([`group_instance_models`]).
 ///
-/// Strategy: two-pass invocation of Yosys.
+/// Strategy: two passes of yosys over ONE read of the design.
 ///
-/// 1. **Discovery pass.** Run Yosys with the user's `read_verilog`
-///    sources + `hierarchy -check -top <top>` + `proc` + `write_json`.
-///    This produces a hierarchy snapshot from which the submodule list
-///    is enumerated. The pass runs even when there is only one module
-///    in the design (returning a singleton list).
-/// 2. **Per-module emission pass.** For each submodule, run Yosys
-///    again, this time with `hierarchy -check -top <m>` (no
-///    `flatten`), then the same `async2sync; chformal -lower;
-///    dffunmap; setundef …; write_btor` tail as the legacy
-///    single-BTOR2 path. Each per-module BTOR2 is fed through the
-///    BTOR2 adapter to produce an `AdapterOutput`.
+/// 1. **Discovery pass.** `read_slang --keep-hierarchy`, `hierarchy -check -top <top>`, `proc`
+///    and `write_json`. The snapshot has one module per instance, named
+///    `<type>$<instance path>`, elaborated as the design instantiates it. The pass runs even
+///    when there is only one module in the design (the list is then the top alone).
+/// 2. **Per-instance emission pass.** For each instance's module, the same read, then
+///    `hierarchy -check -top <type>$<instance path>`, `flatten` (the instances below it), and
+///    the `async2sync; chformal -lower; dffunmap; setundef …; write_btor` tail of the
+///    single-BTOR2 path. mununu#1248 — the pass used to read the sources again with
+///    `--top <type>`, which elaborates the type as a top of its own, at its DEFAULT parameters:
+///    an instance the design overrides was lifted as another module.
 ///
-/// The cost (~N Yosys invocations for an N-submodule design, each re-reading
-/// the whole source set) is acceptable for the small multi-module fixtures the
-/// M.0–M.4 validation milestones target, but blows up on a large real design —
-/// each Yosys call is therefore capped at [`PER_MODULE_YOSYS_TIMEOUT`] and fails
-/// with an actionable error rather than hanging indefinitely. A single-invocation
-/// variant using Yosys `select` is feasible in principle but introduces
-/// select-scope subtleties that the two-pass shape avoids.
+/// The cost is one yosys run per instance, each re-reading the whole source set. Each run is
+/// capped at [`PER_MODULE_YOSYS_TIMEOUT`] and fails with an error rather than hanging.
 pub fn translate_sv_per_module(
     content: &str,
     options: &AdapterOptions,
@@ -2597,7 +2620,8 @@ pub fn translate_sv_per_module(
         .map(|(outputs, _hier)| outputs)
 }
 
-/// Per-module port-direction map: `module type → (port → direction)`.
+/// Per-module port-direction map: `module → (port → direction)`, keyed by the module names of
+/// the hierarchy snapshot (under the slang reader, one `<type>$<instance path>` per instance).
 pub type PortDirectionsPerModule =
     HashMap<String, HashMap<String, crate::controllability::BoundaryDirection>>;
 
@@ -2606,10 +2630,11 @@ pub type PortDirectionsPerModule =
 /// from the same discovery-pass hierarchy snapshot the per-module emission
 /// already produces (no extra Yosys invocation). This is the netlist input
 /// the KMTS multi-module composition driver (R-MM-4d) needs to wire the
-/// per-module KMTSes together: it pairs each [`PerModuleOutput`] (keyed by
-/// module *type*) with the [`InstanceConnections`] (keyed by *instance*,
-/// carrying the port→net map) and the directions (so each connected port is
-/// classified as a reader input vs a driver output).
+/// per-module KMTSes together: an [`InstanceConnections`] (keyed by *instance*,
+/// carrying the port→net map) names the instance's module, which is one of the
+/// [`PerModuleOutput::instance_modules`] of exactly one output (mununu#1248: the
+/// model of THAT instance, not of its type), and a key of the directions (so each
+/// connected port is classified as a reader input vs a driver output).
 ///
 /// Unlike the plain entry, this path **surfaces net-driving combinational
 /// outputs** (R-MM-4b) in every per-module lift — the driver needs those
@@ -2636,9 +2661,9 @@ pub fn translate_sv_per_module_with_connectivity(
     Ok((outputs, connectivity, directions))
 }
 
-/// R-MM-4d — Output ports that drive a connected net: a port `P` of module
-/// type `M` such that `direction(M, P) == Output` and `P` appears in some
-/// instance-of-`M`'s `port_to_net`. These are surfaced as per-state
+/// R-MM-4d — Output ports that drive a connected net: a port `P` of an instance's
+/// module `M` such that `direction(M, P) == Output` and `P` appears in the
+/// instance's `port_to_net`. These are surfaced as per-state
 /// valuations (R-MM-4b) so the driver can synthesise their rendezvous
 /// labels.
 fn net_driving_output_ports(
@@ -2727,20 +2752,28 @@ fn translate_sv_per_module_impl(
     // mununu#1198 — a snapshot that is not a netlist is reported as that. Left to the readers
     // below it would be "no non-blackbox modules", which blames the design for what the
     // snapshot lacks.
-    if let Err(damage) = snapshot_modules(&hier_body) {
-        return Err(AdapterError {
-            kind: AdapterErrorKind::ParseError,
-            message: crate::adapter::owner::mununu_defect(&format!(
-                "adapter/yosys: the per-module discovery pass succeeded but its hierarchy \
-                 snapshot {} cannot be used ({damage})",
-                hier_json_path.display()
-            )),
-            location: None,
-        });
-    }
-    let hier_body = collapse_slang_instance_modules(&hier_body);
-    let submodules = enumerate_submodules(&hier_body, yopts.top.as_deref());
-    if submodules.is_empty() {
+    let snapshot = match snapshot_modules(&hier_body) {
+        Ok(modules) => modules,
+        Err(damage) => {
+            return Err(AdapterError {
+                kind: AdapterErrorKind::ParseError,
+                message: crate::adapter::owner::mununu_defect(&format!(
+                    "adapter/yosys: the per-module discovery pass succeeded but its hierarchy \
+                     snapshot {} cannot be used ({damage})",
+                    hier_json_path.display()
+                )),
+                location: None,
+            });
+        }
+    };
+    // The top every instance path starts at: the caller's, or the one the reader marked.
+    let top_name: Option<String> = yopts
+        .top
+        .clone()
+        .or_else(|| marked_top(&snapshot).map(str::to_string));
+    // mununu#1248 — the snapshot is read as the reader wrote it: one module per instance.
+    let instance_modules = enumerate_submodules(&hier_body, yopts.top.as_deref());
+    if instance_modules.is_empty() {
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: "adapter/yosys: per-module emission found no non-blackbox modules in the hierarchy snapshot".into(),
@@ -2749,9 +2782,8 @@ fn translate_sv_per_module_impl(
     }
 
     // Per-module port directions: parse the discovery snapshot once;
-    // every submodule's directions live in the same JSON document.
-    let top_directions_per_module =
-        parse_port_directions_per_module(&hier_body, yopts.top.as_deref());
+    // every instance's module has its directions in the same JSON document.
+    let directions_per_module = parse_port_directions_per_module(&hier_body, yopts.top.as_deref());
 
     // R-MM-4d — when surfacing for composition, compute the net-driving
     // output ports from the connectivity + directions (same hier.json) so
@@ -2759,54 +2791,34 @@ fn translate_sv_per_module_impl(
     // rendezvous-label synthesis.
     let surface_outputs: Vec<String> = if surface_net_driving {
         let connectivity = parse_instance_connections(&hier_body, yopts.top.as_deref());
-        net_driving_output_ports(&connectivity, &top_directions_per_module)
+        net_driving_output_ports(&connectivity, &directions_per_module)
     } else {
         Vec::new()
     };
 
-    // Choose output directory for the per-submodule BTOR2 files. mununu#1138 — yosys runs
-    // inside the staging directory, so a caller's directory is made absolute first (a relative
-    // `--output-dir build/`, or the CLI's default — the source's parent, empty for a bare file
-    // name — used to resolve against mununu's working directory because yosys ran there).
-    let out_dir = match &yopts.per_module_output_dir {
-        Some(dir) => {
-            let abs = per_module_output_dir(dir)?;
-            std::fs::create_dir_all(&abs).map_err(io_err)?;
-            abs
-        }
-        None => tmp.path().to_path_buf(),
-    };
-    let persist = yopts.per_module_output_dir.is_some();
-
-    // Pass 2 — per-submodule emission. For each module, run Yosys with
-    // `hierarchy -top <m>` (no flatten) and emit `<m>.btor2`. Feed each
-    // BTOR2 through the existing BTOR2 adapter.
-    let mut outputs = Vec::with_capacity(submodules.len());
-    for module_name in &submodules {
-        // The name comes from yosys's hierarchy of the user's design; an escaped identifier
-        // would reach `hierarchy -top` unquoted (the same gate as `validate_lift_inputs`).
-        if !is_valid_module_name(module_name) {
+    // Pass 2 — per-instance emission. yosys writes each instance's BTOR2 under a neutral name
+    // inside the staging directory it runs in (mununu#1138); the name a model is kept under is
+    // only known once the instances are grouped.
+    let mut staged: Vec<(String, String)> = Vec::with_capacity(instance_modules.len());
+    for (index, instance_module) in instance_modules.iter().enumerate() {
+        // The name comes from yosys's hierarchy of the user's design and reaches
+        // `hierarchy -top` unquoted (the same gate as `validate_lift_inputs`).
+        if !is_valid_instance_module_name(instance_module) {
             return Err(refuse_lift_input(
-                "a module name in the design's hierarchy",
-                module_name,
-                "a plain identifier (letters, digits, `_`, `$`, not starting with a digit)",
-                "rename the module — an escaped identifier cannot be named in the per-module \
-                 lift script today (a mununu limitation)",
+                "a module of the design's hierarchy",
+                instance_module,
+                "a module name and its instance path (letters, digits, `_`, `$`, `.`, `[`, `]`, \
+                 `-`, not starting with a digit)",
+                "rename the module, the instance or the generate block — an escaped identifier \
+                 cannot be named in the per-module lift script today (a mununu limitation)",
             ));
         }
-        let btor_path = out_dir.join(format!("{module_name}.btor2"));
-        // mununu#1138 — a persisted output goes to the caller's directory by its absolute path
-        // (quoted by `write_btor` when it carries a space); a transient one is a name inside
-        // the staging directory yosys runs in.
-        let script_btor: PathBuf = if persist {
-            btor_path.clone()
-        } else {
-            PathBuf::from(format!("{module_name}.btor2"))
-        };
-        let script = build_per_module_script(
+        let staged_btor = staged_instance_file(index, "btor2");
+        let script = build_per_instance_script(
             &sources,
-            module_name,
-            &script_btor,
+            yopts.top.as_deref(),
+            instance_module,
+            Path::new(&staged_btor),
             yopts.setundef_anyseq,
             yopts.setundef_anyconst,
             &yopts.init_policy_overrides,
@@ -2817,23 +2829,61 @@ fn translate_sv_per_module_impl(
             &script,
             PER_MODULE_YOSYS_TIMEOUT,
             plugin.as_deref(),
-            &btor_path.with_file_name(format!("{module_name}.yosys.log")),
+            &tmp.path().join(staged_instance_file(index, "yosys.log")),
             tmp.path(),
         )?;
-
+        let btor_path = tmp.path().join(&staged_btor);
         let btor = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
-                "adapter/yosys: per-module pass for '{module_name}' produced no BTOR2 at {} ({e})",
+                "adapter/yosys: per-module pass for '{instance_module}' produced no BTOR2 at {} ({e})",
                 btor_path.display()
             ),
             location: None,
         })?;
+        staged.push((instance_module.clone(), btor));
+    }
+
+    // Choose output directory for the persisted BTOR2 files. mununu#1138 — a caller's directory
+    // is made absolute first (a relative `--output-dir build/`, or the CLI's default — the
+    // source's parent, empty for a bare file name — resolves against mununu's working
+    // directory, not the staging directory yosys ran in).
+    let out_dir = match &yopts.per_module_output_dir {
+        Some(dir) => {
+            let abs = per_module_output_dir(dir)?;
+            std::fs::create_dir_all(&abs).map_err(io_err)?;
+            Some(abs)
+        }
+        None => None,
+    };
+
+    // One model per distinct elaboration; each goes through the BTOR2 adapter once.
+    let mut outputs = Vec::new();
+    for group in group_instance_models(&staged, top_name.as_deref()) {
+        let first = group.members[0];
+        let (first_module, btor) = &staged[first];
+        let module_name = group.name;
+
+        // A persisted model is written under its final name, with the yosys log of the run
+        // that produced it beside it (`<name>.yosys.log`).
+        let btor2_path = match &out_dir {
+            Some(dir) => {
+                let path = dir.join(format!("{module_name}.btor2"));
+                write_file(&path, btor)?;
+                std::fs::copy(
+                    tmp.path().join(staged_instance_file(first, "yosys.log")),
+                    dir.join(format!("{module_name}.yosys.log")),
+                )
+                .map_err(io_err)?;
+                Some(path)
+            }
+            None => None,
+        };
 
         // Per-module port-direction context (Document B task B1 — same
-        // mechanism as `translate_sv`, scoped to each submodule's
-        // boundary).
-        let mut btor_options = match top_directions_per_module.get(module_name) {
+        // mechanism as `translate_sv`, scoped to the module's boundary). The members of a
+        // group are the same BTOR2, so they have the same ports.
+        let mut btor_options = match directions_per_module.get(first_module) {
             Some(directions) if !directions.is_empty() => crate::adapter::AdapterOptions {
                 port_directions: directions.clone(),
                 ..options.clone()
@@ -2847,7 +2897,7 @@ fn translate_sv_per_module_impl(
         }
 
         let mut out =
-            super::btor2::Btor2Adapter::translate(&btor, &btor_options).map_err(|mut e| {
+            super::btor2::Btor2Adapter::translate(btor, &btor_options).map_err(|mut e| {
                 e.message = format!(
                     "adapter/yosys: per-module BTOR2 reader failed for '{module_name}': {}",
                     e.message
@@ -2860,13 +2910,93 @@ fn translate_sv_per_module_impl(
         };
 
         outputs.push(PerModuleOutput {
-            module_name: module_name.clone(),
-            btor2_path: if persist { Some(btor_path) } else { None },
+            module_name,
+            module_type: group.module_type,
+            instance_modules: group.members.iter().map(|&i| staged[i].0.clone()).collect(),
+            btor2_path,
             output: out,
         });
     }
+    outputs.sort_by(|a, b| a.module_name.cmp(&b.module_name));
 
     Ok((outputs, hier_body))
+}
+
+/// The name of an instance's file inside the staging directory (`instance-3.btor2`): neutral,
+/// because the name a model is kept under depends on the grouping.
+fn staged_instance_file(index: usize, extension: &str) -> String {
+    format!("instance-{index}.{extension}")
+}
+
+/// The instance modules that are one model, and the name the model is kept under.
+#[derive(Debug, PartialEq, Eq)]
+struct InstanceModelGroup {
+    name: String,
+    /// The module type of the members ([`slang_module_type`]).
+    module_type: String,
+    /// Indices into the list that was grouped, ascending.
+    members: Vec<usize>,
+}
+
+/// mununu#1248 — group the per-instance BTOR2 texts (`(instance module, BTOR2)`, in the sorted
+/// order of [`enumerate_submodules`]) into distinct models. Two instances are one model when
+/// they are instances of one module type and their BTOR2 is the same text once the comment
+/// lines are dropped (yosys names the module only in the header comment; measured 2026-11-24
+/// on yosys 0.68+120: two instances with equal parameters give identical text otherwise).
+///
+/// A type whose instances are all one model keeps the type as its name, so a design that
+/// instantiates every module uniformly has the names it had. A type whose instances differ has
+/// one group per elaboration, named after the group's first instance module. No two models
+/// share a name: a type read out of an instance module's name has no `.` and an instance
+/// module's name has one ([`slang_module_type`]); a name used whole is a module's own, and
+/// module names are distinct. With no `top` (a snapshot with no marked top) every module is its
+/// own type.
+///
+/// A text that differs for a reason that is not a difference of the model only makes one group
+/// more; each group is still the elaboration of its own members.
+fn group_instance_models(
+    staged: &[(String, String)],
+    top: Option<&str>,
+) -> Vec<InstanceModelGroup> {
+    let model_text = |btor: &str| -> Vec<String> {
+        btor.lines()
+            .filter(|line| !line.starts_with(';'))
+            .map(str::to_string)
+            .collect()
+    };
+    // (type, text) → members, in order of first appearance.
+    let mut groups: Vec<(&str, Vec<String>, Vec<usize>)> = Vec::new();
+    for (index, (instance_module, btor)) in staged.iter().enumerate() {
+        let ty = top.map_or(instance_module.as_str(), |top| {
+            slang_module_type(instance_module, top)
+        });
+        let text = model_text(btor);
+        match groups
+            .iter_mut()
+            .find(|(group_ty, group_text, _)| *group_ty == ty && *group_text == text)
+        {
+            Some((_, _, members)) => members.push(index),
+            None => groups.push((ty, text, vec![index])),
+        }
+    }
+    let groups_of_type = |ty: &str| -> usize {
+        groups
+            .iter()
+            .filter(|(group_ty, ..)| *group_ty == ty)
+            .count()
+    };
+    groups
+        .iter()
+        .map(|(ty, _, members)| InstanceModelGroup {
+            name: if groups_of_type(ty) == 1 {
+                (*ty).to_string()
+            } else {
+                staged[members[0]].0.clone()
+            },
+            module_type: (*ty).to_string(),
+            members: members.clone(),
+        })
+        .collect()
 }
 
 /// Build the `chparam -set <name> <value> <module>` passes for the requested
@@ -2909,9 +3039,26 @@ fn build_chparam_passes(params: &[(String, String)], top: Option<&str>) -> Strin
     format!("{}; ", passes.join("; "))
 }
 
+/// The one read both passes of the per-module lift start from. mununu#981 — `read_slang`
+/// flattens the elaborated design into the top by default; `--keep-hierarchy` keeps one module
+/// per instance, named `<type>$<instance path>`, each elaborated as the design instantiates it.
+/// mununu#1248 — the request's parameter overrides (`-G`) apply here, to the design's top, in
+/// both passes: the emission pass no longer reads the sources again with each module as a top
+/// of its own.
+fn keep_hierarchy_read(
+    sources: &[PathBuf],
+    top: Option<&str>,
+    params: &[(String, String)],
+) -> String {
+    format!(
+        "{} --keep-hierarchy",
+        read_slang_cmd(sources, top, params, &[])
+    )
+}
+
 /// Yosys discovery-pass script: read sources, set up hierarchy,
 /// elaborate processes, dump hierarchy snapshot. Stops before
-/// `flatten` / `async2sync` because the per-module emission pass
+/// `flatten` / `async2sync` because the per-instance emission pass
 /// repeats those steps with a different top.
 fn build_discovery_script(
     sources: &[PathBuf],
@@ -2919,15 +3066,7 @@ fn build_discovery_script(
     hier_json_out: &Path,
     params: &[(String, String)],
 ) -> String {
-    // mununu#981 — `read_slang` flattens the elaborated design into the top by default, so the
-    // snapshot had ONE module and the per-module / multi-module lift found no submodule.
-    // `--keep-hierarchy` keeps one module per instance, named `<type>$<instance path>`;
-    // [`collapse_slang_instance_modules`] maps those back to the module type the per-module pass
-    // re-elaborates.
-    let read = format!(
-        "{} --keep-hierarchy",
-        read_slang_cmd(sources, top, params, &[])
-    );
+    let read = keep_hierarchy_read(sources, top, params);
     let hier = match top {
         Some(t) => format!("hierarchy -check -top {t}"),
         None => "hierarchy -check -auto-top".to_string(),
@@ -2938,29 +3077,32 @@ fn build_discovery_script(
     )
 }
 
-/// Per-submodule emission script. Runs the same chain as `build_script`
-/// but with `<m>` as the top — *each submodule is treated as a
-/// self-contained design here*. Internal `flatten` is applied within
-/// each submodule's scope because BTOR2 has no notion of sub-module
-/// references: any `$paramod` parametrised cells the submodule
-/// instantiates must be inlined into the emitted BTOR2.
+/// Per-instance emission script: the read of the discovery pass, then the same chain as
+/// `build_script` with the instance's module (`<type>$<instance path>`, or the top of a design
+/// with no submodule) as the top — the module as the design elaborates it for that instance.
+///
+/// `flatten` runs first, within the instance's scope: BTOR2 has no notion of sub-module
+/// references, so the instances below it are inlined, and a per-signal reset-value override
+/// (`setattr … w:<name>`) then selects a nested signal under its flattened name (`u_l.q`), as it
+/// did when the reader flattened the module itself. (Measured 2026-11-24, yosys 0.68+120:
+/// flatten before `proc` and after it give the same BTOR2 on a two-level design.)
 ///
 /// The "no flatten" rule of the KMTS-pipeline frontend applies at the
-/// *discovery* boundary (so per-submodule enumeration sees real module
+/// *discovery* boundary (so the enumeration sees real module
 /// boundaries) and at *cross-submodule composition* (driven by the
-/// top-level netlist, not by Yosys). Within a single submodule's BTOR2,
-/// flatten is the correct call.
-fn build_per_module_script(
+/// top-level netlist, not by Yosys).
+#[allow(clippy::too_many_arguments)]
+fn build_per_instance_script(
     sources: &[PathBuf],
-    module: &str,
+    top: Option<&str>,
+    instance_module: &str,
     btor_out: &Path,
     setundef_anyseq: bool,
     setundef_anyconst: bool,
     init_policy_overrides: &InitPolicyOverrides,
     params: &[(String, String)],
 ) -> String {
-    // Parameter overrides apply to this submodule's own top (`module`) at read time (`-G`).
-    let read = read_slang_cmd(sources, Some(module), params, &[]);
+    let read = keep_hierarchy_read(sources, top, params);
     let setundef_pass = select_setundef_pass(setundef_anyseq, setundef_anyconst);
     let per_signal = emit_init_policy_setattrs(init_policy_overrides);
     format!(
@@ -2971,7 +3113,7 @@ fn build_per_module_script(
         // explosion). Unlike `memory`/`memory -nomap`, it runs NO internal `opt_clean`,
         // so it does not drop dead registers (which would change memory-free lifts).
         // No-op when the design has no memories.
-        "{read}; hierarchy -check -top {module}; {per_signal}proc; memory_collect; flatten; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        "{read}; hierarchy -check -top {instance_module}; flatten; {per_signal}proc; memory_collect; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         yosys_path_arg(btor_out)
     )
 }
@@ -3090,56 +3232,44 @@ fn yosys_run_outcome_to_result(
 }
 
 /// The module type of a `read_slang --keep-hierarchy` module name: yosys-slang names each
-/// instance's module `<type>$<instance path>` (`producer$producer_consumer_top.u_producer`).
-/// A name with no `$`, or one yosys itself mangled (`$paramod…`, leading `$`), is returned as is.
-fn slang_module_type(name: &str) -> &str {
+/// instance's module `<type>$<instance path>` (`producer$producer_consumer_top.u_producer`),
+/// and an instance path starts at the top. The type is what stands before `$<top>.`, so that a
+/// `$` in the type's own name, or in the top's, stays where it is (measured 2026-11-24 on yosys
+/// 0.68+120: an instance of `child$v2` under `top` is the module `child$v2$top.u_c`). A name
+/// that is not of that form, or one yosys itself mangled (`$paramod…`, a leading `$`), is
+/// returned as is.
+fn slang_module_type<'a>(name: &'a str, top: &str) -> &'a str {
     if name.starts_with('$') {
         return name;
     }
-    name.split_once('$').map_or(name, |(ty, _)| ty)
+    // A module type has no `.`, so the text up to the first one is `<type>$<top>`.
+    let ty = name
+        .split_once('.')
+        .and_then(|(head, _)| head.strip_suffix(top))
+        .and_then(|head| head.strip_suffix('$'));
+    match ty {
+        Some(ty) if !ty.is_empty() => ty,
+        _ => name,
+    }
 }
 
-/// mununu#981 — rewrite a `read_slang --keep-hierarchy` snapshot so every per-instance module
-/// `<type>$<path>` becomes its type: each cell's `type` is mapped, and the `modules` map keeps one
-/// body per type (the first by name — the map is sorted; the other instances' bodies are dropped,
-/// their cells still point at the type). The per-module pass then re-elaborates each TYPE with
-/// `read_slang --top <type>`, the shape the `read_verilog` discovery produced before the
-/// slang-only lift (N1). A snapshot that fails to parse is returned unchanged (the readers are
-/// best-effort on it already).
-fn collapse_slang_instance_modules(hier_json: &str) -> String {
-    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(hier_json) else {
-        return hier_json.to_string();
-    };
-    let Some(modules) = root.get_mut("modules").and_then(|m| m.as_object_mut()) else {
-        return hier_json.to_string();
-    };
-    if !modules.keys().any(|k| slang_module_type(k) != k) {
-        return hier_json.to_string();
-    }
-    let mut collapsed = serde_json::Map::new();
-    for (name, mut body) in std::mem::take(modules) {
-        if let Some(cells) = body.get_mut("cells").and_then(|c| c.as_object_mut()) {
-            for cell in cells.values_mut() {
-                if let Some(ty) = cell.get_mut("type")
-                    && let Some(t) = ty.as_str()
-                {
-                    let mapped = slang_module_type(t).to_string();
-                    *ty = serde_json::Value::String(mapped);
-                }
-            }
-        }
-        collapsed
-            .entry(slang_module_type(&name).to_string())
-            .or_insert(body);
-    }
-    *modules = collapsed;
-    root.to_string()
+/// The module of a hierarchy snapshot that yosys marked `(* top *)`.
+fn marked_top(modules: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    modules.iter().find_map(|(name, body)| {
+        body.get("attributes")
+            .and_then(|a| a.get("top"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.ends_with('1'))
+            .then_some(name.as_str())
+    })
 }
 
 /// Enumerate submodule names from a Yosys `write_json` hierarchy
 /// snapshot. Returns module names in deterministic (sorted) order,
 /// excluding the top module and any module flagged `(* blackbox *)`
-/// (blackbox bodies are not extractable to BTOR2).
+/// (blackbox bodies are not extractable to BTOR2). On a
+/// `read_slang --keep-hierarchy` snapshot the names are one per INSTANCE
+/// (`<type>$<instance path>`, at every depth of the hierarchy).
 ///
 /// When `explicit_top` is provided, it is excluded from the result.
 /// When `explicit_top` is `None`, the function attempts to discover
@@ -3157,15 +3287,9 @@ pub fn enumerate_submodules(hier_json: &str, explicit_top: Option<&str>) -> Vec<
     };
 
     // Determine which name to exclude as the top.
-    let auto_top: Option<String> = modules.iter().find_map(|(name, body)| {
-        let is_top = body
-            .get("attributes")
-            .and_then(|a| a.get("top"))
-            .map(|v| v.as_str().is_some_and(|s| s.ends_with('1')))
-            .unwrap_or(false);
-        if is_top { Some(name.clone()) } else { None }
-    });
-    let top_name = explicit_top.map(str::to_string).or(auto_top);
+    let top_name = explicit_top
+        .map(str::to_string)
+        .or_else(|| marked_top(modules).map(str::to_string));
 
     let mut out: Vec<String> = modules
         .iter()
@@ -3267,9 +3391,12 @@ fn parse_port_directions_per_module(
 pub struct InstanceConnections {
     /// Cell instance name in the parent (e.g. `u_producer`).
     pub instance: String,
-    /// Instantiated submodule type (e.g. `producer`). May be a Yosys
-    /// `$paramod$…` mangled name for parameterised instances; the driver
-    /// resolves that to the source module.
+    /// The module the instance instantiates, as the hierarchy snapshot names it. Under the
+    /// slang reader that is the instance's OWN module, `<type>$<instance path>`
+    /// (`producer$producer_consumer_top.u_producer`) — the elaboration of this instance, which
+    /// is what the composition looks up (mununu#1248); a snapshot with plain names gives the
+    /// type (`producer`). A cell of the top that is not an instance (a logic cell) is listed
+    /// too, with its cell type.
     pub module_type: String,
     /// Port name on the instance → connected net name in the parent. Only
     /// ports whose bit-vector resolves to a *named* net appear here;
@@ -4043,6 +4170,25 @@ pub(crate) fn is_valid_module_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
 }
 
+/// The module of one instance, as `read_slang --keep-hierarchy` names it —
+/// `<type>$<instance path>`, the path made of instance and generate-block names
+/// (`leaf$top.gen[0].u_g`, `leaf$top.gen[-1].u_g`) — is safe in the `-p` script iff it starts
+/// like an identifier and has only identifier characters, `$`, `.`, `[`, `]` and `-` (a
+/// negative generate index; measured 2026-11-24 on yosys 0.68+120: `hierarchy -top` takes
+/// such a name). `hierarchy -top` takes it unquoted (the same gate as
+/// [`is_valid_module_name`], which every plain module name also passes here), and a name that
+/// starts like an identifier cannot read as an option. An escaped identifier is refused.
+pub(crate) fn is_valid_instance_module_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.' | '[' | ']' | '-'))
+}
+
 /// A parameter name is one or more module-name segments joined by `.` (`WIDTH`,
 /// `core.WIDTH`); the lift keeps the last segment for `-G`.
 pub(crate) fn is_valid_param_name(name: &str) -> bool {
@@ -4177,29 +4323,20 @@ pub(crate) fn validate_lift_inputs(yopts: &YosysOptions) -> Result<(), AdapterEr
     Ok(())
 }
 
-/// mununu#1138 — the per-module output directory as yosys must see it from inside the staging
-/// directory: absolute (a relative one resolves against mununu's working directory, an empty
-/// one — the CLI's default for a bare file name — is that directory), and refused for a `"` or
-/// a line break, which the quoted `write_btor` argument cannot carry. Pure: the caller creates it.
+/// mununu#1138 — the per-module output directory, absolute: a relative one resolves against
+/// mununu's working directory, an empty one — the CLI's default for a bare file name — is that
+/// directory. mununu#1248 — the models are written there by mununu once the instances are
+/// grouped, so the path reaches no yosys script and any directory the platform takes is
+/// accepted. Pure: the caller creates it.
 fn per_module_output_dir(dir: &Path) -> Result<PathBuf, AdapterError> {
     let cwd = || std::env::current_dir().map_err(io_err);
-    let abs = if dir.as_os_str().is_empty() {
+    Ok(if dir.as_os_str().is_empty() {
         cwd()?
     } else if dir.is_absolute() {
         dir.to_path_buf()
     } else {
         cwd()?.join(dir)
-    };
-    let text = abs.display().to_string();
-    if text.chars().any(|c| matches!(c, '"' | '\n' | '\r')) {
-        return Err(refuse_lift_input(
-            "the per-module output directory",
-            &text,
-            "a path without a `\"` or a line break",
-            "move or rename the directory (`--output-dir` on `sv emit-btor2-per-module`)",
-        ));
-    }
-    Ok(abs)
+    })
 }
 
 /// Emit the explicit control-slice cut-point pass: `cutpoint w:<sig> …; ` (empty
@@ -6673,13 +6810,14 @@ endmodule
       }
     }"#;
 
-    /// mununu#981 — the seam between `read_slang --keep-hierarchy`'s snapshot and the per-module
-    /// readers: a per-instance module name `<type>$<path>` reads as its type everywhere (the module
-    /// map, every cell's `type`), two instances of one type collapse to one module, and yosys's own
-    /// `$paramod…` names and an already-plain snapshot are left alone. The snapshot shape is the one
-    /// yosys 0.68+120 writes for `producer_consumer_top` (measured in `mununu-sva`).
+    /// mununu#981, mununu#1248 — the seam between `read_slang --keep-hierarchy`'s snapshot and
+    /// the per-module readers: the snapshot is read as written, one module per instance. Every
+    /// instance of the top names its OWN module, that module is one the emission pass lifts and
+    /// a key of the directions, two instances of one type are two modules, and yosys's own
+    /// `$paramod…` names are not lifted. The snapshot shape is the one yosys 0.68+120 writes
+    /// for `producer_consumer_top` (measured in `mununu-sva`).
     #[test]
-    fn a_keep_hierarchy_snapshot_reads_as_module_types() {
+    fn x1248_a_keep_hierarchy_snapshot_is_read_one_module_per_instance() {
         let snap = r#"{"modules":{
             "producer_consumer_top":{"attributes":{"top":"00000000000000000000000000000001"},
               "ports":{},"cells":{
@@ -6691,40 +6829,238 @@ endmodule
             "bounded_buffer$producer_consumer_top.u_buffer":{"attributes":{},"ports":{"push":{"direction":"input","bits":[2]}},"cells":{}},
             "bounded_buffer$producer_consumer_top.u_buffer2":{"attributes":{},"ports":{"push":{"direction":"input","bits":[2]}},"cells":{}},
             "$paramod$abc\\fifo":{"attributes":{},"ports":{},"cells":{}}}}"#;
-        let c = collapse_slang_instance_modules(snap);
-        let subs = enumerate_submodules(&c, Some("producer_consumer_top"));
-        assert_eq!(subs, vec!["bounded_buffer", "producer"], "{c}");
-        let conns = parse_instance_connections(&c, Some("producer_consumer_top"));
-        let types: Vec<(&str, &str)> = conns
-            .iter()
-            .map(|i| (i.instance.as_str(), i.module_type.as_str()))
-            .collect();
+        let lifted = enumerate_submodules(snap, Some("producer_consumer_top"));
         assert_eq!(
-            types,
+            lifted,
             vec![
-                ("u_buffer", "bounded_buffer"),
-                ("u_buffer2", "bounded_buffer"),
-                ("u_producer", "producer")
+                "bounded_buffer$producer_consumer_top.u_buffer",
+                "bounded_buffer$producer_consumer_top.u_buffer2",
+                "producer$producer_consumer_top.u_producer",
             ]
         );
+        assert!(
+            lifted.iter().all(|m| is_valid_instance_module_name(m)),
+            "{lifted:?}"
+        );
+        let conns = parse_instance_connections(snap, Some("producer_consumer_top"));
+        let dirs = parse_port_directions_per_module(snap, None);
+        assert_eq!(conns.len(), 3, "{conns:?}");
+        for inst in &conns {
+            assert!(
+                lifted.contains(&inst.module_type) && dirs.contains_key(&inst.module_type),
+                "instance `{}` names a module that is lifted and has directions: {}",
+                inst.instance,
+                inst.module_type
+            );
+            assert!(
+                inst.module_type.ends_with(&format!(".{}", inst.instance)),
+                "its own module: {inst:?}"
+            );
+        }
         assert_eq!(
             conns[2].port_to_net.get("valid").map(String::as_str),
             Some("valid")
         );
-        let dirs = parse_port_directions_per_module(&c, None);
-        assert!(dirs.contains_key("producer") && dirs.contains_key("bounded_buffer"));
-        assert!(
-            c.contains("$paramod$abc"),
-            "yosys's own mangling is untouched: {c}"
+        // The driven net is surfaced through the instance's own module.
+        assert_eq!(net_driving_output_ports(&conns, &dirs), vec!["valid"]);
+        // The instances a model stands for are named by their paths; the top is not one.
+        assert_eq!(
+            instance_paths_of("bounded_buffer", &lifted[..2]),
+            vec![
+                "producer_consumer_top.u_buffer",
+                "producer_consumer_top.u_buffer2"
+            ]
         );
-        // Negative control: the raw snapshot gives the readers instance-suffixed types, which the
-        // composition driver cannot match against the per-module lifts' type names.
-        let raw = parse_instance_connections(snap, Some("producer_consumer_top"));
-        assert!(raw.iter().all(|i| i.module_type.contains('$')), "{raw:?}");
-        // A plain snapshot (no keep-hierarchy names) comes back byte-identical.
-        let plain = r#"{"modules":{"top":{"cells":{"u":{"type":"leaf"}}},"leaf":{}}}"#;
-        assert_eq!(collapse_slang_instance_modules(plain), plain);
-        assert_eq!(collapse_slang_instance_modules("not json"), "not json");
+        let top = "producer_consumer_top";
+        assert!(instance_paths_of(top, &[top.to_string()]).is_empty());
+        // The type is still readable from the name, for the grouping and the file names.
+        assert_eq!(
+            slang_module_type(&conns[0].module_type, top),
+            "bounded_buffer"
+        );
+        assert_eq!(slang_module_type("producer", top), "producer");
+        assert_eq!(
+            slang_module_type("$paramod$abc\\fifo", top),
+            "$paramod$abc\\fifo"
+        );
+        // A `$` in the type's own name, or in the top's, is not where the name is split.
+        assert_eq!(slang_module_type("child$v2$top.u_c", "top"), "child$v2");
+        assert_eq!(slang_module_type("a$top$top.u_a", "top"), "a$top");
+        assert_eq!(slang_module_type("child$t$op.gen[0].u_g", "t$op"), "child");
+        assert_eq!(
+            instance_paths_of("child$v2", &["child$v2$top.u_c".to_string()]),
+            vec!["top.u_c"]
+        );
+        // A name that does not start an instance path at this top is its own type.
+        assert_eq!(
+            slang_module_type("child$other.u_c", "top"),
+            "child$other.u_c"
+        );
+    }
+
+    /// mununu#1248 — which instances are one model, and what the model is called. The table is
+    /// the dimension of the defect seen from the grouping: how the per-instance BTOR2 of the
+    /// instances of a type can relate.
+    #[test]
+    fn x1248_instances_are_grouped_by_type_and_model() {
+        let staged = |rows: &[(&str, &str)]| -> Vec<(String, String)> {
+            rows.iter()
+                .map(|(module, body)| {
+                    (
+                        (*module).to_string(),
+                        format!(
+                            "; BTOR description generated by Yosys for module {module}.\n{body}"
+                        ),
+                    )
+                })
+                .collect()
+        };
+        let names_and_members = |rows: &[(&str, &str)]| -> Vec<(String, Vec<usize>)> {
+            group_instance_models(&staged(rows), Some("top"))
+                .into_iter()
+                .map(|g| (g.name, g.members))
+                .collect()
+        };
+        let group = |name: &str, members: &[usize]| (name.to_string(), members.to_vec());
+        const D: &str = "1 sort bitvec 1\n2 input 1 d\n3 state 1 q\n4 next 1 3 2\n";
+        const N: &str = "1 sort bitvec 1\n2 input 1 d\n3 state 1 q\n4 not 1 2\n5 next 1 3 4\n";
+
+        // A design with no submodule: the top, under its own name.
+        assert_eq!(names_and_members(&[("top", D)]), vec![group("top", &[0])]);
+        // One instance of a type: the type's name, whatever the instance is called.
+        assert_eq!(
+            names_and_members(&[("child$top.u_c", D)]),
+            vec![group("child", &[0])]
+        );
+        // Two instances that elaborate to the same model: one model, the type's name. The header
+        // comment, which names the instance's module, is not part of the model.
+        assert_eq!(
+            names_and_members(&[("child$top.u_a", D), ("child$top.u_b", D)]),
+            vec![group("child", &[0, 1])]
+        );
+        // Two instances that differ: two models, each named after its instance's module.
+        assert_eq!(
+            names_and_members(&[("child$top.u_a", D), ("child$top.u_b", N)]),
+            vec![group("child$top.u_a", &[0]), group("child$top.u_b", &[1])]
+        );
+        // Three instances, two elaborations: the equal ones share a model, named after the first.
+        assert_eq!(
+            names_and_members(&[
+                ("child$top.u_a", D),
+                ("child$top.u_b", N),
+                ("child$top.u_c", D)
+            ]),
+            vec![
+                group("child$top.u_a", &[0, 2]),
+                group("child$top.u_b", &[1])
+            ]
+        );
+        // Two TYPES with the same text stay two models: a model belongs to its type.
+        assert_eq!(
+            names_and_members(&[("a$top.u_a", D), ("b$top.u_b", D)]),
+            vec![group("a", &[0]), group("b", &[1])]
+        );
+        // A type whose own name has a `$` is not read as the text before the first one
+        // (measured 2026-11-24, yosys 0.68+120: `child$v2$top.u_c`), so it is not put with
+        // another type that starts the same.
+        assert_eq!(
+            names_and_members(&[("child$v2$top.u_c", D), ("child$top.u_c", D)]),
+            vec![group("child$v2", &[0]), group("child", &[1])]
+        );
+        // With no top to read a path from, every module is its own type.
+        assert_eq!(
+            group_instance_models(&staged(&[("child$top.u_a", D), ("child$top.u_b", D)]), None)
+                .into_iter()
+                .map(|g| g.name)
+                .collect::<Vec<_>>(),
+            vec!["child$top.u_a", "child$top.u_b"]
+        );
+        // A split type beside a uniform one, an instance below another one: every instance is a
+        // member of exactly one group and no two groups share a name.
+        let mixed = [
+            ("child$top.u_a", D),
+            ("child$top.u_b", N),
+            ("leaf$top.u_a.u_l", D),
+            ("leaf$top.u_b.u_l", D),
+        ];
+        let groups = names_and_members(&mixed);
+        let mut members: Vec<usize> = groups.iter().flat_map(|(_, m)| m.clone()).collect();
+        members.sort_unstable();
+        assert_eq!(members, vec![0, 1, 2, 3], "{groups:?}");
+        let names: std::collections::BTreeSet<&str> =
+            groups.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names.len(), groups.len(), "{groups:?}");
+        assert!(names.contains("leaf"), "{groups:?}");
+    }
+
+    /// mununu#1248 — the per-instance pass starts from the read of the discovery pass, with the
+    /// design's top and the request's parameter overrides, and takes the instance's module as
+    /// its top with `hierarchy`. It does not read the sources again with a module as a top of
+    /// its own: that read elaborates the module at its defaults, and gave every module every
+    /// override of the request by its bare name.
+    #[test]
+    fn x1248_the_per_instance_script_starts_from_the_read_of_the_discovery_pass() {
+        let sources = [PathBuf::from("work.sv")];
+        let params = [("W".to_string(), "3".to_string())];
+        for top in [Some("top"), None] {
+            let read = keep_hierarchy_read(&sources, top, &params);
+            assert!(read.ends_with("--keep-hierarchy"), "{read}");
+            assert_eq!(read.matches("-G W=3").count(), 1, "{read}");
+            let discovery =
+                build_discovery_script(&sources, top, Path::new(STAGED_HIER_JSON), &params);
+            let emission = build_per_instance_script(
+                &sources,
+                top,
+                "child$top.u_c",
+                Path::new("instance-0.btor2"),
+                false,
+                false,
+                &Default::default(),
+                &params,
+            );
+            for script in [&discovery, &emission] {
+                assert!(
+                    script.starts_with(&format!("{read}; hierarchy ")),
+                    "{script}"
+                );
+                assert_eq!(script.matches("read_slang").count(), 1, "{script}");
+            }
+            assert!(
+                emission.contains("; hierarchy -check -top child$top.u_c; flatten; proc; "),
+                "{emission}"
+            );
+            assert!(!emission.contains("--top child"), "{emission}");
+        }
+    }
+
+    /// The module of an instance is named in the per-instance script unquoted: the names the
+    /// reader makes for instances, generate blocks and plain modules pass, and anything that
+    /// would end a command or split an argument is refused.
+    #[test]
+    fn x1248_an_instance_module_name_is_checked_before_it_reaches_the_script() {
+        for ok in [
+            "producer",
+            "_m$1",
+            "producer$producer_consumer_top.u_producer",
+            "leaf$top.gen[0].u_g",
+            "leaf$top.gen[-1].u_g",
+            "leaf$top.u_m0.u_l",
+        ] {
+            assert!(is_valid_instance_module_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "1m",
+            "$paramod$abc\\fifo",
+            "-top",
+            "leaf$top.\\odd name ",
+            "a b",
+            "a;b",
+            "a\"b",
+            "a#b",
+        ] {
+            assert!(!is_valid_instance_module_name(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -6973,31 +7309,55 @@ endmodule
     }
 
     #[test]
-    fn build_per_module_script_emits_anyconst_when_flagged() {
+    fn build_per_instance_script_emits_anyconst_when_flagged() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/foo.sv")];
         let btor = PathBuf::from("/tmp/out.btor");
         let no_overrides: InitPolicyOverrides = Vec::new();
 
-        let zero_script =
-            build_per_module_script(&sources, "top", &btor, false, false, &no_overrides, &[]);
+        let zero_script = build_per_instance_script(
+            &sources,
+            None,
+            "top",
+            &btor,
+            false,
+            false,
+            &no_overrides,
+            &[],
+        );
         assert!(zero_script.contains("setundef -zero"));
         assert!(!zero_script.contains("setundef -anyconst"));
         assert!(!zero_script.contains("setundef -anyseq"));
 
-        let anyconst_script =
-            build_per_module_script(&sources, "top", &btor, false, true, &no_overrides, &[]);
+        let anyconst_script = build_per_instance_script(
+            &sources,
+            None,
+            "top",
+            &btor,
+            false,
+            true,
+            &no_overrides,
+            &[],
+        );
         assert!(anyconst_script.contains("setundef -anyconst"));
         assert!(!anyconst_script.contains("setundef -zero"));
 
-        let anyseq_script =
-            build_per_module_script(&sources, "top", &btor, true, false, &no_overrides, &[]);
+        let anyseq_script = build_per_instance_script(
+            &sources,
+            None,
+            "top",
+            &btor,
+            true,
+            false,
+            &no_overrides,
+            &[],
+        );
         assert!(anyseq_script.contains("setundef -anyseq"));
         assert!(!anyseq_script.contains("setundef -anyconst"));
 
         // Precedence: both flags set → anyseq wins
         let both_script =
-            build_per_module_script(&sources, "top", &btor, true, true, &no_overrides, &[]);
+            build_per_instance_script(&sources, None, "top", &btor, true, true, &no_overrides, &[]);
         assert!(both_script.contains("setundef -anyseq"));
         assert!(!both_script.contains("setundef -anyconst"));
     }
@@ -7033,7 +7393,7 @@ endmodule
     }
 
     #[test]
-    fn build_per_module_script_includes_per_signal_setattrs() {
+    fn build_per_instance_script_includes_per_signal_setattrs() {
         use crate::adapter::systemverilog::annotation::InitPolicy;
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/foo.sv")];
@@ -7042,7 +7402,8 @@ endmodule
             vec![("boot_fsm_ns".to_string(), InitPolicy::Anyconst)];
         // Global policy stays default (-zero); per-signal anyconst
         // applies only to boot_fsm_ns.
-        let script = build_per_module_script(&sources, "top", &btor, false, false, &overrides, &[]);
+        let script =
+            build_per_instance_script(&sources, None, "top", &btor, false, false, &overrides, &[]);
         assert!(
             script.contains("setattr -set anyconst 1 w:boot_fsm_ns"),
             "per-signal setattr missing from script: {script}"
@@ -7053,12 +7414,16 @@ endmodule
         );
         // Per-signal setattr comes between hierarchy and proc.
         let hier_pos = script.find("hierarchy").expect("hierarchy command present");
+        // mununu#1248 — and after `flatten`, so a signal of an instance below the module is
+        // selected under its flattened name.
+        let flatten_pos = script.find("; flatten;").expect("flatten present");
+        assert!(hier_pos < flatten_pos, "{script}");
         let setattr_pos = script
             .find("setattr -set anyconst")
             .expect("setattr present");
         let proc_pos = script.find("; proc;").expect("proc command present");
         assert!(
-            hier_pos < setattr_pos && setattr_pos < proc_pos,
+            flatten_pos < setattr_pos && setattr_pos < proc_pos,
             "setattr must appear between hierarchy and proc; ordering = hier@{hier_pos} setattr@{setattr_pos} proc@{proc_pos}"
         );
     }
@@ -7590,45 +7955,34 @@ endmodule
         assert_eq!(plan.staged[0].0, dir.join("work.sv"));
     }
 
-    /// mununu#1138 — the per-module output directory reaches `write_btor` absolute whatever the
-    /// caller gave (yosys runs inside the staging directory): a relative directory resolves
-    /// against mununu's working directory, the CLI's empty default is that directory, an
-    /// absolute one is kept, and a `"` is refused by name.
+    /// mununu#1138 — the per-module output directory is absolute whatever the caller gave: a
+    /// relative directory resolves against mununu's working directory, the CLI's empty default
+    /// is that directory, an absolute one is kept. mununu#1248 — the per-instance script names
+    /// only a file inside the staging directory yosys runs in, so a directory with a space or a
+    /// `"` is taken as it is.
     #[test]
-    fn x1138_a_relative_per_module_output_directory_is_made_absolute_for_the_script() {
+    fn x1138_a_relative_per_module_output_directory_is_made_absolute() {
         let cwd = std::env::current_dir().expect("cwd");
         assert_eq!(
             per_module_output_dir(Path::new("build/sub")).expect("relative"),
             cwd.join("build/sub")
         );
         assert_eq!(per_module_output_dir(Path::new("")).expect("empty"), cwd);
-        let abs = cwd.join("out dir");
-        assert_eq!(per_module_output_dir(&abs).expect("absolute"), abs);
-        let script = build_per_module_script(
+        for name in ["out dir", "a\"b"] {
+            let abs = cwd.join(name);
+            assert_eq!(per_module_output_dir(&abs).expect("absolute"), abs);
+        }
+        let script = build_per_instance_script(
             &[PathBuf::from("work.sv")],
-            "m",
-            &per_module_output_dir(Path::new("build"))
-                .expect("relative")
-                .join("m.btor2"),
+            Some("t"),
+            "m$t.u_m",
+            Path::new(&staged_instance_file(0, "btor2")),
             false,
             false,
             &Default::default(),
             &[],
         );
-        assert!(
-            script.contains(&format!(
-                "write_btor {}",
-                cwd.join("build").join("m.btor2").display()
-            )),
-            "{script}"
-        );
-        let err = per_module_output_dir(Path::new("a\"b")).expect_err("a quote");
-        assert!(
-            err.message.contains("per-module output directory"),
-            "{}",
-            err.message
-        );
-        assert!(err.message.contains("--output-dir"), "{}", err.message);
+        assert!(script.ends_with("write_btor instance-0.btor2"), "{script}");
     }
 
     /// mununu#1138 — a caller include directory with a space in its path is staged as a link
@@ -7767,8 +8121,9 @@ endmodule
             "\"/out dir/m.btor2\""
         );
         assert_eq!(yosys_path_arg(Path::new("m.btor2")), "m.btor2");
-        let script = build_per_module_script(
+        let script = build_per_instance_script(
             &[PathBuf::from("work.sv")],
+            None,
             "m",
             Path::new("/out dir/m.btor2"),
             false,
