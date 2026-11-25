@@ -2264,7 +2264,7 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3623) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3736) — surface: (CLI+API+UI)
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3750) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3863) — surface: (CLI+API+UI)
 
 `sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
 yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
@@ -2352,7 +2352,7 @@ design. The lift reports the retry as the `lift-retry` note (`sv verify-auto`: i
 (mununu#1229). Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3676) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L830) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L3803) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L92) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions

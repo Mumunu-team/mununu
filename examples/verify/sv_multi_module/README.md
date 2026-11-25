@@ -4,10 +4,9 @@
 
 > **Refused at present.** `mununu verify` and `POST /api/v1/verify` answer a
 > project that sets `multi_module = true` with a validation error, until
-> mununu#1248 and mununu#1249 are fixed: the per-module composition builds
-> each module with its default parameter values, not the values the design
-> instantiates it with, and leaves the top module's own logic out of the
-> model, so a verdict on that model is not a verdict on the design. This
+> mununu#1249 is fixed: the per-module composition leaves the top module's
+> own logic out of the model, so a verdict on that model is not a verdict
+> on the design. This
 > example is kept as the option's example for when it comes back.
 > `transcript.txt` holds what the tool prints for it today, which is the
 > refusal; everything below describes the composition the option asks for,

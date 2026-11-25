@@ -1,6 +1,6 @@
 # Consumer briefing: `sv cegar` on the command line takes the lift arguments of the other `sv` verbs (2026-11)
 
-> Source of truth: [`sv_cegar`](../../crates/mununu-cli/src/main.rs#L4735) — surface: CLI — `mununu sv cegar`: the lift flags, the `lift_notes` of its report, the refusal of a multi-clock design. The API route already lifts this way (`lift` in the request), so there is no API change.
+> Source of truth: [`sv_cegar`](../../crates/mununu-cli/src/main.rs#L4741) — surface: CLI — `mununu sv cegar`: the lift flags, the `lift_notes` of its report, the refusal of a multi-clock design. The API route already lifts this way (`lift` in the request), so there is no API change.
 
 **Audience:** anyone who runs `mununu sv cegar` from a script, or reads its `--json` report.
 

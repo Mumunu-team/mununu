@@ -1,8 +1,10 @@
 # Consumer briefing: `multi_module = true` on an `sv-yosys` source is refused until its two defects are fixed (2026-11)
 
-> Source of truth: [`VerifyConfig::validate`](../../crates/mununu-core/src/verify/config.rs#L867) and [`asks_for_per_module_composition`](../../crates/mununu-core/src/verify/config.rs#L703) — surface: CLI+API — `mununu verify`, `mununu verify --print-alphabet`, `POST /api/v1/verify`
+> Source of truth: [`VerifyConfig::validate`](../../crates/mununu-core/src/verify/config.rs#L868) and [`asks_for_per_module_composition`](../../crates/mununu-core/src/verify/config.rs#L703) — surface: CLI+API — `mununu verify`, `mununu verify --print-alphabet`, `POST /api/v1/verify`
 
 **Audience:** anyone whose `verify.toml` (or the `config` of a `POST /api/v1/verify` request) has an `sv-yosys` source with `[sources.options] multi_module = true`.
+
+> **Later (2026-11).** The first of the two defects below, mununu#1248, is fixed ([briefing](2026-11-per-instance-lift.md)). The option stays refused for the second, mununu#1249, and the refusal's text now names only that one; the text quoted below is the one this change printed.
 
 ## TL;DR
 
@@ -52,6 +54,6 @@ Printed by the binary built from this change, on the example project, 2026-11-24
 
 ## Not covered here
 
-- **`mununu sv emit-btor2-per-module`** still writes one BTOR2 file per module type, each at the module's default parameters. It gives no verdict; a model it writes for a module whose instances override a parameter is not the instantiated one (mununu#1248).
+- **`mununu sv emit-btor2-per-module`** wrote one BTOR2 file per module type, each at the module's default parameters, when this refusal was written. It gives no verdict. The fix of mununu#1248 changes what it writes: each instance as the design elaborates it ([briefing](2026-11-per-instance-lift.md)). The refusal stays until mununu#1249 is fixed too.
 - **The example `examples/verify/sv_multi_module`** keeps `multi_module = true` as the option's example; its transcript is the refusal until the fix.
 - **The end-to-end test of the composition under `verify`** is removed with the refusal and returns with the fix. The composition's own tests stay.

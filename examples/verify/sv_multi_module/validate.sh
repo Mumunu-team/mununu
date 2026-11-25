@@ -32,7 +32,7 @@ strip_logs() {
     printf '# Regenerated via examples/verify/sv_multi_module/validate.sh\n'
     printf '#\n'
     printf '# AT PRESENT THE RUN IS REFUSED: `multi_module = true` is refused until\n'
-    printf '# mununu#1248 and mununu#1249 are fixed, so what follows is the refusal,\n'
+    printf '# mununu#1249 is fixed, so what follows is the refusal,\n'
     printf '# not a report. What the option asks for, for when it is back:\n'
     printf '#\n'
     printf '# Producer + consumer SV modules composed via the sv-yosys\n'

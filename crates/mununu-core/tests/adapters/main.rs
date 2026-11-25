@@ -1,4 +1,4 @@
-//! adapters — one test binary for the 18 integration-test files below (N0.4, 2026-11-03).
+//! adapters — one test binary for the 19 integration-test files below (N0.4, 2026-11-03).
 //!
 //! Each file used to be its own crate and linked mununu-core once; 55 of them were
 //! ~4 min of the 7.7-min PR gate. A module keeps every test's name as
@@ -24,6 +24,7 @@ mod emit_valuations_roundtrip;
 mod extraction_composition_e2e;
 mod past_shadow_input_e2e;
 mod support;
+mod sv_per_instance_lift;
 mod sv_per_module_btor2;
 mod sv_state_splitting;
 mod sv_yosys_multi_module_verify;

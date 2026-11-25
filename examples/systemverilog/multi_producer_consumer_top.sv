@@ -6,9 +6,8 @@
 //
 // Property of interest: the buffer never overflows (count < 3).
 //
-// NOTE: `mununu verify` refuses `multi_module = true` until mununu#1248 and
-//   mununu#1249 are fixed (the per-module composition lifts each module at its
-//   default parameters and leaves the top's own logic out). Until then set
+// NOTE: `mununu verify` refuses `multi_module = true` until mununu#1249 is
+//   fixed (the per-module composition leaves the top's own logic out). Until then set
 //   `multi_module = false`: the design is lifted flattened, as one module.
 //
 // Usage (sv-yosys multi-module path; requires yosys + sv2v):

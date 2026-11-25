@@ -831,8 +831,8 @@ pub fn inspect_project(
 ///   fixes). The SV adapter has its own per-source sidecar conventions
 ///   (`.mununu.json` next to the `.sv` file). Requires `yosys` on PATH.
 ///   `multi_module = true` (+ optional `top`) asks for the per-module
-///   composition; the config validation refuses it until mununu#1248
-///   and mununu#1249 are fixed, so this dispatcher is not reached with it.
+///   composition; the config validation refuses it until mununu#1249
+///   is fixed, so this dispatcher is not reached with it.
 /// - `"crewai"` — uses [`crate::adapter::crewai::CrewaiAdapter`].
 ///   Per-agent automata + sequential supervisor + asynchronous
 ///   composition. Options currently ignored.
@@ -922,8 +922,8 @@ fn dispatch_adapter(
         // auto-COI) + MIG-2 (OOB-sink) soundness fixes. Single-module by
         // default. The source option `multi_module = true` (+ optional
         // `top`) asks for the per-module composition driven from the top
-        // netlist; the config validation refuses it (mununu#1248,
-        // mununu#1249). Requires `yosys` on PATH; absence surfaces as an
+        // netlist; the config validation refuses it (mununu#1249).
+        // Requires `yosys` on PATH; absence surfaces as an
         // `AdapterTranslationFailed` (locate_yosys error), not silently.
         // `"sv-yosys"`, by the constant the validation tests the adapter with when it refuses
         // `multi_module = true`: the arm that reaches the option's reader and the refusal
@@ -1055,11 +1055,10 @@ fn is_sv_adapter(adapter: &str) -> bool {
 /// `multi_module = true` (optional `top = "<module>"`; the top is
 /// auto-detected from the netlist when omitted). NOT REACHED from
 /// `verify_project` / `inspect_project` at present: the config validation
-/// they both start with refuses the option, because this route lifts each
-/// module at its default parameters (mununu#1248) and leaves the top's own
-/// logic out (mununu#1249). The branch stays for the fix of those two,
-/// which lifts the refusal. The driver lifts each
-/// submodule to a KMTS, renames each instance's ports to the connected
+/// they both start with refuses the option, because this route leaves the
+/// top's own logic out (mununu#1249). The branch stays for the fix of that,
+/// which lifts the refusal. The driver lifts each instance
+/// of a submodule to a KMTS, renames each instance's ports to the connected
 /// nets, and synchronously fold-composes the instances
 /// ([`crate::adapter::yosys::multi_module::compose_sv_multi_module`]); the
 /// composed product is serialised back to CTXDSL
@@ -1158,8 +1157,8 @@ fn dispatch_sv_yosys(
         ..AdapterOptions::default()
     };
 
-    // Read by the one function the validation's refusal reads it with (mununu#1248,
-    // mununu#1249): while that refusal stands, this is `false` on every call that came
+    // Read by the one function the validation's refusal reads it with
+    // (mununu#1249): while that refusal stands, this is `false` on every call that came
     // through `verify_project` or `inspect_project`.
     let is_multi_module = crate::verify::config::asks_for_per_module_composition(options);
 

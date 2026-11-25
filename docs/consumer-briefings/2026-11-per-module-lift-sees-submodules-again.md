@@ -1,6 +1,8 @@
 # Consumer briefing: the per-module and multi-module SV lift sees submodules again (2026-11)
 
-> Source of truth: [`collapse_slang_instance_modules`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3109) — surface: CLI+API — `sv emit-btor2-per-module`, and `mununu verify` / `POST /api/v1/verify` with an `sv-yosys` source set to `multi_module = true`.
+> Source of truth: [`enumerate_submodules`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L3279) — surface: CLI+API — `sv emit-btor2-per-module`, and `mununu verify` / `POST /api/v1/verify` with an `sv-yosys` source set to `multi_module = true`.
+
+> **Later (2026-11-24).** Two things said below no longer hold. `sv emit-btor2-per-module` now lifts each instance as the design elaborates it, and a module type whose instances differ is written as one file per distinct model ([briefing](2026-11-per-instance-lift.md), mununu#1248): the per-instance modules are no longer read as their module type; the function this briefing named for that is gone, and so is its seam test (the snapshot's shape is now pinned by `x1248_a_keep_hierarchy_snapshot_is_read_one_module_per_instance`). And `multi_module = true` is refused until mununu#1249 is fixed ([briefing](2026-11-multi-module-refused.md)).
 
 **Audience:** rosf, monono, mununu-ui, and anyone who lifts a multi-module SystemVerilog design one module at a time or composes it from its instances.
 

@@ -2029,25 +2029,31 @@ struct ExtractionCheckArgs {
 
 #[derive(Subcommand, Debug)]
 enum SvCommand {
-    /// Emit one BTOR2 per submodule (R.0b — KMTS pipeline frontend).
+    /// Emit one BTOR2 per distinct elaboration of each submodule (R.0b — KMTS pipeline frontend).
     ///
-    /// Runs Yosys with `hierarchy -check` (no `flatten`) and emits one
-    /// BTOR2 per submodule reachable from the top. The per-submodule
-    /// BTOR2 files feed the R.2 KMTS lifter; the top-module netlist
+    /// Reads the design with its module boundaries kept and lifts every
+    /// instance below the top as the design elaborates it: with the
+    /// parameter values of that instance, not the defaults of its module
+    /// type (mununu#1248). Instances whose models are the same share one
+    /// BTOR2. The files feed the R.2 KMTS lifter; the top-module netlist
     /// drives composition (see docs/design/native-sv-abstraction.md
     /// §3 + §4).
     ///
-    /// Output: writes `<output-dir>/<module>.btor2` per submodule.
-    /// Defaults to writing into the same directory as the input file
-    /// when --output-dir is omitted. Also prints the per-submodule
-    /// state-count / property-count summary to stdout.
+    /// Output: writes `<output-dir>/<module>.btor2` when every instance of
+    /// a module type is the same model, and one
+    /// `<output-dir>/<module>$<instance path>.btor2` per distinct model
+    /// when the instances of a type differ (named after the first instance
+    /// of each). Defaults to writing into the same directory as the input
+    /// file when --output-dir is omitted. Also prints, per model, the
+    /// state-count / property-count summary and the instances it is the
+    /// model of.
     ///
-    /// SCOPE: this runs one full Yosys elaboration PER submodule (re-reading
-    /// the whole source set each time) and is built for SMALL multi-module
-    /// fixtures. A large real-RTL design can exhaust time or memory; each
-    /// per-module Yosys call is capped at 60s and fails with an actionable
-    /// error rather than hanging. For a large design, use the whole-design
-    /// path (`sv verify-auto`, or a single `write_btor`).
+    /// SCOPE: this runs one full Yosys elaboration PER INSTANCE below the
+    /// top (re-reading the whole source set each time) and is built for
+    /// SMALL multi-module fixtures. A large real-RTL design can exhaust
+    /// time or memory; each Yosys call is capped at 60s and fails with an
+    /// actionable error rather than hanging. For a large design, use the
+    /// whole-design path (`sv verify-auto`, or a single `write_btor`).
     EmitBtor2PerModule(SvEmitBtor2PerModuleArgs),
     /// Validate a `.mununu.json` sidecar (sidecar-audit C0.2).
     ///
@@ -8203,6 +8209,12 @@ fn sv_emit_btor2_per_module(args: SvEmitBtor2PerModuleArgs) -> Result<(), String
             per_module.output.source_info.state_count,
             per_module.output.source_info.property_count,
         );
+        // mununu#1248 — a model is the elaboration of the instances it lists; a module type
+        // whose instances differ has one model per elaboration.
+        let instances = per_module.instance_paths();
+        if !instances.is_empty() {
+            println!("    instances: {}", instances.join(", "));
+        }
     }
     Ok(())
 }

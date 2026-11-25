@@ -161,8 +161,8 @@ pub struct SourceSection {
     /// `"c-codesign"` (firmware C via `codesign::c_extract_llvm`),
     /// `"sv-yosys"` / `"yosys"` (SystemVerilog via sv2v→Yosys→BTOR2 —
     /// the sole SV route since S.2b; `multi_module = true` asks for the
-    /// per-module composition, which is refused until mununu#1248 and
-    /// mununu#1249 are fixed), `"ctxdsl"` (raw
+    /// per-module composition, which is refused until mununu#1249 is
+    /// fixed), `"ctxdsl"` (raw
     /// hand-authored automaton), `"xstate"`, `"crewai"` (CrewAI
     /// agentic JSON), `"langgraph"` (LangGraph StateGraph JSON),
     /// `"microcode"` (restricted JSON microcode form — plan Part 5.5),
@@ -426,7 +426,7 @@ pub enum ConfigIssue {
     },
     /// `[[sources]]` entry sets an `options` value the tool refuses until a defect behind it is
     /// fixed: the run would go through, and its verdicts would be about a model that is not
-    /// the design's. `multi_module = true` on an `sv-yosys` source (mununu#1248, mununu#1249).
+    /// the design's. `multi_module = true` on an `sv-yosys` source (mununu#1249).
     SourceOptionRefused {
         source_id: String,
         /// The option as the project file writes it, value included.
@@ -707,13 +707,14 @@ pub(crate) fn asks_for_per_module_composition(options: &BTreeMap<String, toml::V
         .unwrap_or(false)
 }
 
-/// What a per-module composition would get wrong (mununu#1248, mununu#1249), in the words of
-/// [`ConfigIssue::SourceOptionRefused`].
-const PER_MODULE_COMPOSITION_WHY: &str = "the per-module composition builds each module with its \
-     default parameter values, not the values the design instantiates it with (mununu#1248), and \
-     leaves the top module's own logic out of the model (mununu#1249), so a verdict on that model \
-     is not a verdict on the design; both are mununu defects, not something to change in the \
-     design, and the option comes back when they are fixed";
+/// What a per-module composition would get wrong (mununu#1249), in the words of
+/// [`ConfigIssue::SourceOptionRefused`]. The option was first refused for mununu#1248 as well
+/// (each module lifted at its default parameter values); that one is fixed, and a message
+/// names only what is open.
+const PER_MODULE_COMPOSITION_WHY: &str = "the per-module composition leaves the top module's own \
+     logic out of the model (mununu#1249), so a verdict on that model is not a verdict on the \
+     design; that is a mununu defect, not something to change in the design, and the option \
+     comes back when it is fixed";
 
 /// What the project file can say instead of `multi_module = true`.
 const PER_MODULE_COMPOSITION_INSTEAD: &str = "Remove the key or set `multi_module = false`: the \
@@ -860,7 +861,7 @@ impl VerifyConfig {
                     hint: "the SystemVerilog lift runs yosys-slang's `read_slang` only; remove the key",
                 });
             }
-            // mununu#1248, mununu#1249 — the per-module composition answers on a model that is
+            // mununu#1249 — the per-module composition answers on a model that is
             // not the design's. Refused here, before any file is read or lifted, on every entry
             // that validates (verify and the alphabet inspection, command line and HTTP).
             // SOUNDNESS: a refusal gives no verdict; nothing is approximated.
@@ -1195,9 +1196,9 @@ members = ["light", "ghost"]
         VerifyConfig::from_toml(&toml_src).expect("the project parses")
     }
 
-    /// mununu#1248, mununu#1249 — the per-module composition is refused where it would run, and
-    /// only there. What varies is what the project file says: the adapter, and the value of
-    /// `multi_module`. The dispatcher reads the option with the function the refusal reads it
+    /// mununu#1249 (and mununu#1248 until its fix) — the per-module composition is refused where
+    /// it would run, and only there. What varies is what the project file says: the adapter, and
+    /// the value of `multi_module`. The dispatcher reads the option with the function the refusal reads it
     /// with (`asks_for_per_module_composition`), under the adapter the refusal names
     /// (`PER_MODULE_COMPOSITION_ADAPTER`), so "refused" below is "would have been composed
     /// per module".
@@ -1236,7 +1237,7 @@ members = ["light", "ghost"]
         }
     }
 
-    /// The refusal names the source, the option as the project file writes it, both issues,
+    /// The refusal names the source, the option as the project file writes it, the open issue,
     /// and a value of the same key the project file can set instead.
     #[test]
     fn x1248_the_refusal_names_the_source_the_option_and_a_key_the_file_can_set() {
@@ -1253,9 +1254,9 @@ members = ["light", "ghost"]
         };
         assert_eq!(source_id, "system");
         assert_eq!(*option, "multi_module = true");
-        for issue in ["mununu#1248", "mununu#1249"] {
-            assert!(why.contains(issue), "{why}");
-        }
+        assert!(why.contains("mununu#1249"), "{why}");
+        // mununu#1248 is fixed: a refusal that named it would send the reader to a closed issue.
+        assert!(!why.contains("mununu#1248"), "{why}");
         assert!(instead.contains("multi_module = false"), "{instead}");
         let shown = issues[0].to_string();
         for part in ["system", *option, *why, *instead] {

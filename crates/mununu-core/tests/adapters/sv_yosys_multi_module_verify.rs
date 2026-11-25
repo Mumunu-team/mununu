@@ -1,8 +1,9 @@
-//! mununu#1248, mununu#1249 — an `sv-yosys` source with `multi_module = true` is refused by
+//! mununu#1249 — an `sv-yosys` source with `multi_module = true` is refused by
 //! every entry of the verify framework, before anything is read or lifted.
 //!
-//! The per-module composition lifts each module at its default parameter values and leaves the
-//! top module's own logic out, so its verdicts are not about the design. Until both are fixed
+//! The per-module composition leaves the top module's own logic out, so its verdicts are not
+//! about the design. (It also lifted each module at its default parameter values, mununu#1248;
+//! that is fixed, and `sv_per_instance_lift.rs` holds its tests.) Until mununu#1249 is fixed
 //! the option is refused by the project validation, which `verify_project` (the `verify`
 //! command and the HTTP route) and `inspect_project` (`verify --print-alphabet`) both start
 //! with. This file used to run the composition end to end and read its verdicts; that test
