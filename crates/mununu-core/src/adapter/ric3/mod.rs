@@ -143,14 +143,11 @@ fn run_ric3_args(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(McVerdict, String), AdapterError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
     // rIC3 reads a FILE and picks the format from the suffix: `.btor2`.
     let mut tmp_path = std::env::temp_dir();
     tmp_path.push(format!(
-        "mununu-ric3-{}-{}.btor2",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
+        "{}.btor2",
+        crate::adapter::per_call_name("mununu-ric3")
     ));
     std::fs::write(&tmp_path, btor2).map_err(|e| {
         err(format!(

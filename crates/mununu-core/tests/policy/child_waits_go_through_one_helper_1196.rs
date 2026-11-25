@@ -130,7 +130,7 @@ const TEST_ONLY: &[(&str, &str, usize, &str)] = &[(
 
 /// The product code of every source file of the workspace's crates, as `(path under crates/,
 /// code)`.
-fn shipped_sources() -> Vec<(String, String)> {
+pub(crate) fn shipped_sources() -> Vec<(String, String)> {
     let crates = repo_root().join("crates");
     ["mununu-core", "mununu-cli", "mununu-extract"]
         .iter()

@@ -135,12 +135,13 @@ pub(crate) fn exact_symbolic_with_exe(
     }
 
     // The BTOR2 goes through a file rather than argv or stdin: it can be megabytes, and a file is
-    // also what a consumer can keep for a reproducer if the child dies.
-    let dir = std::env::temp_dir().join(format!("mununu-isolate-{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return Isolated::Unavailable(format!("cannot create {}: {e}", dir.display()));
-    }
-    let model = dir.join("model.btor2");
+    // also what a consumer can keep for a reproducer if the child dies. The file is this call's
+    // own (mununu#1221): with one path per process, two evaluations at once wrote the same
+    // file, and a child could evaluate its formula on the other evaluation's model.
+    let model = std::env::temp_dir().join(format!(
+        "{}.btor2",
+        crate::adapter::per_call_name("mununu-isolate")
+    ));
     match std::fs::File::create(&model).and_then(|mut f| f.write_all(btor2.as_bytes())) {
         Ok(()) => {}
         Err(e) => return Isolated::Unavailable(format!("cannot write the model: {e}")),
@@ -313,6 +314,9 @@ mod tests {
         Says(&'static str),
         /// Writes one line on stderr and exits with this code.
         Exits { code: i32, stderr: &'static str },
+        /// Waits 300 ms, then abstains with the first line of the model file it was handed as
+        /// its reason: what the child read is what the test reads back.
+        AbstainsWithItsModelsFirstLine,
     }
 
     /// The bound a test puts on a stop: far from both the 300 ms a stop takes and the 30 s the
@@ -329,6 +333,10 @@ mod tests {
             StandIn::Hangs => "exec sleep 30".to_string(),
             StandIn::Says(line) => format!("echo '{line}'"),
             StandIn::Exits { code, stderr } => format!("echo '{stderr}' >&2\nexit {code}"),
+            // `$3` is the model: the child is run as `<verb> --btor2 <model> --formula <f>`.
+            StandIn::AbstainsWithItsModelsFirstLine => {
+                "sleep 0.3\necho \"VERDICT abstained $(head -n 1 \"$3\")\"".to_string()
+            }
         };
         let fake = dir.join("engine-child");
         std::fs::write(
@@ -349,6 +357,11 @@ mod tests {
             StandIn::Exits { code, stderr } => {
                 format!("[Console]::Error.WriteLine('{stderr}')\r\nexit {code}\r\n")
             }
+            StandIn::AbstainsWithItsModelsFirstLine => "Start-Sleep -Milliseconds 300\r\n\
+                 $model = $args | Where-Object { $_ -like '*.btor2' } | Select-Object -First 1\r\n\
+                 $line = Get-Content -LiteralPath $model -TotalCount 1\r\n\
+                 [Console]::Out.WriteLine(\"VERDICT abstained $line\")\r\nexit 0\r\n"
+                .to_string(),
         };
         let ps = dir.join("engine-child.ps1");
         std::fs::write(&ps, body).expect("write the stand-in");
@@ -366,17 +379,45 @@ mod tests {
 
     const MODEL: &str = "1 sort bitvec 1\n";
 
-    /// The four tests below run one at a time. The parent hands the child its model through one
-    /// file per PROCESS (mununu#1221, open), so two of them at once write and remove the same
-    /// path — and on Windows a file whose removal is pending refuses the next write, which
-    /// would read here as "could not run the child". The guard goes with that issue's fix.
-    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-        // A test that failed while holding the lock has said so itself; the next still runs.
-        ONE_AT_A_TIME
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// REPRODUCER (mununu#1221) — evaluations at once each hand their child their own model.
+    /// The stand-in answers with the first line of the model file it was given, read after
+    /// every evaluation here has written its own. Fails on the parent, where the model's path
+    /// was one per process: the children read the model written last, or none once the first
+    /// evaluation to finish had removed the file.
+    #[test]
+    fn x1221_two_isolated_evaluations_at_once_each_get_their_own_model() {
+        const AT_ONCE: usize = 4;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = stand_in(dir.path(), StandIn::AbstainsWithItsModelsFirstLine);
+        let start = std::sync::Barrier::new(AT_ONCE);
+        let got: Vec<(String, Isolated)> = std::thread::scope(|s| {
+            let evaluations: Vec<_> = (0..AT_ONCE)
+                .map(|i| {
+                    let (child, start) = (&child, &start);
+                    s.spawn(move || {
+                        let first_line = format!("{} sort bitvec 1", i + 1);
+                        start.wait();
+                        let got =
+                            exact_symbolic_with_exe(child, &format!("{first_line}\n"), "true");
+                        (first_line, got)
+                    })
+                })
+                .collect();
+            evaluations
+                .into_iter()
+                .map(|e| e.join().expect("the evaluation's thread"))
+                .collect()
+        });
+        for (own, got) in &got {
+            match got {
+                Isolated::Abstained(read) => assert_eq!(
+                    read, own,
+                    "left, the first line of the model the child read; right, of the model \
+                     this evaluation handed it"
+                ),
+                other => panic!("the child of the evaluation of `{own}` answers, got {other:?}"),
+            }
+        }
     }
 
     /// REPRODUCER (mununu#1196) — an isolated child that is still running when the property's
@@ -385,7 +426,6 @@ mod tests {
     /// did, 30 s later, whatever the budget.
     #[test]
     fn x1196_an_isolated_child_past_the_property_s_budget_is_ended_and_reported_as_a_stop() {
-        let _one = one_at_a_time();
         use crate::adapter::run_budget::{Budget, enter};
         let dir = tempfile::tempdir().expect("tempdir");
         let child = stand_in(dir.path(), StandIn::Hangs);
@@ -411,7 +451,6 @@ mod tests {
     /// timeout cancels its budget). The child is killed then, with no deadline involved.
     #[test]
     fn x1196_a_cancelled_run_ends_the_isolated_child() {
-        let _one = one_at_a_time();
         use crate::adapter::run_budget::{Budget, enter};
         let dir = tempfile::tempdir().expect("tempdir");
         let child = stand_in(dir.path(), StandIn::Hangs);
@@ -436,7 +475,6 @@ mod tests {
     /// handed in does not exist, and the answer is still the stop, not "could not run".
     #[test]
     fn x1196_a_spent_budget_or_a_cancelled_run_starts_no_child() {
-        let _one = one_at_a_time();
         use crate::adapter::run_budget::{Budget, enter};
         let dir = tempfile::tempdir().expect("tempdir");
         let nothing = dir.path().join("no-such-engine-child");
@@ -471,7 +509,6 @@ mod tests {
     /// the shared helper — on every OS, which the shell stubs above this block do not reach.
     #[test]
     fn x1196_a_child_that_answers_inside_its_budget_is_read_as_it_answered() {
-        let _one = one_at_a_time();
         use crate::adapter::run_budget::{Budget, enter};
         /// Whether a reply was read as the stand-in's row says.
         type Reading = fn(&Isolated) -> bool;

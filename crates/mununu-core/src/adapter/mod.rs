@@ -1624,6 +1624,27 @@ pub(crate) fn staging_root() -> std::io::Result<std::path::PathBuf> {
     }
 }
 
+/// mununu#1221 — the name of a file or directory ONE CALL makes for itself in a directory other
+/// calls use too (the system temporary directory, the staging root, the lift cache):
+/// `<tag>-<pid>-<n>-<nanos>`.
+///
+/// `<n>` comes from one counter of the process, so two calls at once (two requests of one
+/// server, two properties of one run) never get the same name. The process id keeps two
+/// processes apart, and the clock's nanoseconds keep a name from matching what an earlier
+/// process with the same id left behind. Every name of this kind is made here: a name made
+/// from the process id alone is one file for every call of the process, and the isolated
+/// engine child read another evaluation's model that way.
+pub(crate) fn per_call_name(tag: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("{tag}-{}-{n}-{nanos}", std::process::id())
+}
+
 /// A source a caller NAMED, staged under `dir`: `dir/<name>`, or a refusal when the name would
 /// leave `dir`.
 ///
@@ -1690,6 +1711,52 @@ pub(crate) fn no_verdict_line(
         "`{}` exited with status {status} and no verdict: {reason}",
         tool.display()
     )
+}
+
+#[cfg(test)]
+mod per_call_name_tests {
+    use super::per_call_name;
+
+    /// mununu#1221 — names asked for at once, from several threads, are all different, and each
+    /// starts with its tag. On the parent the isolated engine child's model was named by the
+    /// process id alone, so every call of the process got the same name.
+    #[test]
+    fn x1221_names_asked_for_at_once_are_all_different() {
+        const THREADS: usize = 8;
+        const EACH: usize = 200;
+        let start = std::sync::Barrier::new(THREADS);
+        let names: Vec<String> = std::thread::scope(|s| {
+            let askers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let start = &start;
+                    s.spawn(move || {
+                        start.wait();
+                        (0..EACH)
+                            .map(|_| per_call_name("mununu-x"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            askers
+                .into_iter()
+                .flat_map(|a| a.join().expect("the asking thread"))
+                .collect()
+        });
+        assert_eq!(names.len(), THREADS * EACH);
+        let different: std::collections::BTreeSet<&String> = names.iter().collect();
+        assert_eq!(different.len(), names.len(), "two calls got one name");
+        let pid = std::process::id().to_string();
+        for name in &names {
+            let rest = name
+                .strip_prefix("mununu-x-")
+                .unwrap_or_else(|| panic!("`{name}` starts with its tag"));
+            assert_eq!(
+                rest.split('-').next(),
+                Some(pid.as_str()),
+                "`{name}` carries the process id after the tag"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

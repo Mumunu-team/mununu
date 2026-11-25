@@ -4425,26 +4425,14 @@ struct TempDir {
 
 impl TempDir {
     fn new(prefix: &str) -> Result<Self, AdapterError> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        // Per-call uniqueness: pid + monotonic process counter + nanos
-        // + thread id. Two parallel tests in the same process must not
-        // collide on the same tempdir path.
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let pid = std::process::id();
-        let tid = format!("{:?}", std::thread::current().id());
-        let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
+        // One directory per call (`per_call_name`): two lifts at once in one process must not
+        // stage into the same directory.
         // mununu#1138 — `MUNUNU_LIFT_STAGING_ROOT` moves the staging off the system temp dir
         // (a small or `noexec` `/tmp`); the default is the system's. Absolute, whatever the
         // variable or `TMPDIR` said: yosys runs inside the staging directory and its `-l` log
         // and the outputs are named by their absolute paths.
         let mut base = crate::adapter::staging_root().map_err(io_err)?;
-        base.push(format!("{prefix}-{pid}-{tid_digits}-{seq}-{nanos}"));
+        base.push(crate::adapter::per_call_name(prefix));
         std::fs::create_dir_all(&base).map_err(io_err)?;
         Ok(TempDir {
             path: base,

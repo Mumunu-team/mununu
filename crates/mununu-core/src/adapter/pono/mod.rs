@@ -125,16 +125,13 @@ pub fn run_pono_cancellable(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    // Pono reads a file (not stdin). Write to a uniquely-named temp file — the
+    // Pono reads a file (not stdin). Write to a temp file named for this call — the
     // codebase's `std::env::temp_dir` convention (as in the verilator wrapper),
     // not the dev-only `tempfile` crate. Best-effort cleanup regardless of outcome.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut tmp_path = std::env::temp_dir();
     tmp_path.push(format!(
-        "mununu-pono-{}-{}.btor2",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
+        "{}.btor2",
+        crate::adapter::per_call_name("mununu-pono")
     ));
     std::fs::write(&tmp_path, btor2).map_err(|e| {
         err(format!(

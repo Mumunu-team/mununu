@@ -20,6 +20,7 @@ mod no_source_indentation_in_messages_1209;
 mod one_yosys_minimum_version_1121;
 mod remedies_name_real_flags_1106;
 mod remedies_on_the_verb_1121;
+mod scratch_names_are_per_call_1221;
 mod server_paths_resolve_through_one_function;
 mod source_built_tools_are_pinned_1242;
 mod source_scan;
